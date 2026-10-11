@@ -7472,7 +7472,13 @@
             isModelDownloaded(repoId) {
                 if (!repoId) return false;
                 const wanted = repoId.toLowerCase();
-                return this.hfModels.some(m => m.repo_id?.toLowerCase() === wanted);
+                const matches = item => item.repo_id?.toLowerCase() === wanted;
+                // A cancelled or failed download keeps its finished files for resume.
+                const unfinished = [this.hfTasks, this.msTasks].some(tasks => {
+                    const latest = tasks.findLast(matches);
+                    return latest && latest.status !== 'completed';
+                });
+                return !unfinished && this.hfModels.some(matches);
             },
 
             getMemoryFitStatus(sizeBytes) {

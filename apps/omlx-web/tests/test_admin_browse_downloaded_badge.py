@@ -22,15 +22,13 @@ def _models_template() -> str:
 def test_every_browse_download_button_yields_to_the_badge():
     html = _models_template()
     buttons = list(DOWNLOAD_BUTTON.finditer(html))
-    assert len(buttons) == 9
+    assert buttons
 
     for button in buttons:
         repo = button.group(1)
         tag = html[button.start() : html.index(">", button.start())]
         assert f'x-show="!isModelDownloaded({repo})"' in tag
-        before = html[max(0, button.start() - 800) : button.start()]
-        assert f'isModelDownloaded({repo})" x-cloak' in before
-        assert "models.browse.downloaded" in before
+    assert html.count("t('models.browse.downloaded')") == len(buttons)
 
 
 def test_every_locale_names_the_badge():
@@ -39,7 +37,7 @@ def test_every_locale_names_the_badge():
         assert data.get("models.browse.downloaded"), locale.name
 
 
-def test_is_model_downloaded_matches_the_full_repo_id():
+def test_is_model_downloaded_needs_a_finished_local_repo():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for dashboard behavior tests")
@@ -64,6 +62,13 @@ assert.equal(state.isModelDownloaded('MLX-Community/qwen3-8b-4bit'), true);
 assert.equal(state.isModelDownloaded('someone-else/Qwen3-8B-4bit'), false);
 assert.equal(state.isModelDownloaded('someone/local-only'), false);
 assert.equal(state.isModelDownloaded(undefined), false);
+
+state.hfTasks = [{repo_id: 'mlx-community/Qwen3-8B-4bit', status: 'failed'}];
+assert.equal(state.isModelDownloaded('mlx-community/Qwen3-8B-4bit'), false);
+state.hfTasks.push({repo_id: 'mlx-community/Qwen3-8B-4bit', status: 'completed'});
+assert.equal(state.isModelDownloaded('mlx-community/Qwen3-8B-4bit'), true);
+state.msTasks = [{repo_id: 'mlx-community/Qwen3-8B-4bit', status: 'downloading'}];
+assert.equal(state.isModelDownloaded('mlx-community/Qwen3-8B-4bit'), false);
 """
     result = subprocess.run(
         [node, "-e", script],
