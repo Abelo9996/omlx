@@ -7980,10 +7980,7 @@ class OQImatrixCollector:
     def __init__(self):
         self.entries: dict[str, OQImatrixEntry] = {}
         self._original_modules: dict[str, Any] = {}
-        # Streaming installs on bare decoder blocks, so entry names carry a
-        # ``name_prefix`` while ``_original_modules`` stays keyed by the bare
-        # module path (restore() needs those). Hooks that look a module up by
-        # its full entry name (GLM-5.3 embed_q) therefore need this second map.
+        # Same modules keyed by entry name (with name_prefix) for hook lookups.
         self._prefixed_modules: dict[str, Any] = {}
         self._saved_attributes: list[tuple[Any, str, Any]] = []
         self.capture_module_classes: dict[str, int] = {}
@@ -8131,11 +8128,7 @@ class OQImatrixCollector:
         forcing calibration past the production indexer's short-prefix bypass.
         """
         embed_name = q_b_name[: -len("q_b_proj")] + "embed_q"
-        module = self._original_modules.get(embed_name)
-        if module is None:
-            # Streaming collector: the bare registry is keyed by the block
-            # path, the entry name by the prefixed one.
-            module = self._prefixed_modules.get(embed_name)
+        module = self._prefixed_modules.get(embed_name)
         if module is None or type(module).__name__ not in _OQE_MULTI_LINEAR_CLASSES:
             return
         try:
@@ -8252,6 +8245,15 @@ def _collect_glm5_next_lm_head_imatrix(model, hidden, collector) -> bool:
     )
 
 
+def _run_glm5_next_mtp_blocks(blocks, hidden, embed, input_ids) -> None:
+    """Run GLM-5.3 MTP blocks on the hc-collapsed trunk hidden, without lm_head."""
+    h = hidden.mean(axis=2)[:, :-1, :]
+    mask = create_attention_mask(h, None, return_array=True)
+    for block in blocks:
+        h = block(h, embed, input_ids, mask, None)
+    mx.eval(h)
+
+
 def _collect_k2_horizon_lm_head_imatrix(model, hidden, collector) -> bool:
     if str(getattr(model, "model_type", "")) != "k2_horizon":
         return False
@@ -8307,6 +8309,11 @@ def _collect_mtp_head_imatrix(
                 mx.eval(*out)
             else:
                 mx.eval(out)
+            return True
+        if str(getattr(model, "model_type", "")) == "glm5_next":
+            _run_glm5_next_mtp_blocks(
+                mtp, hidden, inner.model.embed_tokens, batch[:, 1:]
+            )
             return True
         if isinstance(mtp, (list, tuple)):
             # DeepSeek-V4 style: MTPBlock stack consuming the raw (4D)
@@ -8683,13 +8690,6 @@ _STREAM_EMBED_KEY = "language_model.model.embed_tokens.weight"
 # keeps the RAM-safe proxy calibration path: the auto rule never streams them,
 # and an explicit stream_calibration request for one fails fast (see
 # _resolve_stream_calibration). Keep this in lockstep with the sourcer above.
-#
-# glm5_next reuses the shared prefix/embed constants: the vendored GLM-5.3
-# sanitize emits ``language_model.model.layers.<i>.*`` and
-# ``language_model.model.embed_tokens.weight`` for the trunk, exactly like the
-# other two layouts. Its blocks are hc-tiled 4-D with a per-layer mask schedule
-# (linear-attention layers run maskless, sparse layers take the causal mask),
-# which the state builders below mirror from the resident calibration path.
 _STREAM_CALIBRATION_SUPPORTED_MODEL_TYPES = frozenset(
     {"minimax_m3_vl", "qwen4_exp", "glm5_next"}
 )
@@ -8714,14 +8714,6 @@ def _streamed_text_args(model_path, config, *, trust_remote_code: bool = False):
 
         layer_cls = Qwen4ExpDecoderLayer
     elif _stream_source_model_type(config) == "glm5_next":
-        # maybe_apply_pre_load_patches normally installs the vendor tree
-        # already; the explicit call keeps the import below valid when this
-        # helper runs before any pre-load dispatch (idempotent either way).
-        from omlx.patches.mlx_vlm_glm5_next_compat import (
-            apply_mlx_vlm_glm5_next_compat_patch,
-        )
-
-        apply_mlx_vlm_glm5_next_compat_patch()
         from mlx_vlm.models.glm5_next.config import TextConfig
         from mlx_vlm.models.glm5_next.language import Glm5NextDecoderLayer
 
@@ -8834,7 +8826,6 @@ def _iter_streamed_layer_blocks(
     next layer so at most one layer's weights are ever resident here.
     """
     is_qwen4_exp = _stream_source_model_type(config) == "qwen4_exp"
-    is_glm5_next = _stream_source_model_type(config) == "glm5_next"
     args, layer_cls = _streamed_text_args(
         source, config, trust_remote_code=trust_remote_code
     )
@@ -8861,15 +8852,11 @@ def _iter_streamed_layer_blocks(
         mode = _load_streamed_block_weights(block, items, layer_idx)
         del items
         mx.eval(block.parameters())
-        mlp_cls = type(getattr(block, "mlp", None)).__name__
         is_moe = bool(
             getattr(
                 block,
                 "is_moe_layer",
-                "SparseMoeBlock" in mlp_cls
-                # GLM-5.3 names its expert block Glm5NextMoE; dense layers use
-                # Glm5NextMLP, so the class name is the reliable discriminator.
-                or (is_glm5_next and mlp_cls == "Glm5NextMoE"),
+                "SparseMoeBlock" in type(getattr(block, "mlp", None)).__name__,
             )
         )
         logger.debug(
@@ -9043,16 +9030,7 @@ class _StreamingNoModel:
 
 
 def _streamed_glm5_next_state(config: dict, embedded):
-    """hc-tile a GLM-5.3 boundary and return the sparse-attention mask.
-
-    Mirrors the resident glm5_next branch of _prepare_layer_inputs: the text
-    model tiles the hidden to ``(B, S, hc_mult, D)`` once and only the sparse-
-    attention layers take a mask (``DecoderLayer.is_linear`` is False there).
-    The mask is built from the un-tiled 3-D boundary, exactly as
-    ``Glm5NextModel.__call__`` does, so mask and boundary shapes match the
-    resident calibration walk. Mask selection per layer stays with the caller,
-    which owns the constructed block.
-    """
+    """Streamed counterpart of the glm5_next branch of _prepare_layer_inputs."""
     text_config = config.get("text_config") or {}
     hc_mult = int(text_config.get("hc_mult") or config.get("hc_mult") or 0)
     if hc_mult <= 0:
@@ -9150,13 +9128,7 @@ def _streamed_sensitivity_layer(
     """
     layer_masks = state.get("layer_masks")
     if state.get("block_driven_attention_mask"):
-        # GLM-5.3 picks the mask per layer: linear-attention layers run
-        # maskless, sparse-attention layers take the causal mask. The
-        # constructed block is the source of truth here, matching the resident
-        # path's layer.is_linear test.
-        layer_mask = (
-            None if bool(getattr(block, "is_linear", False)) else state["mask"]
-        )
+        layer_mask = None if bool(getattr(block, "is_linear", False)) else state["mask"]
     elif layer_masks is not None:
         layer_mask = layer_masks[layer_idx]
     else:
@@ -9231,14 +9203,7 @@ def _collect_streamed_qwen4_mtp(source, config, collector, calib_data, working, 
 
 
 def _collect_streamed_glm5_next_lm_head(source, config, collector, working) -> int:
-    """Capture lm_head activation energy from the streamed trunk boundary.
-
-    ``_collect_untied_lm_head_imatrix`` does this for a resident model by
-    reading ``core.norm`` and the installed ``language_model.lm_head`` module.
-    Streaming holds neither, so both are built from the checkpoint plan and the
-    same normalized boundary is measured (hc streams collapsed, like the
-    resident hook).
-    """
+    """Streamed counterpart of _collect_untied_lm_head_imatrix."""
     plan = _streamed_source_plan(source, config)
     norm_key = "language_model.model.norm.weight"
     head_key = "language_model.lm_head.weight"
@@ -9267,85 +9232,36 @@ def _collect_streamed_glm5_next_lm_head(source, config, collector, working) -> i
 def _collect_streamed_glm5_next_mtp(
     source, config, collector, calib_data, working, ranges
 ) -> int:
-    """Calibrate the preserved nextn head after the trunk blocks are released.
+    """Streamed counterpart of the glm5_next branch of _collect_mtp_head_imatrix."""
+    from mlx_vlm.models.glm5_next import language as g5_lang
+    from mlx_vlm.models.glm5_next.config import TextConfig
 
-    GLM-5.3-Flash keeps its single MTP head as an extra decoder layer at
-    ``model.language_model.layers.<num_hidden_layers>.*``; the oMLX glm5_next
-    runtime rebinds it as ``mtp.<i>.block.*`` with enorm/hnorm/eh_proj/norm
-    fused onto the block (see
-    ``omlx.patches.mlx_vlm_mtp.glm5_next_vlm_runtime``). Streaming builds the
-    same ``Glm5NextMTPBlock`` the serving path builds, loads the plan's ``mtp.*``
-    tensors into it and runs it once over the trunk boundary the sweep already
-    produced — so the head lands in the imatrix with real activations instead of
-    staying uncalibrated. Without this the collector would report no ``.mtp.``
-    entries and the head would fall back to "missing" quantization.
+    from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
 
-    ``working`` holds the 4-D ``(B, S, hc_mult, D)`` output of the last text
-    layer per micro-batch. The serving path collapses the hc streams
-    (``mean(axis=2)``) before the head sees the hidden, and pairs each hidden
-    row with the *next* token id, which the shifted calibration slice mirrors.
-    """
-    import mlx_vlm.models.glm5_next.language as g5_lang
-    from mlx_vlm.models.glm5_next import config as g5_config
-    from omlx.patches.mlx_vlm_mtp.glm5_next_vlm_runtime import (
-        _patch_text_config,
-        _register_mtp_classes,
-    )
-
-    _patch_text_config(g5_config)
-    _register_mtp_classes(g5_lang)
-
+    glm5_next_vlm_runtime.apply()
+    prefix = "language_model.mtp.0."
     plan = _streamed_source_plan(source, config, preserve_mtp=True)
-    prefix = None
-    for key in plan:
-        marker = ".mtp.0."
-        if marker in key:
-            prefix = key[: key.index(marker) + len(marker)]
-            break
-    if prefix is None:
-        raise RuntimeError(
-            "glm5_next MTP calibration: the sanitize plan exposes no mtp.0.* "
-            "tensors; refusing to calibrate the head from an empty plan"
-        )
-
-    text_config = g5_config.TextConfig.from_dict(config["text_config"])
-    head = g5_lang.Glm5NextMTPBlock(text_config)
+    head = g5_lang.Glm5NextMTPBlock(TextConfig.from_dict(config["text_config"]))
     head.eval()
-    items = [
-        (key[len(prefix) :], plan.pop(key))
-        for key in list(plan)
-        if key.startswith(prefix)
-    ]
-    try:
-        head.load_weights(items, strict=True)
-    except ValueError as exc:
-        expected = dict(tree_flatten(head.parameters()))
-        got = dict(items)
-        missing = sorted(set(expected) - set(got))
-        extra = sorted(set(got) - set(expected))
-        raise RuntimeError(
-            "glm5_next MTP calibration: checkpoint keys do not cover the head "
-            f"block (missing={missing[:6]}, extra={extra[:6]})"
-        ) from exc
-    del items
+    head.load_weights(
+        [
+            (key[len(prefix) :], plan.pop(key))
+            for key in list(plan)
+            if key.startswith(prefix)
+        ],
+        strict=True,
+    )
     embed_weight = plan.pop(_STREAM_EMBED_KEY)
     embed = nn.Embedding(*embed_weight.shape)
     embed.weight = embed_weight
     del embed_weight
     mx.eval(head.parameters(), embed.parameters())
-
-    prefix_name = prefix[: -len("mtp.0.")] + "mtp.0."
-    installed = collector.install(head, name_prefix=prefix_name)
+    installed = collector.install(head, name_prefix=prefix)
     try:
         for hidden, (lo, hi) in zip(working, ranges):
-            h = hidden.mean(axis=2)[:, :-1, :]
-            mask = create_attention_mask(h, None, return_array=True)
-            out = head(h, embed, calib_data[lo:hi, 1:], mask, None)
-            mx.eval(out)
+            _run_glm5_next_mtp_blocks([head], hidden, embed, calib_data[lo:hi, 1:])
     finally:
         collector.restore(head)
-    del head, embed
-    mx.clear_cache()
     return installed
 
 
@@ -9490,9 +9406,6 @@ def _collect_imatrix_streaming(
         mask = None
         position_ids = None
     elif is_glm5_next:
-        # Same hc-tiling the resident glm5_next branch of _prepare_layer_inputs
-        # applies, plus the sparse-attention causal mask. Linear-attention
-        # layers run maskless, which the layer loop below decides per block.
         embedded, glm5_attention_mask = _streamed_glm5_next_state(config, embedded)
         mx.eval(embedded)
         mask = glm5_attention_mask
@@ -9573,11 +9486,7 @@ def _collect_imatrix_streaming(
             if is_qwen4_exp:
                 layer_mask = q4_layer_masks[layer_idx]
             elif is_glm5_next:
-                # Linear-attention layers run maskless; sparse-attention layers
-                # take the causal mask built at stage 0.
-                layer_mask = (
-                    None if bool(getattr(block, "is_linear", False)) else mask
-                )
+                layer_mask = None if bool(getattr(block, "is_linear", False)) else mask
             else:
                 layer_mask = mask
             try:
@@ -9660,9 +9569,6 @@ def _collect_imatrix_streaming(
             )
 
         if is_glm5_next:
-            # The trunk walk never invokes the shared lm_head; the resident
-            # collector calibrates it in its own pass over the normalized
-            # boundary. Same statistic, sourced from the plan's tensors.
             head_entries = _collect_streamed_glm5_next_lm_head(
                 source, config, collector, working
             )
