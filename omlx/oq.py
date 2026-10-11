@@ -1409,6 +1409,11 @@ def resolve_output_name(
 
 GEMMA4_ASSISTANT_MTP_PREFIX = "language_model.mtp."
 GEMMA4_ASSISTANT_MTP_SHARD = "model-mtp.safetensors"
+# Assistant model_type released for each Gemma 4 base model_type.
+GEMMA4_ASSISTANT_TYPES = {
+    "gemma4": "gemma4_assistant",
+    "gemma4_unified": "gemma4_unified_assistant",
+}
 MTPLX_SIDECAR_SHARD = "mtp.safetensors"
 MTPLX_RUNTIME_FILE = "mtplx_runtime.json"
 
@@ -1436,21 +1441,23 @@ _MTPLX_CONTRACT_ALLOWLIST = {
 def validate_gemma4_assistant_pair(
     base_config: dict, assistant_config: dict
 ) -> None:
-    """Validate that a gemma4_assistant checkpoint can be merged into a base.
+    """Validate that a Gemma 4 assistant checkpoint can be merged into a base.
 
     Raises ValueError with an operator-readable message on any mismatch so
     the combine option fails at task submission, not after a full
     quantization run.
     """
-    if base_config.get("model_type") != "gemma4":
+    base_type = base_config.get("model_type")
+    expected = GEMMA4_ASSISTANT_TYPES.get(base_type)
+    if expected is None:
         raise ValueError(
-            "Assistant MTP combine requires a gemma4 base model, got "
-            f"model_type={base_config.get('model_type')!r}"
+            "Assistant MTP combine requires a gemma4 base model "
+            f"(gemma4 or gemma4_unified), got model_type={base_type!r}"
         )
-    if assistant_config.get("model_type") != "gemma4_assistant":
+    if assistant_config.get("model_type") != expected:
         raise ValueError(
-            "Assistant model must have model_type 'gemma4_assistant', got "
-            f"{assistant_config.get('model_type')!r}"
+            f"Assistant model for a {base_type} base must have model_type "
+            f"{expected!r}, got {assistant_config.get('model_type')!r}"
         )
     asst_layers = int(
         (assistant_config.get("text_config") or {}).get("num_hidden_layers", 0) or 0
@@ -1474,7 +1481,7 @@ def combine_gemma4_assistant_mtp(
     output_path: Union[str, Path],
     assistant_path: Union[str, Path],
 ) -> None:
-    """Merge a gemma4_assistant checkpoint into a quantized output directory.
+    """Merge a Gemma 4 assistant checkpoint into a quantized output directory.
 
     Writes the assistant weights as one extra shard under
     ``language_model.mtp.*`` (kept at their shipped dtype, bf16), merges the
@@ -2074,7 +2081,7 @@ def combine_mtp_into_output(
     donor = Path(donor_path)
     with open(donor / "config.json") as f:
         donor_config = json.load(f)
-    if donor_config.get("model_type") == "gemma4_assistant":
+    if donor_config.get("model_type") in GEMMA4_ASSISTANT_TYPES.values():
         combine_gemma4_assistant_mtp(output_path, donor_path)
     else:
         combine_mtp_donor(output_path, donor_path)
