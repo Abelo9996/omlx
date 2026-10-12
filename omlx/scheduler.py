@@ -5253,7 +5253,14 @@ class Scheduler:
         # A prefix restored from the SSD cache may still be lazy. Load it
         # before measuring, so this check and the chunk guard see it.
         with mx.stream(self._stream):
-            mx.eval([a for c, cap in plans if cap for a in (c.keys, c.values)])
+            mx.eval(
+                [
+                    a
+                    for c, _ in plans
+                    for a in (getattr(c, "keys", None), getattr(c, "values", None))
+                    if isinstance(a, mx.array)
+                ]
+            )
         target = Scheduler._prefill_peak_target(self)
         if target > 0:
             current = self._current_usage_bytes()
