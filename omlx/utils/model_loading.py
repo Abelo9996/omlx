@@ -1356,6 +1356,30 @@ def _is_mtp_compatible(config: dict, model_type: str | None) -> bool:
     )
 
 
+def lightning_mtp_supported(model_path: str | Path) -> bool:
+    """Whether the Lightning MTP toggle accepts this checkpoint.
+
+    Same gates as the admin toggle: not paroquant, MTP heads on a supported
+    model type (Qwen4-Exp uses its own runtime), and MTP tensors in the weights.
+    """
+    try:
+        config = json.loads((Path(model_path) / "config.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    quantization = config.get("quantization_config") or {}
+    if str(quantization.get("quant_method") or "").lower() == "paroquant":
+        return False
+    model_type = config.get("model_type")
+    if model_type == "qwen4_exp":
+        if not _has_mtp_heads(config):
+            return False
+    elif not _is_mtp_compatible(config, model_type):
+        return False
+    return _checkpoint_has_mtp_weights(model_path)
+
+
 def mimo_mtp_sidecar_config(model_name: str | Path) -> dict[str, str] | None:
     """Model-config override that loads ``<model>/mtp/model_mtp.safetensors``.
 
