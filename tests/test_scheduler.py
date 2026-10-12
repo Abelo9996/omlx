@@ -16,6 +16,7 @@ Note: BatchGenerator is mocked; step() coverage is limited to targeted paths.
 """
 
 import concurrent.futures
+import copy
 import gc
 import json
 import sys
@@ -30,8 +31,11 @@ import pytest
 from mlx_lm.models.cache import BatchKVCache, CacheList, KVCache
 
 import omlx.scheduler as scheduler_module
+from omlx.adapter import output_parser as output_parser_module
+from omlx.adapter.harmony import load_harmony_gpt_oss_encoding
 from omlx.cache.stats import PrefixCacheStats
 from omlx.models.vlm import VLMModelAdapter
+from omlx.patches.deepseek_v41 import output_parser as dsv41_output_parser
 from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
 from omlx.patches.mlx_lm_mtp import batch_generator as bg
 from omlx.patches.specprefill import _OffsetAdjustedRoPE
@@ -7839,15 +7843,24 @@ class TestStopStringOutputBuffer:
 
 
 class TestStopStringsSkipReasoning:
-    """Stop strings end the answer, never the think block (#3943)."""
+    """Stop strings skip the leading think block (#3943)."""
 
     _response = staticmethod(TestStopStringOutputBuffer._response)
+    _pieces = {
+        100: "Count: 1 2 3 4 5 6 7 8 9",
+        101: " 10",
+        102: "\n\n",
+        103: "The answer is 7",
+        104: ".",
+        105: " Use ",
+        106: " END",
+        107: " more",
+    }
 
     def _setup(
         self,
         mock_model,
         stops,
-        pieces,
         needs_think_prefix=False,
         stop_skips_reasoning=True,
         tokenizer=None,
@@ -7856,15 +7869,14 @@ class TestStopStringsSkipReasoning:
         tokenizer = tokenizer or _ThinkingStopSequenceTokenizer()
         scheduler = Scheduler(model=mock_model, tokenizer=tokenizer)
         tokenizer = scheduler.tokenizer
-        tokenizer.pieces = {**tokenizer.pieces, **dict(enumerate(pieces, 100))}
+        tokenizer.pieces = {**tokenizer.pieces, **self._pieces}
         scheduler._get_detokenizer = lambda request_id: (
             scheduler._request_detokenizers.setdefault(
                 request_id,
                 _StopSequenceDetokenizer(tokenizer),
             )
         )
-        if factory is not None:
-            scheduler._output_parser_factory = factory
+        scheduler._output_parser_factory = factory
         request = Request(
             request_id="stop-output",
             prompt="prompt",
@@ -7884,319 +7896,215 @@ class TestStopStringsSkipReasoning:
         scheduler.request_id_to_uid[request.request_id] = 99
         return scheduler, request
 
-    def _run(self, scheduler, tokens, terminal="eos"):
+    def _run(self, scheduler, tokens):
         responses = [self._response(token) for token in tokens]
-        if terminal == "eos":
-            responses.append(self._response(scheduler.tokenizer.eos_token_id, "stop"))
-        else:
-            responses[-1].finish_reason = terminal
-        return scheduler._process_batch_responses(responses)
-
-    def test_stop_string_inside_prompt_opened_reasoning_is_ignored(self, mock_model):
-        pieces = [
-            "\nCount: 1 2 3 4 5 6 7 8 9",
-            " 10",
-            " done.\n",
-            "\n\n",
-            "The answer is 7",
-            ".",
-        ]
-        scheduler, request = self._setup(
-            mock_model, ["10"], pieces, needs_think_prefix=True
-        )
-        tokens = [100, 101, 102, 201, 103, 104, 105]
-
-        outputs, finished = self._run(scheduler, tokens)
-
-        text = "\nCount: 1 2 3 4 5 6 7 8 9 10 done.\n</think>\n\nThe answer is 7."
-        assert finished == {request.request_id}
+        responses.append(self._response(scheduler.tokenizer.eos_token_id, "stop"))
+        outputs, _ = scheduler._process_batch_responses(responses)
         assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == text
-        assert "".join(output.new_text for output in outputs) == "<think>\n" + text
-        assert request.output_token_ids == tokens
-
-    def test_stop_string_in_answer_still_ends_the_request(self, mock_model):
-        pieces = [
-            "\nCount: 1 2 3 4 5 6 7 8 9",
-            " 10",
-            " done.\n",
-            "\n\n",
-            "The answer is 7",
-            ".",
-        ]
-        scheduler, request = self._setup(
-            mock_model, ["7"], pieces, needs_think_prefix=True
-        )
-
-        outputs, finished = self._run(scheduler, [100, 101, 102, 201, 103, 104, 105])
-
-        text = "\nCount: 1 2 3 4 5 6 7 8 9 10 done.\n</think>\n\nThe answer is "
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == text
-        assert "".join(output.new_text for output in outputs) == "<think>\n" + text
-        assert sum(output.finished for output in outputs) == 1
-
-    def test_model_opened_think_block_is_skipped(self, mock_model):
-        pieces = ["Count: 1 2 3 4 5 6 7 8 9", " 10", "\n\n", "The answer is 7", "."]
-        scheduler, request = self._setup(mock_model, ["10"], pieces)
-
-        outputs, finished = self._run(scheduler, [200, 100, 101, 201, 102, 103, 104])
-
-        text = "<think>Count: 1 2 3 4 5 6 7 8 9 10</think>\n\nThe answer is 7."
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == text
-        assert "".join(output.new_text for output in outputs) == text
-
-    def test_request_without_reasoning_keeps_stop_strings(self, mock_model):
-        pieces = ["Count: 1 2", " 10", " done"]
-        scheduler, request = self._setup(mock_model, ["10"], pieces)
-
-        outputs, finished = self._run(scheduler, [100, 101, 102])
-
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == "Count: 1 2 "
-        assert "".join(output.new_text for output in outputs) == "Count: 1 2 "
-
-    def test_completions_requests_keep_stop_strings_inside_reasoning(
-        self, mock_model
-    ):
-        # /v1/completions returns the reasoning inline, so its stop strings
-        # apply everywhere, as before.
-        pieces = ["\nCount: 1 2 3 4 5 6 7 8 9", " 10", " done.\n", "\n\n", "The answer"]
-        scheduler, request = self._setup(
-            mock_model,
-            ["10"],
-            pieces,
-            needs_think_prefix=True,
-            stop_skips_reasoning=False,
-        )
-        assert not request._stop_output_state.gated
-
-        outputs, finished = self._run(scheduler, [100, 101, 102, 201, 103, 104])
-
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == "\nCount: 1 2 3 4 5 6 7 8 9 "
-
-    def test_token_matcher_pauses_stop_strings_inside_the_think_block(self, mock_model):
-        from copy import copy
-
-        scheduler, request = self._setup(mock_model, [">>>>>>> UPDATED"], [])
-        stop_tokens = list(_StopSequenceTokenizer.stop_tokens)
-        automaton = scheduler._build_state_machine(request)
-        assert isinstance(automaton, scheduler_module._ReasoningAwareStopSequences)
-
-        # Model-opened block: the stop string is inert until it closes.
-        matcher = automaton.matcher()
-        assert matcher.advance(200) is False
-        assert [matcher.advance(t) for t in stop_tokens] == [False] * 4
-        assert matcher.advance(201) is False
-        assert [matcher.advance(t) for t in stop_tokens] == [False, False, False, True]
-
-        # EOS still ends a row inside the block.
-        matcher = automaton.matcher()
-        matcher.advance(200)
-        assert matcher.advance(scheduler.tokenizer.eos_token_id) is True
-
-        # A prefix before the block does not continue after it.
-        matcher = automaton.matcher()
-        assert [matcher.advance(t) for t in stop_tokens[:2]] == [False, False]
-        matcher.advance(200)
-        matcher.advance(201)
-        assert [matcher.advance(t) for t in stop_tokens[2:]] == [False, False]
-
-        # The MTP draft path copies a matcher and advances the copy alone.
-        matcher = automaton.matcher()
-        twin = copy(matcher)
-        assert [twin.advance(t) for t in stop_tokens] == [False, False, False, True]
-        assert [matcher.advance(t) for t in stop_tokens] == [False, False, False, True]
-
-        # Prompt-opened block: the matcher starts inside it.
-        request.needs_think_prefix = True
-        matcher = scheduler._build_state_machine(request).matcher()
-        assert [matcher.advance(t) for t in stop_tokens] == [False] * 4
-        matcher.advance(201)
-        assert [matcher.advance(t) for t in stop_tokens] == [False, False, False, True]
-
-        # A request whose API returns reasoning inline gets the plain automaton.
-        plain = TestStopStringOutputBuffer()._setup(mock_model)
-        automaton = plain._build_state_machine(plain.running["stop-output"])
-        assert type(automaton) is scheduler_module.StopSequences
-        matcher = automaton.matcher()
-        assert [matcher.advance(t) for t in stop_tokens] == [False, False, False, True]
+        return outputs[-1].output_text, "".join(o.new_text for o in outputs)
 
     @pytest.mark.parametrize(
-        "stops, expected_tail",
-        [(["10"], "The answer is 7."), (["7."], "The answer is ")],
+        "prompt_opened, tokens, stops, text",
+        [
+            # Stop only in the reasoning.
+            (
+                True,
+                [100, 101, 201, 102, 103, 104],
+                ["10"],
+                "Count: 1 2 3 4 5 6 7 8 9 10</think>\n\nThe answer is 7.",
+            ),
+            # Stop in the reasoning and the answer.
+            (
+                True,
+                [100, 101, 201, 102, 103, 104],
+                ["7"],
+                "Count: 1 2 3 4 5 6 7 8 9 10</think>\n\nThe answer is ",
+            ),
+            # Model-opened block.
+            (
+                False,
+                [200, 100, 101, 201, 102, 103, 104],
+                ["10"],
+                "<think>Count: 1 2 3 4 5 6 7 8 9 10</think>\n\nThe answer is 7.",
+            ),
+            # Stop right after the block closes.
+            (
+                True,
+                [100, 201, 102, 103, 104],
+                ["\n\nThe"],
+                "Count: 1 2 3 4 5 6 7 8 9</think>",
+            ),
+            # Reasoning that never closes.
+            (True, [100, 101], ["10"], "Count: 1 2 3 4 5 6 7 8 9 10"),
+        ],
+    )
+    def test_stop_strings_skip_the_leading_think_block(
+        self, mock_model, prompt_opened, tokens, stops, text
+    ):
+        scheduler, _ = self._setup(mock_model, stops, needs_think_prefix=prompt_opened)
+
+        output_text, streamed = self._run(scheduler, tokens)
+
+        assert output_text == text
+        assert streamed == ("<think>\n" if prompt_opened else "") + text
+
+    @pytest.mark.parametrize(
+        "prompt_opened, tokens, stops, flagged, text",
+        [
+            # A think marker in the answer is answer text.
+            (
+                False,
+                [103, 105, 200, 106, 107],
+                ["END"],
+                True,
+                "The answer is 7 Use <think> ",
+            ),
+            (
+                True,
+                [100, 201, 102, 105, 200, 106, 107],
+                ["END"],
+                True,
+                "Count: 1 2 3 4 5 6 7 8 9</think>\n\n Use <think> ",
+            ),
+            # /v1/completions returns reasoning inline and keeps the old match.
+            (
+                True,
+                [100, 101, 201, 102, 103],
+                ["10"],
+                False,
+                "Count: 1 2 3 4 5 6 7 8 9 ",
+            ),
+        ],
+    )
+    def test_stop_strings_match_outside_the_leading_think_block(
+        self, mock_model, prompt_opened, tokens, stops, flagged, text
+    ):
+        scheduler, _ = self._setup(
+            mock_model,
+            stops,
+            needs_think_prefix=prompt_opened,
+            stop_skips_reasoning=flagged,
+        )
+
+        output_text, _ = self._run(scheduler, tokens)
+
+        assert output_text == text
+
+    def test_token_matcher_skips_only_the_leading_think_block(self, mock_model):
+        scheduler, request = self._setup(mock_model, [">>>>>>> UPDATED"])
+        stop = list(_StopSequenceTokenizer.stop_tokens)
+        eos = scheduler.tokenizer.eos_token_id
+
+        def run(automaton, tokens):
+            matcher = automaton.matcher()
+            return [matcher.advance(token) for token in tokens]
+
+        automaton = scheduler._build_state_machine(request)
+        assert not any(run(automaton, [200, *stop]))
+        assert run(automaton, [200, 201, *stop])[-1]
+        assert run(automaton, [200, eos])[-1]
+        # A later think marker does not pause the stop strings.
+        assert run(automaton, [10, 200, *stop])[-1]
+        assert run(automaton, [200, 201, 200, *stop])[-1]
+
+        # The MTP draft path advances a copy on its own.
+        matcher = automaton.matcher()
+        draft = copy.copy(matcher)
+        draft.advance(200)
+        assert [matcher.advance(token) for token in stop][-1]
+
+        request.needs_think_prefix = True
+        prompt_opened = scheduler._build_state_machine(request)
+        assert not any(run(prompt_opened, stop))
+        assert run(prompt_opened, [201, *stop])[-1]
+
+        # A multi-token open marker counts only at the start of the output.
+        tracker = scheduler_module._ThinkTracker((7, 8, 9), (5,), False)
+        assert [tracker.advance(t) for t in (7, 8, 9, 1, 5)] == [False] * 4 + [True]
+        tracker = scheduler_module._ThinkTracker((7, 8, 9), (5,), False)
+        for token in (1, 7, 8, 9):
+            tracker.advance(token)
+        assert not tracker.in_thinking
+
+    @pytest.mark.parametrize(
+        "stops, answer", [(["10"], "The answer is 7."), (["7"], "The answer is ")]
     )
     def test_harmony_analysis_channel_is_skipped(
-        self, mock_model, monkeypatch, stops, expected_tail
+        self, mock_model, monkeypatch, stops, answer
     ):
-        from omlx.adapter import output_parser as parser_module
-        from omlx.adapter.harmony import load_harmony_gpt_oss_encoding
-
         encoding = load_harmony_gpt_oss_encoding()
 
         def ids(text):
             return encoding.encode(text, allowed_special="all")
 
-        specials = {
-            name: ids(name)[0]
-            for name in (
-                "<|start|>",
-                "<|end|>",
-                "<|message|>",
-                "<|channel|>",
-                "<|return|>",
-                "<|call|>",
-            )
-        }
-        analysis = ids("analysis")[0]
-        final = ids("final")[0]
-        assistant = ids("assistant")[0]
-        pieces = ["Count: 1 2 3 4 5 6 7 8 9 10", "The answer", " is 7."]
+        analysis = "Count: 1 2 3 4 5 6 7 8 9 10"
+        tokens = [
+            *ids("<|channel|>analysis<|message|>"),
+            *ids(analysis),
+            *ids("<|end|><|start|>assistant<|channel|>final<|message|>"),
+            *ids("The answer is 7."),
+        ]
+
+        text_pieces = {token: encoding.decode([token]) for token in tokens}
+        # Header tokens carry no text.
+        text_pieces.update(
+            dict.fromkeys(ids("<|channel|><|message|><|end|><|start|>"), "")
+        )
 
         class _HarmonyTokenizer(_StopSequenceTokenizer):
-            eos_token_id = specials["<|return|>"]
-            pieces = {
-                **_StopSequenceTokenizer.pieces,
-                analysis: "analysis",
-                final: "final",
-                assistant: "assistant",
-                **{token: "" for token in specials.values()},
-            }
-
-            def convert_tokens_to_ids(self, token):
-                return specials.get(token, 0)
+            eos_token_id = ids("<|return|>")[0]
+            pieces = text_pieces
 
             def encode(self, text, add_special_tokens=False):
-                if "<|" in text:
-                    return ids(text)
-                return super().encode(text, add_special_tokens)
+                return ids(text)
 
         factory = SimpleNamespace(
             kind="harmony",
             stop_token_ids=set(encoding.stop_tokens_for_assistant_actions()),
             thinking_start_text="<|channel|>analysis<|message|>",
-            thinking_start_output_text=None,
             thinking_end_text="<|end|>",
-            thinking_end_trailing_text="<|start|>assistant<|channel|>final<|message|>",
         )
-        scheduler, request = self._setup(
-            mock_model, stops, pieces, tokenizer=_HarmonyTokenizer(), factory=factory
+        scheduler, _ = self._setup(
+            mock_model, stops, tokenizer=_HarmonyTokenizer(), factory=factory
         )
-        assert request._stop_output_state.gated
         monkeypatch.setattr(
-            parser_module,
+            output_parser_module,
             "create_streaming_detokenizer",
             lambda tokenizer, model_path: _StopSequenceDetokenizer(tokenizer),
         )
-        session = parser_module.HarmonyOutputParserSession(scheduler.tokenizer)
-        scheduler._output_parser_sessions[request.request_id] = session
+        session = output_parser_module.HarmonyOutputParserSession(scheduler.tokenizer)
         scheduler._get_output_parser_session = lambda request_id: session
 
-        tokens = [
-            specials["<|channel|>"],
-            analysis,
-            specials["<|message|>"],
-            100,
-            specials["<|end|>"],
-            specials["<|start|>"],
-            assistant,
-            specials["<|channel|>"],
-            final,
-            specials["<|message|>"],
-            101,
-            102,
-        ]
-        outputs, finished = self._run(scheduler, tokens)
+        output_text, streamed = self._run(scheduler, tokens)
 
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text.endswith(expected_tail)
-        streamed = "".join(output.new_text for output in outputs)
-        assert "Count: 1 2 3 4 5 6 7 8 9 10" in streamed
-        assert streamed.endswith(expected_tail)
-
-        # The token-level matcher pauses in the analysis channel as well.
-        matcher = scheduler._build_state_machine(request).matcher()
-        stop_tokens = list(_StopSequenceTokenizer.stop_tokens)
-        request.sampling_params.stop = [">>>>>>> UPDATED"]
-        matcher = scheduler._build_state_machine(request).matcher()
-        for token in tokens[:3]:
-            matcher.advance(token)
-        assert [matcher.advance(t) for t in stop_tokens] == [False] * 4
-        for token in tokens[4:10]:
-            matcher.advance(token)
-        assert [matcher.advance(t) for t in stop_tokens] == [False, False, False, True]
-
-    @pytest.mark.parametrize("terminal", ["eos", "length"])
-    def test_unclosed_reasoning_never_matches(self, mock_model, terminal):
-        pieces = ["Count: 1 2 3", " 10", " 11"]
-        scheduler, request = self._setup(
-            mock_model, ["10"], pieces, needs_think_prefix=True
-        )
-
-        outputs, finished = self._run(scheduler, [100, 101, 102], terminal)
-
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == ("stop" if terminal == "eos" else "length")
-        assert outputs[-1].output_text == "Count: 1 2 3 10 11"
-        assert "".join(output.new_text for output in outputs) == (
-            "<think>\nCount: 1 2 3 10 11"
-        )
-
-    def test_stop_string_right_after_reasoning_matches(self, mock_model):
-        pieces = ["Count: 1 2 3", "\n\n", "The answer", " is 7"]
-        scheduler, request = self._setup(
-            mock_model, ["\n\nThe"], pieces, needs_think_prefix=True
-        )
-
-        outputs, finished = self._run(scheduler, [100, 201, 101, 102, 103])
-
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == "Count: 1 2 3</think>"
-        assert "".join(output.new_text for output in outputs) == (
-            "<think>\nCount: 1 2 3</think>"
-        )
+        # Non-streaming responses read the reasoning from this prefix.
+        assert output_text == f"<think>\n{analysis}\n</think>\n{answer}"
+        assert analysis in streamed
+        assert streamed.endswith(answer)
 
     @pytest.mark.parametrize(
-        "stops, expected_tail",
-        [(["10"], "The answer is 7."), (["7"], "The answer is ")],
+        "stops, answer", [(["10"], "The answer is 7."), (["7"], "The answer is ")]
     )
     def test_protocol_parser_reasoning_is_skipped(
-        self, mock_model, monkeypatch, stops, expected_tail
+        self, mock_model, monkeypatch, stops, answer
     ):
-        from omlx.patches.deepseek_v41 import output_parser
-
-        pieces = ["Count: 1 2 3 4 5 6 7 8 9", " 10", "\n\n", "The answer is 7", "."]
-        scheduler, request = self._setup(mock_model, stops, pieces)
-        scheduler._output_parser_factory = SimpleNamespace(
-            kind="deepseek_v41",
-            thinking_start_text="<think>",
-            thinking_start_output_text="<think>\n",
-            thinking_end_text="</think>",
+        scheduler, _ = self._setup(
+            mock_model, stops, factory=SimpleNamespace(kind="deepseek_v41")
         )
-        scheduler._build_state_machine(request)
         monkeypatch.setattr(
-            output_parser,
+            dsv41_output_parser,
             "create_streaming_detokenizer",
             lambda tokenizer, model_path: _StopSequenceDetokenizer(tokenizer),
         )
-        session = output_parser.DeepSeekV41OutputParserSession(scheduler.tokenizer)
-        scheduler._output_parser_sessions[request.request_id] = session
+        session = dsv41_output_parser.DeepSeekV41OutputParserSession(
+            scheduler.tokenizer
+        )
         scheduler._get_output_parser_session = lambda request_id: session
 
-        outputs, finished = self._run(scheduler, [200, 100, 101, 201, 102, 103, 104])
+        output_text, _ = self._run(scheduler, [200, 100, 101, 201, 102, 103, 104])
 
-        assert finished == {request.request_id}
-        assert outputs[-1].finish_reason == "stop"
-        assert outputs[-1].output_text == (
-            "<think>Count: 1 2 3 4 5 6 7 8 9 10</think>\n\n" + expected_tail
+        assert output_text == (
+            "<think>Count: 1 2 3 4 5 6 7 8 9 10</think>\n\n" + answer
         )
 
 

@@ -84,9 +84,8 @@ class SamplingParams:
     # Seed for reproducible generation (best-effort, per OpenAI spec)
     seed: Optional[int] = None
 
-    # Stop strings end the answer, not the reasoning. Set by the APIs that
-    # return reasoning on its own channel (chat completions, messages,
-    # responses); /v1/completions returns it inline and keeps the default.
+    # Stop strings skip the leading think block. Set by the APIs that return
+    # reasoning separately; /v1/completions returns it inline.
     stop_skips_reasoning: bool = False
 
     def __post_init__(self):
