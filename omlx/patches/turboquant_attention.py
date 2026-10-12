@@ -871,17 +871,7 @@ def apply_turboquant_attention_patch() -> bool:
                     sinks=sinks,
                 )
             if queries.shape[-2] == 1 and mask is None:
-                try:
-                    result = _mma_mse_attention(
-                        real_cache, queries, keys, values, scale
-                    )
-                except Exception:
-                    logger.debug(
-                        "TurboQuant MMA decode attention failed; "
-                        "using decode_attention",
-                        exc_info=True,
-                    )
-                    result = None
+                result = _mma_mse_attention(real_cache, queries, keys, values, scale)
                 if result is not None:
                     return result
             if queries.shape[-2] == 1:

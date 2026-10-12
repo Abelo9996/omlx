@@ -5798,7 +5798,7 @@ def test_spec_command_buffers_restore_caps_after_the_step(monkeypatch, raised):
         caps.append((ops, mb))
         return previous
 
-    target = SimpleNamespace(args=SimpleNamespace(model_type="qwen3_5"))
+    target = SimpleNamespace(model_type="qwen3_5")
     monkeypatch.setattr(fast, "set_command_buffer_caps", fake_set)
     monkeypatch.setattr(bg, "_raises_spec_buffer_caps", lambda: raised)
     with pytest.raises(RuntimeError), bg._spec_command_buffers(target):
@@ -5809,33 +5809,18 @@ def test_spec_command_buffers_restore_caps_after_the_step(monkeypatch, raised):
 
 
 @pytest.mark.parametrize(
-    "model_type,draft_type,gpu,enabled,detected",
+    "model_type,gpu,enabled,detected",
     [
-        (kind, "glm5_moe", True, True, True)
-        for kind in (
-            "qwen3_5",
-            "qwen3_5_moe",
-            "qwen3_5_vl",
-            "qwen3_6",
-            "qwen3_6_moe",
-            "qwen4_exp",
-            "qwen4_exp_text",
-        )
-    ]
-    + [
-        ("glm5_moe", "qwen3_5", True, False, False),
-        ("unknown", "qwen3_5", True, False, False),
-        (None, "qwen3_5", True, False, False),
-        ("qwen3_5", None, False, False, True),
+        ("qwen3_5_moe", True, True, True),
+        ("glm5_next", True, False, False),
+        (None, True, False, False),
+        ("qwen3_5", False, False, True),
     ],
 )
-def test_spec_caps_target(monkeypatch, model_type, draft_type, gpu, enabled, detected):
+def test_spec_caps_target(monkeypatch, model_type, gpu, enabled, detected):
     from omlx.custom_kernels.qwen35_prefill import fast
 
-    target = SimpleNamespace(
-        args=SimpleNamespace(model_type=model_type),
-        _omlx_drafter=SimpleNamespace(model_type=draft_type),
-    )
+    target = SimpleNamespace(model_type=model_type)
     calls, detections = [], []
 
     def fake_set(ops, mb):

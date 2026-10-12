@@ -385,42 +385,9 @@ _SPEC_CAPS_TARGET_TYPES = frozenset(
 )
 
 
-def _spec_caps_field(config: Any, key: str) -> Any:
-    """One field of a config, which a runtime may expose as a dict or object."""
-    return config.get(key) if isinstance(config, dict) else getattr(config, key, None)
-
-
-def _spec_caps_model_types(model: Any) -> tuple[str, ...]:
-    """Read target metadata from text and VLM wrappers, excluding the drafter."""
-    if model is None:
-        return ()
-    hosts = [model]
-    for attr in ("language_model", "_language_model"):
-        inner = getattr(model, attr, None)
-        if inner is not None and inner is not model:
-            hosts.append(inner)
-    types: list[str] = []
-    for host in hosts:
-        config = getattr(host, "config", None)
-        args = getattr(host, "args", None)
-        for value in (
-            getattr(host, "model_type", None),
-            getattr(args, "model_type", None),
-            _spec_caps_field(config, "model_type"),
-            # VLM checkpoints nest the text stack's own type one level down.
-            _spec_caps_field(_spec_caps_field(config, "text_config"), "model_type"),
-        ):
-            if isinstance(value, str) and value not in types:
-                types.append(value)
-    return tuple(types)
-
-
 def _spec_caps_target(model: Any) -> bool:
     """Whether the loaded target belongs to the selected Qwen family."""
-    return any(
-        model_type in _SPEC_CAPS_TARGET_TYPES
-        for model_type in _spec_caps_model_types(model)
-    )
+    return getattr(model, "model_type", None) in _SPEC_CAPS_TARGET_TYPES
 
 
 @functools.lru_cache(maxsize=1)

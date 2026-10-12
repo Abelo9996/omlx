@@ -1492,21 +1492,13 @@ def _grow_kv_capacity(cache_obj: Any, capacity: int) -> list[mx.array]:
     return grown
 
 
-# Set on the dense KVCache that stands in for a restored TurboQuant layer
-# while a suffix prefills (Scheduler._dequantize_restored_turboquant_prefix).
-# Holds the original quantized cache, so the end-of-prefill conversion appends
-# the suffix to the restored prefix codes instead of quantizing them twice.
+# Holds the restored TurboQuant cache on the dense layer that replaces it
+# during a long suffix prefill.
 _RESTORED_TQ_PREFIX_ATTR = "_omlx_restored_turboquant_prefix"
 
 
 def _dense_kv_template(prompt_cache: list[Any], model: Any) -> tuple[type, Any]:
-    """Return the (KVCache class, dtype) a cold prefill of this model uses.
-
-    Read from a populated plain KV layer (TurboQuant leaves the last one
-    unquantized by default), else from the activation dtype the admission
-    estimate uses: ``model.dtype`` or the embedding weight. The dtype is None
-    when none of them is known.
-    """
+    """Return the KVCache class and dtype a cold prefill uses (dtype may be None)."""
     for c in _iter_leaf_caches(prompt_cache):
         if type(c) in _STEP_GROWN_KV_CACHE_TYPES and c.keys is not None:
             return type(c), c.keys.dtype
@@ -1536,12 +1528,7 @@ def _turboquant_dense_bytes_per_token(cache_obj: Any, dtype: Any) -> int:
 
 
 def _requantize_onto_restored_prefix(prefix: Any, dense: Any) -> Any:
-    """Append a dense layer's suffix to the TurboQuant cache it replaced.
-
-    The restored prefix codes are kept as they are; only the tokens prefilled
-    after the restore are quantized, with the prefix cache's own codec, as
-    ``TurboQuantKVCache.from_cache`` would quantize them.
-    """
+    """Quantize only the suffix onto the TurboQuant cache the dense layer replaced."""
     start, end = int(prefix.offset), int(dense.offset)
     if end < start:
         prefix.trim(start - end)
@@ -3888,11 +3875,6 @@ class Scheduler:
         hidden states stay exact and quantization error only enters at
         decode-time reads. This is the key difference from #717/#771, which
         quantized on the fly during prefill and corrupted hidden states.
-
-        A dense layer that stood in for a restored TurboQuant layer during a
-        suffix prefill (see _dequantize_restored_turboquant_prefix) goes back
-        to that layer's quantized cache: only the suffix is quantized, and
-        the restored prefix codes are reused unchanged.
         """
         from mlx_lm.models.cache import CacheList, KVCache
         from mlx_vlm.turboquant import TurboQuantKVCache
@@ -3942,26 +3924,10 @@ class Scheduler:
     ) -> int:
         """Prefill a long suffix over a dense copy of a restored TQ prefix.
 
-        A paged-SSD hit restores TurboQuant layers quantized (#1842).
-        Prefilling over them sends every chunk of every TurboQuant layer
-        through the tiled quantized-attention path, whose cost grows with the
-        prefix. Measured on a 27B model, a 36k-token suffix after a 74k
-        restored prefix took 2.4x the cold prefill of the same positions.
-        Each restored layer is dequantized once instead, so the suffix runs
-        the dense SDPA path of a cold prefill and attends exact suffix keys
-        rather than keys quantized on the fly (see
-        _apply_turboquant_kv_convert). The dense layer keeps the quantized
-        cache it replaced, and the end-of-prefill conversion appends the
-        quantized suffix to it, so the prefix is never quantized twice.
-
-        Only a suffix longer than one prefill chunk is converted: the one-off
-        dequantize costs about what the quantized path adds to one chunk, so
-        a short suffix (a chat turn) gains nothing from it. Like the prefill
-        capacity reserve, it is skipped unless the dense layers, sized for
-        the whole prompt, fit under the prefill peak target; the request then
-        keeps the compact quantized prefix.
-
-        Returns the number of layers converted.
+        Prefilling over restored TurboQuant layers runs every chunk through
+        the slower tiled quantized attention. A suffix longer than one chunk
+        dequantizes each layer once instead, if the dense copy fits under the
+        prefill peak target. Returns the number of layers converted.
         """
         if getattr(self, "_turboquant_kv_bits", None) is None or not prompt_cache:
             return 0
@@ -4174,13 +4140,10 @@ class Scheduler:
             prompt_cache = make_prompt_cache(self.model)
 
         # Fresh TurboQuant requests run fp16 during the cold prefill loop and
-        # are quantized once at the end. A restored TurboQuant prefix is
-        # dequantized once before a suffix longer than one chunk, so the suffix
-        # runs the same dense path; the end-of-prefill conversion appends the
-        # quantized suffix to the restored codes for decode. A shorter suffix
-        # prefills over the quantized prefix. Rotating/sliding-window layers
-        # remain native pass-through caches; only full-attention KVCache layers
-        # are converted.
+        # are quantized once at the end. A restored TurboQuant prefix runs a
+        # long suffix over a dense copy. Rotating/sliding-window layers remain
+        # native pass-through caches; only full-attention KVCache layers are
+        # converted.
         Scheduler._dequantize_restored_turboquant_prefix(
             self, prompt_cache, n_tokens - 1, request.request_id
         )
@@ -6377,8 +6340,6 @@ class Scheduler:
             if existing_cache is not None
             else make_prompt_cache(self.model)
         )
-        # Run a long suffix over a dense copy of a restored TurboQuant prefix
-        # (see _do_external_prefill).
         Scheduler._dequantize_restored_turboquant_prefix(
             self, prompt_cache, len(tokens) - 1, request.request_id
         )
@@ -7720,9 +7681,7 @@ class Scheduler:
     ) -> tuple[Callable[[mx.array], mx.array], list[Callable]]:
         """Build per-request sampler and logits processors."""
         # omlx.utils.sampling.make_sampler carries the fused top-p/top-k and
-        # MTP acceptance metadata that mlx_lm.sample_utils does not. Requests
-        # with equal parameters share one sampler object so a decode batch
-        # samples all of them in one call (see make_shared_sampler).
+        # MTP acceptance metadata that mlx_lm.sample_utils does not.
         sampler = omlx_make_shared_sampler(
             temp=sampling_params.temperature,
             top_p=sampling_params.top_p,

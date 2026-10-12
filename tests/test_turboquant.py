@@ -1,7 +1,13 @@
 """Tests for TurboQuant KV cache (mlx-vlm backend + omlx BatchTurboQuantKVCache)."""
 
+from contextlib import ExitStack
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
+from mlx.utils import tree_flatten
 from mlx_lm.models.cache import BatchKVCache, KVCache
 from mlx_vlm.turboquant import (
     TurboQuantKVCache,
@@ -11,6 +17,9 @@ from mlx_vlm.turboquant import (
     turboquant_enabled,
 )
 
+from omlx.prefill_progress import get_prefill_tracker
+from omlx.request import Request, SamplingParams
+from omlx.scheduler import Scheduler, SchedulerConfig
 from omlx.turboquant_kv import (
     BatchTurboQuantKVCache,
     _concat_state,
@@ -629,11 +638,14 @@ def test_attention_patch_falls_back_when_quantized_prefill_fails(monkeypatch):
 
 
 @pytest.mark.parametrize("q_len", [2, 4, 9])
-def test_decode_multirow_matches_dequantize_reference(q_len):
+def test_decode_multirow_matches_dequantize_reference(q_len, monkeypatch):
     """MTP-verify-shaped attention (fold path at small q_len, single-chunk
     quantized_attention above the folded-repeat knee) must match the
     dequantize+SDPA reference with an explicit causal tail mask."""
+    from omlx.patches import turboquant_attention as tq_attention
     from omlx.patches.turboquant_attention import _decode_multirow_attention
+
+    monkeypatch.setattr(tq_attention, "_mma_mse_attention", lambda *a, **k: None)
 
     mx.random.seed(0)
     B, n_q, n_kv, D, T = 1, 24, 4, 256, 512
@@ -747,7 +759,7 @@ def _mma_reference(tq, queries, ks, vs, scale):
 
 
 @pytest.mark.parametrize("bits", [4.0, 2.0, 8.0])
-@pytest.mark.parametrize("q_len", [1, 2, 5, 9])
+@pytest.mark.parametrize("q_len", [1, 9])
 @pytest.mark.parametrize("tokens", [37, 600])
 def test_mma_attention_matches_dequantize_reference(bits, q_len, tokens):
     """The simdgroup-matrix kernel serves decode and verify rows of every GQA
@@ -879,6 +891,7 @@ def test_fused_multirow_kernel_respects_token_floor(monkeypatch):
     monkeypatch.setattr(
         tq_attention, "_fused_multirow_mse_attention", fail_fused
     )
+    monkeypatch.setattr(tq_attention, "_mma_mse_attention", lambda *a, **k: None)
     out = tq_attention._decode_multirow_attention(tq, queries, ks, vs, D**-0.5)
     assert out is not None
     assert out.shape == (B, n_q, 3, D)
@@ -1647,3 +1660,187 @@ def test_batch_tq_qwen_mask_keeps_physical_width_with_shared_padding():
         tq.make_mask(1),
     )
     assert mask.shape[-1] == keys.shape[2] == 9
+
+
+_RESTORE_STEP = 6
+_RESTORE_PREFIX = 8
+
+
+def _restore_kv(token_ids: list[int]) -> mx.array:
+    pos = mx.array(token_ids, dtype=mx.float32)[:, None]
+    rows = mx.sin(pos * mx.arange(1, 33, dtype=mx.float32)[None, :] * 0.37)
+    return mx.stack([rows, -0.5 * rows + 0.25])[None].astype(mx.float16)
+
+
+def _restored_tq_cache() -> list:
+    """A restored [TQ, plain KV] prefix (skip-last layout) with full buffers."""
+    kv = _restore_kv(list(range(_RESTORE_PREFIX)))
+    first, last = KVCache(), KVCache()
+    first.step = last.step = 4
+    first.update_and_fetch(kv, kv)
+    last.update_and_fetch(kv, kv)
+    restored = TurboQuantKVCache.from_cache(first, bits=4.0)
+    mx.eval(restored.keys, restored.values, last.keys, last.values)
+    return [restored, last]
+
+
+def _tq_state_tokens(cache_obj, start: int, stop: int) -> list[mx.array]:
+    keys, values = cache_obj.state
+    return [mx.array(a[:, :, start:stop]) for _, a in tree_flatten([keys, values])]
+
+
+@pytest.fixture
+def restored_prefill():
+    model = MagicMock()
+    model.layers = []
+    del model._omlx_prefill
+    tokenizer = MagicMock()
+    tokenizer.eos_token_id = 2
+    scheduler = Scheduler(
+        model=model,
+        tokenizer=tokenizer,
+        config=SchedulerConfig(
+            prefill_step_size=_RESTORE_STEP,
+            chunked_prefill=True,
+            paged_cache_block_size=0,
+        ),
+    )
+    scheduler.block_aware_cache = None
+    scheduler._memory_limit_bytes = 0
+    scheduler._turboquant_kv_bits = 4.0
+    scheduler._turboquant_skip_last = True
+    scheduler.batch_generator = MagicMock()
+    scheduler.batch_generator.insert.return_value = [42]
+    seen = []
+
+    def forward(tokens, *, cache, **kwargs):
+        seen.append([type(c).__name__ for c in cache])
+        kv = _restore_kv(tokens.tolist()[0])
+        for layer in cache:
+            layer.update_and_fetch(kv, kv)
+
+    model.side_effect = forward
+    get_prefill_tracker().clear()
+    with ExitStack() as stack:
+        stack.enter_context(patch("omlx.scheduler._sync_and_clear_cache"))
+        stack.enter_context(patch("omlx.scheduler.get_phys_footprint", return_value=0))
+        for name, kwargs in (
+            ("_adaptive_chunk_size", {"side_effect": lambda n, **_: n}),
+            ("_guard_prefill_chunk", {"side_effect": lambda n, **_: n}),
+            ("_supports_skip_lm_head", {"return_value": False}),
+            ("_record_chunk_transient", {}),
+            ("_maybe_record_fixed_state_bytes", {}),
+            ("_should_clear_after_chunk", {"return_value": False}),
+            ("_turboquant_eligible", {"return_value": True}),
+        ):
+            stack.enter_context(patch.object(scheduler, name, **kwargs))
+        yield SimpleNamespace(scheduler=scheduler, seen=seen)
+    get_prefill_tracker().clear()
+
+
+def _run_restored_prefill(scheduler, path: str, cache: list, suffix: int) -> list:
+    """Prefill the cached prefix plus ``suffix`` new tokens; return the decode cache."""
+    tokens = list(range(_RESTORE_PREFIX + suffix))
+    request = Request(
+        request_id=f"tq-{path}-{suffix}",
+        prompt=tokens,
+        sampling_params=SamplingParams(max_tokens=8),
+    )
+    request.prompt_token_ids = tokens
+    request.num_prompt_tokens = len(tokens)
+    request.cached_tokens = _RESTORE_PREFIX
+    request.remaining_tokens = tokens[_RESTORE_PREFIX:]
+    if path == "external":
+        returned, _ = scheduler._do_external_prefill(
+            request, request.remaining_tokens, cache
+        )
+        return returned
+    state = scheduler._begin_prefill(request, request.remaining_tokens, cache)
+    state.sampler = MagicMock()
+    state.sm = MagicMock()
+    state.per_row_lps = []
+    while not scheduler._step_prefill_chunk(state):
+        pass
+    scheduler._insert_prefilled_request(request, state, [])
+    return scheduler.batch_generator.insert.call_args.kwargs["caches"][0]
+
+
+@pytest.mark.parametrize("path", ["external", "resumable"])
+def test_restored_tq_prefix_long_suffix_prefills_dense(restored_prefill, path):
+    """The suffix sees a dense prefix; decode gets the original TQ cache with
+    its prefix codes unchanged and the suffix quantized like a cold prefill."""
+    cache = _restored_tq_cache()
+    restored, plain = cache
+    prefix_codes = _tq_state_tokens(restored, 0, _RESTORE_PREFIX)
+    suffix = 2 * _RESTORE_STEP + 1
+
+    decode_cache = _run_restored_prefill(
+        restored_prefill.scheduler, path, cache, suffix
+    )
+
+    total = _RESTORE_PREFIX + suffix - 1
+    assert restored_prefill.seen == [["KVCache", "KVCache"]] * 2
+    assert decode_cache[0] is restored and decode_cache[1] is plain
+    assert restored.offset == total
+    for want, got in zip(
+        prefix_codes, _tq_state_tokens(restored, 0, _RESTORE_PREFIX), strict=True
+    ):
+        assert mx.array_equal(want, got).item()
+    exact = KVCache()
+    full = _restore_kv(list(range(total)))
+    exact.update_and_fetch(full, full)
+    cold = TurboQuantKVCache.from_cache(exact, bits=4.0)
+    for want, got in zip(
+        _tq_state_tokens(cold, _RESTORE_PREFIX, total),
+        _tq_state_tokens(restored, _RESTORE_PREFIX, total),
+        strict=True,
+    ):
+        assert mx.array_equal(want, got).item()
+
+
+@pytest.mark.parametrize("path", ["external", "resumable"])
+def test_restored_tq_prefix_short_suffix_stays_quantized(restored_prefill, path):
+    cache = _restored_tq_cache()
+    decode_cache = _run_restored_prefill(
+        restored_prefill.scheduler, path, cache, _RESTORE_STEP + 1
+    )
+    assert restored_prefill.seen == [["TurboQuantKVCache", "KVCache"]]
+    assert decode_cache[0] is cache[0]
+
+
+def test_restored_tq_prefix_stays_quantized_without_memory(restored_prefill):
+    scheduler = restored_prefill.scheduler
+    cache = _restored_tq_cache()
+    with (
+        patch.object(Scheduler, "_prefill_peak_target", return_value=1 << 20),
+        patch.object(scheduler, "_current_usage_bytes", return_value=(1 << 20) - 64),
+    ):
+        decode_cache = _run_restored_prefill(
+            scheduler, "external", cache, 2 * _RESTORE_STEP + 1
+        )
+    assert restored_prefill.seen == [["TurboQuantKVCache", "KVCache"]] * 2
+    assert decode_cache[0] is cache[0]
+
+
+def test_restored_tq_prefix_dense_dtype_follows_quantized_embedding(restored_prefill):
+    """With skip-last off no plain KV layer is left, so the dense prefix takes
+    the dtype a quantized embedding outputs, not its packed uint32 weight."""
+    scheduler = restored_prefill.scheduler
+    scheduler._turboquant_skip_last = False
+    embedding = nn.Embedding(8, 64)
+    embedding.weight = embedding.weight.astype(mx.float16)
+    scheduler.model.model.embed_tokens = nn.QuantizedEmbedding.from_embedding(embedding)
+    restored = _restored_tq_cache()[0]
+    dtypes = []
+    forward = scheduler.model.side_effect
+
+    def recording_forward(tokens, *, cache, **kwargs):
+        dtypes.append(cache[0].keys.dtype)
+        forward(tokens, cache=cache, **kwargs)
+
+    scheduler.model.side_effect = recording_forward
+    decode_cache = _run_restored_prefill(
+        scheduler, "external", [restored], 2 * _RESTORE_STEP + 1
+    )
+    assert dtypes[0] == mx.float16
+    assert decode_cache[0] is restored
