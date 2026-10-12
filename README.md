@@ -240,13 +240,7 @@ Set up OpenClaw, OpenCode, Codex, Hermes Agent, Copilot, Pi, Mistral Vibe, and D
   <img src="docs/images/omlx_integrations.png" alt="oMLX Integrations" width="720">
 </p>
 
-Install [Mistral Vibe](https://github.com/mistralai/mistral-vibe) 2.25.8 or newer with
-`uv tool install mistral-vibe`, then run `omlx launch vibe` to select a local
-model, or `omlx launch vibe --model <model-id>`. Vibe's provider, model, API-key
-reference and context window are configured for that process through its
-`VIBE_*` environment overrides. Existing `config.toml`, `VIBE_HOME`, tool
-permissions and cloud configuration are preserved. Pass Vibe arguments after
-`--`, for example `omlx launch vibe --model <model-id> -- --resume`.
+Install [Mistral Vibe](https://github.com/mistralai/mistral-vibe) 2.26.0 or newer with `uv tool install mistral-vibe`, then run `omlx launch vibe` to select a local model, or `omlx launch vibe --model <model-id>`. Vibe's provider, model, API-key reference and context window are configured for that process through its `VIBE_*` environment overrides. Existing `config.toml`, `VIBE_HOME`, tool permissions and cloud configuration are preserved. Pass Vibe arguments after `--`, for example `omlx launch vibe --model <model-id> -- --resume`.
 
 ### Performance Benchmark
 
