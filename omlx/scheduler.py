@@ -1513,8 +1513,15 @@ def _dense_kv_template(prompt_cache: list[Any], model: Any) -> tuple[type, Any]:
     dtype = getattr(model, "dtype", None)
     if not isinstance(dtype, mx.Dtype):
         embed_tokens = getattr(getattr(model, "model", None), "embed_tokens", None)
-        dtype = getattr(getattr(embed_tokens, "weight", None), "dtype", None)
-    return _MLXKVCache, dtype if isinstance(dtype, mx.Dtype) else None
+        # A quantized embedding packs its weight as uint32 and outputs its
+        # scales dtype.
+        source = getattr(embed_tokens, "scales", None)
+        if source is None:
+            source = getattr(embed_tokens, "weight", None)
+        dtype = getattr(source, "dtype", None)
+    if not isinstance(dtype, mx.Dtype) or not mx.issubdtype(dtype, mx.floating):
+        return _MLXKVCache, None
+    return _MLXKVCache, dtype
 
 
 def _turboquant_dense_bytes_per_token(cache_obj: Any, dtype: Any) -> int:

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
 from mlx.utils import tree_flatten
 from mlx_lm.models.cache import KVCache
@@ -329,17 +330,15 @@ def test_dense_prefix_that_does_not_fit_keeps_quantized_path(harness, path, capl
 
 @pytest.mark.parametrize("path", ["external", "resumable"])
 def test_all_turboquant_layout_takes_dense_dtype_from_the_embedding(harness, path):
-    """With no plain KV layer left (skip-last off), use the activation dtype.
-
-    The admission estimate reads the activation dtype from ``model.dtype`` or
-    the embedding weight; the dense prefix must use the same dtype a cold
-    prefill writes.
-    """
+    """With no plain KV layer left (skip-last off), the dense prefix uses the
+    dtype a quantized embedding outputs, not its packed uint32 weight."""
     scheduler = harness.scheduler
     scheduler._turboquant_skip_last = False
     model = scheduler.model
     model.dtype = None
-    model.model.embed_tokens.weight = mx.zeros((4, DIM), dtype=mx.float16)
+    embedding = nn.Embedding(8, 64)
+    embedding.weight = embedding.weight.astype(mx.float16)
+    model.model.embed_tokens = nn.QuantizedEmbedding.from_embedding(embedding)
     restored = _restored_cache()[0]
     dense_dtypes = []
     forward = model.side_effect
