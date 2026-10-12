@@ -2719,7 +2719,7 @@ class Qwen4ExpAttention(Qwen3_5Attention):
         launch takes the four projections and the kernels this layout."""
         rotary = self.rotary_emb
         return (
-            rotary.fused_apply
+            rotary.position_selector is not None
             and rotary.pairing == "half_split"
             and self.q_norm.group_size is None
             and self.k_norm.group_size is None
@@ -2779,6 +2779,7 @@ class Qwen4ExpAttention(Qwen3_5Attention):
             heads=self.num_attention_heads,
             kv_heads=self.num_key_value_heads,
             rotary_dim=rotary.dim,
+            rope_scale=rotary.attention_scaling,
         )
         return q_out, index_out, v_out, queries, keys, index_positions
 
