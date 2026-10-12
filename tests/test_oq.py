@@ -2024,6 +2024,18 @@ class TestGemma4StatefulLayerForward:
         assert state["kind"] == "gemma4_shared_kv"
         assert state["previous_kvs"] == [0, 0]
 
+    def test_noncausal_layer_inputs_drop_every_mask(self):
+        """Decision 3.0 calibrates with the non-causal attention it serves with."""
+        tokens = mx.array([[1, 2, 3, 4]])
+        inputs = mx.zeros((1, 4, 8))
+        layers = [object(), object(), object()]
+        out, masks, positions = _prepare_layer_inputs(
+            object(), layers, tokens, inputs, noncausal=True
+        )
+        assert out is inputs
+        assert masks == [None, None, None]
+        assert positions.tolist() == [[0, 1, 2, 3]]
+
     def test_cache_signature_invalidates_only_stateful_gemma4(self, tmp_path):
         common = {
             "model_type": "gemma4",
@@ -4524,6 +4536,78 @@ class TestQuantizeOqStreamingPassthroughDtypes:
         assert set(index["weight_map"].values()) == {"model.safetensors"}
         for name in ("joint_head.safetensors", "joint_head_config.json"):
             assert (out / name).read_bytes() == (src / name).read_bytes()
+
+    def _d3_source(self, tmp_path):
+        from safetensors.numpy import save_file as np_save
+
+        src = tmp_path / "src"
+        src.mkdir()
+        hidden = 64
+        np_save(
+            {
+                "model.layers.0.input_layernorm.weight": np.ones(
+                    hidden, dtype=np.float32
+                ),
+                "model.layers.0.self_attn.q_proj.weight": np.ones(
+                    (hidden, hidden), dtype=np.float32
+                ),
+            },
+            str(src / "model.safetensors"),
+        )
+        np_save(
+            {"weight": np.ones((255, hidden), dtype=np.float32)},
+            str(src / "readout.safetensors"),
+        )
+        (src / "decision_config.json").write_text(
+            json.dumps(
+                {
+                    "format_id": "d3-code-readout-v1",
+                    "attention_mode": "noncausal_full_attention",
+                }
+            )
+        )
+        (src / "MODEL_MANIFEST.json").write_text("{}")
+        (src / "config.json").write_text(
+            json.dumps(
+                {
+                    "architectures": ["TestModelForCausalLM"],
+                    "model_type": "test_passthrough",
+                    "num_hidden_layers": 1,
+                    "hidden_size": hidden,
+                    "vocab_size": 256,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (src / "oq_sensitivity_map.json").write_text(
+            json.dumps({"0": 0.1}), encoding="utf-8"
+        )
+        return src
+
+    def test_d3_readout_is_copied_beside_an_indexed_backbone(self, tmp_path):
+        """The d3 readout stays FP32 outside the shards with its decision
+        config; the package manifest no longer matches and is not copied."""
+        src = self._d3_source(tmp_path)
+        assert [f.name for f in _source_weight_files(src)] == ["model.safetensors"]
+
+        out = tmp_path / "out"
+        quantize_oq_streaming(str(src), str(out), oq_level=4)
+
+        index = json.loads((out / "model.safetensors.index.json").read_text())
+        assert set(index["weight_map"].values()) == {"model.safetensors"}
+        assert not any("weight" == key for key in index["weight_map"])
+        for name in ("readout.safetensors", "decision_config.json"):
+            assert (out / name).read_bytes() == (src / name).read_bytes()
+        assert not (out / "MODEL_MANIFEST.json").exists()
+        config = json.loads((out / "config.json").read_text())
+        assert "_oq_noncausal_attention" not in config
+
+    def test_d3_rejects_text_only_output(self, tmp_path):
+        src = self._d3_source(tmp_path)
+        with pytest.raises(ValueError, match="vision tower"):
+            quantize_oq_streaming(
+                str(src), str(tmp_path / "out"), oq_level=4, text_only=True
+            )
 
     def test_float16_keeps_vision_audio_passthrough_tensors_float32(self, tmp_path):
         """Protected VLM/audio tensors must not be saved as FP16."""
