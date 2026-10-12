@@ -2,7 +2,8 @@
 """Patch scaled_dot_product_attention to support TurboQuantKVCache.
 
 When TurboQuantKVCache is detected, routes attention to:
-  - One-sequence MSE decode and causal verify (L <= 15): a simdgroup-matrix
+  - MSE decode and causal verify (L <= 15) for one sequence, or for a
+    left-padded batch from mlx-vlm's qwen3_5 seam: a simdgroup-matrix
     2-pass kernel that serves every GQA repeat and verify row of a KV head
     from one unpack of each token (``_mma_mse_attention``)
   - Other decode (L=1): cache.decode_attention() — Metal kernel, no dequant
@@ -21,6 +22,7 @@ from functools import cache
 from typing import Optional
 
 import mlx.core as mx
+from mlx_lm.models.cache import create_causal_mask
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +302,9 @@ def _fused_multirow_mse_attention(
 # online softmax, and accumulate their own quarter of the output (PV, the value
 # norms folded into P). Pass 2 is turboquant's decode reduction. The states are
 # read from the caches' step-allocated buffers, so no per-call copy of the
-# sliced KV is made.
+# sliced KV is made. In a left-padded batch every row ends at the same column,
+# so the head index spans batch x KV heads and each row starts its token
+# blocks at its own left padding.
 _MMA_SIMDGROUPS = 4
 
 _MMA_SOURCE = """
@@ -321,6 +325,7 @@ _MMA_SOURCE = """
     // context reuses one pipeline.
     const int TOK = tokens[0];
     const long CAP = key_norms_shape[2];
+    const int start = starts[head / key_norms_shape[1]];
 
     threadgroup float cbk[1 << KB];
     threadgroup float cbv[1 << VB];
@@ -344,8 +349,8 @@ _MMA_SOURCE = """
     float l_run = 0.0f;
     int parity = 0;
 
-    const int per = (TOK + Blocks - 1) / Blocks;
-    const int t_begin = block * per;
+    const int per = (TOK - start + Blocks - 1) / Blocks;
+    const int t_begin = start + block * per;
     const int t_end = min(TOK, t_begin + per);
     const device uint32_t* kbase = key_packed + long(head) * CAP * KW;
     const device uint32_t* vbase = val_packed + long(head) * CAP * VW;
@@ -451,6 +456,7 @@ def _mma_mse_attention_kernel():
             "val_packed",
             "val_codebook",
             "tokens",
+            "starts",
         ],
         output_names=["out_acc", "out_sums", "out_maxs"],
         source=_MMA_SOURCE,
@@ -482,10 +488,12 @@ def _full_state(cache_state, state, total):
     return state
 
 
-def _mma_mse_attention(real_cache, queries, keys, values, scale):
-    """Decode and causal verify attention for one sequence of MSE states.
+def _mma_mse_attention(real_cache, queries, keys, values, scale, starts=None):
+    """Decode and causal verify attention over MSE states.
 
-    Returns None outside the kernel's envelope (other codecs, batches,
+    ``starts`` holds each row's first key column for a left-padded batch
+    whose rows end at the same column; without it only one sequence is
+    accepted. Returns None outside the kernel's envelope (other codecs,
     bit widths that straddle packed words, odd head dims).
     """
     from mlx_vlm import turboquant as _tq
@@ -495,9 +503,12 @@ def _mma_mse_attention(real_cache, queries, keys, values, scale):
     if not (
         isinstance(key_codec, _tq._TurboQuantMSECodec)
         and isinstance(value_codec, _tq._TurboQuantMSECodec)
-        and isinstance(getattr(real_cache, "offset", None), int)
     ):
         return None
+    if starts is None:
+        if not isinstance(getattr(real_cache, "offset", None), int):
+            return None
+        starts = mx.zeros((1,), dtype=mx.int32)
     keys_state = real_cache._unwrap(keys)
     values_state = real_cache._unwrap(values)
     if not (
@@ -508,8 +519,8 @@ def _mma_mse_attention(real_cache, queries, keys, values, scale):
     B, n_q_heads, L, D = queries.shape
     kb, vb = key_codec.bits, value_codec.bits
     if not (
-        B == 1
-        and keys_state.norms.shape[0] == 1
+        starts.shape == (B,)
+        and keys_state.norms.shape[0] == B
         and kb == int(kb)
         and vb == int(vb)
         and int(kb) in (1, 2, 4, 8)
@@ -536,7 +547,7 @@ def _mma_mse_attention(real_cache, queries, keys, values, scale):
     grouped = (queries * scale).reshape(B, n_kv_heads, n_repeats, L, D)
     q_rot = key_codec.prepare_queries(grouped).astype(mx.float32)
     num_blocks = _mma_blocks(total)
-    n_rows = n_kv_heads * rows
+    n_rows = B * n_kv_heads * rows
     out_acc, out_sums, out_maxs = _mma_mse_attention_kernel()(
         inputs=[
             q_rot.reshape(n_rows, D),
@@ -547,6 +558,7 @@ def _mma_mse_attention(real_cache, queries, keys, values, scale):
             values_full.indices,
             value_codec.codebook,
             mx.array([total], dtype=mx.int32),
+            starts.astype(mx.int32),
         ],
         template=[
             ("D", D),
@@ -559,7 +571,7 @@ def _mma_mse_attention(real_cache, queries, keys, values, scale):
             ("VW", values_full.indices.shape[-1]),
             ("NS", _MMA_SIMDGROUPS),
         ],
-        grid=(32 * _MMA_SIMDGROUPS * n_kv_heads, (rows + 7) // 8, num_blocks),
+        grid=(32 * _MMA_SIMDGROUPS * B * n_kv_heads, (rows + 7) // 8, num_blocks),
         threadgroup=(32 * _MMA_SIMDGROUPS, 1, 1),
         output_shapes=[
             (n_rows * num_blocks, D),
@@ -738,6 +750,23 @@ def _patch_update_eval_policy() -> None:
     cls._omlx_multirow_eval_patched = True
 
 
+def _left_padded_batch_attention(real_cache, queries, keys, values, scale, mask):
+    """Decode and verify attention for a left-padded B>1 TurboQuant batch.
+
+    ``mask`` is the cache's own padding + causal mask: rows end at one column
+    and row b starts at ``left_padding[b]``, so the MMA kernel reads
+    ``left_padding`` instead. Returns None for verify rows outside its envelope.
+    """
+    out = _mma_mse_attention(
+        real_cache, queries, keys, values, scale, starts=real_cache.left_padding
+    )
+    if out is None and queries.shape[2] == 1:
+        out = real_cache.decode_attention(
+            queries, keys_state=keys, values_state=values, scale=scale, mask=mask
+        )
+    return out
+
+
 def _patch_vlm_target_verify_attention() -> None:
     """Make mlx-vlm's qwen3_5 MTP verify attention TurboQuant-safe.
 
@@ -762,7 +791,7 @@ def _patch_vlm_target_verify_attention() -> None:
     def patched(queries, keys, values, *, cache, scale, mask):
         from mlx_vlm.turboquant import TurboQuantKVCache as _TQCache
 
-        from ..turboquant_kv import BatchTurboQuantKVCache
+        from ..turboquant_kv import BatchTurboQuantKVCache, _state_length
 
         real_cache = cache
         if hasattr(cache, "_cache") and not isinstance(
@@ -777,8 +806,21 @@ def _patch_vlm_target_verify_attention() -> None:
             return sdpa(
                 queries, keys, values, cache=cache, scale=scale, mask="causal"
             )
-        # Left-padded batches / explicit array masks: dequantize once and
-        # replicate the caller's per-row causal slicing on dense arrays.
+        if queries.shape[0] > 1 and isinstance(real_cache, BatchTurboQuantKVCache):
+            if not isinstance(mask, mx.array):
+                # left_padded_decode passes no mask; the padding must stay masked.
+                L = queries.shape[2]
+                total = _state_length(real_cache._unwrap(keys))
+                mask = create_causal_mask(
+                    L, offset=total - L, left_padding=real_cache.left_padding
+                )
+            out = _left_padded_batch_attention(
+                real_cache, queries, keys, values, scale, mask
+            )
+            if out is not None:
+                return out
+        # Remaining array masks: dequantize once and replicate the caller's
+        # per-row causal slicing on dense arrays.
         dk, dv = real_cache.dequantize(keys_state=keys, values_state=values)
         dk = dk.astype(queries.dtype)
         dv = dv.astype(queries.dtype)

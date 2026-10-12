@@ -749,13 +749,45 @@ def test_fused_multirow_kernel_handles_mixed_bit_codecs(bits):
     assert mx.abs(fused.astype(mx.float32) - ref).max().item() < 5e-3
 
 
-def _mma_reference(tq, queries, ks, vs, scale):
-    dk, dv = tq.dequantize(keys_state=ks, values_state=vs)
+def _causal_reference(queries, dk, dv, scale):
     T, q_len = dk.shape[-2], queries.shape[-2]
     causal = mx.arange(T)[None, :] <= mx.arange(T - q_len, T)[:, None]
     return mx.fast.scaled_dot_product_attention(
         queries.astype(mx.float32), dk, dv, scale=scale, mask=causal
     )
+
+
+def _mma_reference(tq, queries, ks, vs, scale):
+    dk, dv = tq.dequantize(keys_state=ks, values_state=vs)
+    return _causal_reference(queries, dk, dv, scale)
+
+
+def _left_padded_tq_batch(pads, prompt, q_len, bits=4.0, n_q=12, n_kv=2, D=128):
+    """A batch whose rows end at one column. Row b's first ``pads[b]`` columns
+    hold random keys and values that attention must not read."""
+    mx.random.seed(6)
+    batch = BatchTurboQuantKVCache(pads, bits=bits)
+    batch.update_and_fetch(
+        mx.random.normal((len(pads), n_kv, prompt, D)).astype(mx.float16),
+        mx.random.normal((len(pads), n_kv, prompt, D)).astype(mx.float16),
+    )
+    mask = batch.make_mask(q_len)
+    ks, vs = batch.update_and_fetch(
+        mx.random.normal((len(pads), n_kv, q_len, D)).astype(mx.float16),
+        mx.random.normal((len(pads), n_kv, q_len, D)).astype(mx.float16),
+    )
+    queries = mx.random.normal((len(pads), n_q, q_len, D)).astype(mx.float16)
+    return batch, queries, ks, vs, mask
+
+
+def _assert_rows_match(out, batch, queries, ks, vs, pads, tol):
+    dk, dv = batch.dequantize(keys_state=ks, values_state=vs)
+    scale = queries.shape[-1] ** -0.5
+    for b, start in enumerate(pads):
+        row_k, row_v = dk[b : b + 1, :, start:], dv[b : b + 1, :, start:]
+        ref = _causal_reference(queries[b : b + 1], row_k, row_v, scale)
+        err = mx.abs(out[b : b + 1].astype(mx.float32) - ref).max().item()
+        assert err < tol, f"row {b} (left padding {start}) max err {err:.4f}"
 
 
 @pytest.mark.parametrize("bits", [4.0, 2.0, 8.0])
@@ -833,6 +865,42 @@ def test_mma_attention_declines_straddling_bits_and_batches():
     )
     queries = mx.random.normal((2, 4, 1, D)).astype(mx.float16)
     assert tq_attention._mma_mse_attention(batch, queries, ks, vs, 1.0) is None
+
+
+@pytest.mark.parametrize("q_len", [1, 3])
+def test_mma_attention_left_padded_batch_matches_each_row(q_len):
+    """With ``starts`` the kernel serves a left-padded batch: each row attends
+    only its own columns. The middle row leaves most 2-pass blocks empty and
+    the last row holds only the query tokens."""
+    from omlx.patches import turboquant_attention as tq_attention
+
+    prompt = 9000
+    pads = [0, prompt - 5, prompt]
+    batch, queries, ks, vs, _ = _left_padded_tq_batch(pads, prompt, q_len)
+    out = tq_attention._mma_mse_attention(
+        batch, queries, ks, vs, 128**-0.5, starts=batch.left_padding
+    )
+    assert out is not None and out.shape == queries.shape
+    _assert_rows_match(out, batch, queries, ks, vs, pads, 5e-3)
+
+
+@pytest.mark.parametrize("bits", [4.0, 3.5])
+@pytest.mark.parametrize("q_len", [1, 3])
+def test_left_padded_batch_attention_matches_each_row(bits, q_len):
+    """Decode and verify on a left-padded batch with the cache's own mask. 3.5
+    bits is outside the MMA envelope: decode takes the masked decode_attention
+    path and verify returns None for the caller's masked dequantize path."""
+    from omlx.patches import turboquant_attention as tq_attention
+
+    pads = [0, 250, 590]
+    batch, queries, ks, vs, mask = _left_padded_tq_batch(pads, 600, q_len, bits=bits)
+    out = tq_attention._left_padded_batch_attention(
+        batch, queries, ks, vs, 128**-0.5, mask
+    )
+    if bits == 3.5 and q_len > 1:
+        assert out is None
+        return
+    _assert_rows_match(out, batch, queries, ks, vs, pads, 5e-3)
 
 
 def test_attention_patch_routes_single_token_decode_to_mma(monkeypatch):
@@ -1026,6 +1094,27 @@ def test_vlm_target_verify_attention_handles_tq_proxies():
         )
         is None
     )
+
+
+@pytest.mark.parametrize("bits", [4.0, 3.5])
+def test_vlm_left_padded_decode_keeps_padding_masked(bits):
+    """mlx-vlm's left_padded_decode hands a B>1 batch to the seam with
+    mask=None. The padding columns must stay out of every row's softmax."""
+    pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+
+    from omlx.patches import turboquant_attention as tq_attention
+
+    tq_attention.apply_turboquant_attention_patch()
+    tq_attention._patch_vlm_target_verify_attention()
+
+    from mlx_vlm.models.qwen3_5 import language as q35_lang
+
+    pads = [0, 250, 590]
+    batch, queries, ks, vs, _ = _left_padded_tq_batch(pads, 600, 1, bits=bits)
+    out = q35_lang._qwen3_5_left_padded_attention(
+        queries, ks, vs, cache=batch, scale=128**-0.5, mask=None
+    )
+    _assert_rows_match(out, batch, queries, ks, vs, pads, 1e-2)
 
 
 # ---------------------------------------------------------------------------
