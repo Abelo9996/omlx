@@ -210,6 +210,7 @@
                     openclaw_model: null,
                     hermes_model: null,
                     pi_model: null,
+                    vibe_model: null,
                     dsh_model: null,
                     openclaw_tools_profile: 'full',
                     markitdown_enabled: true,
@@ -4151,6 +4152,12 @@
                 return this._launchCmd('pi');
             },
 
+            get vibeCommand() {
+                const model = this.globalSettings.integrations.vibe_model;
+                const command = this._launchCmd('vibe');
+                return model ? `${command} --model ${this.shellQuote(model)}` : command;
+            },
+
             get dshCommand() {
                 return this._launchCmd('dsh');
             },
@@ -4179,6 +4186,7 @@
                             integrations_openclaw_model: this.globalSettings.integrations.openclaw_model,
                             integrations_hermes_model: this.globalSettings.integrations.hermes_model,
                             integrations_pi_model: this.globalSettings.integrations.pi_model,
+                            integrations_vibe_model: this.globalSettings.integrations.vibe_model,
                             integrations_dsh_model: this.globalSettings.integrations.dsh_model,
                             integrations_openclaw_tools_profile: this.globalSettings.integrations.openclaw_tools_profile,
                             markitdown_enabled: this.globalSettings.integrations.markitdown_enabled,
