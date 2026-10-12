@@ -2237,6 +2237,12 @@ def _prepare_chat_prompt_for_request(
     )
 
 
+class _ContextLengthExceededError(HTTPException):
+    # Clients compact only on overflow errors they recognize: this OpenAI code,
+    # "prompt is too long: N tokens > M", or "maximum context length".
+    code = "context_length_exceeded"
+
+
 def validate_context_window(
     num_prompt_tokens: int, model_id: str | None = None
 ) -> None:
@@ -2247,11 +2253,11 @@ def validate_context_window(
     """
     max_ctx = get_max_context_window(model_id)
     if max_ctx and num_prompt_tokens > max_ctx:
-        raise HTTPException(
+        raise _ContextLengthExceededError(
             status_code=400,
             detail=(
-                f"Prompt too long: {num_prompt_tokens} tokens exceeds "
-                f"max context window of {max_ctx} tokens"
+                f"Prompt is too long: {num_prompt_tokens} tokens > "
+                f"{max_ctx} maximum context length"
             ),
         )
 
