@@ -140,7 +140,7 @@ def normalize_input(
       ``[{"type": "text", "text": "..."},
         {"type": "image_url", "image_url": {"url": "data:..."}}]``
       Any dict inside the list marks the whole list as the content parts of
-      a *single* embedding input — the batch shape is list-of-strings only.
+      a *single* embedding input, so plain strings cannot be mixed in.
       Parts collapse into one structured item of the same shape ``items``
       produces, so content-part clients and ``items`` clients reach the
       engine through one path.
@@ -199,16 +199,19 @@ def _item_from_content_parts(parts: List[Any]) -> Dict[str, str]:
     audio: Optional[str] = None
 
     for part in parts:
-        if isinstance(part, str):
-            texts.append(part)
-            continue
+        # A string here would be a batch entry; fusing it would return one vector.
         if not isinstance(part, dict):
             raise InvalidRequestError(
-                "Embedding input parts must be strings or content-part objects"
+                "Embedding input cannot mix plain strings with content parts"
             )
         part_type = part.get("type")
         if part_type == "text":
-            texts.append(str(part.get("text", "")))
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise InvalidRequestError(
+                    "Embedding content part 'text' requires a string"
+                )
+            texts.append(text)
         elif part_type in ("image_url", "image", "input_image"):
             if image is not None:
                 raise InvalidRequestError(

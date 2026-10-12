@@ -324,6 +324,24 @@ class TestEmbeddingUtils:
         with pytest.raises(InvalidRequestError, match="no text, image, or audio"):
             normalize_input([{"type": "text", "text": ""}])
 
+    def test_normalize_input_rejects_strings_mixed_with_parts(self):
+        """A string batch must not silently fuse into one vector."""
+        parts = [
+            "doc one",
+            "doc two",
+            {"type": "image_url", "image_url": {"url": IMAGE_DATA_URI}},
+        ]
+        with pytest.raises(InvalidRequestError, match="cannot mix plain strings"):
+            normalize_input(parts)
+
+    def test_normalize_input_rejects_null_text_part(self):
+        parts = [
+            {"type": "text", "text": None},
+            {"type": "image_url", "image_url": {"url": IMAGE_DATA_URI}},
+        ]
+        with pytest.raises(InvalidRequestError, match="'text' requires a string"):
+            normalize_input(parts)
+
     def test_embedding_request_accepts_content_parts(self):
         """EmbeddingRequest keeps OpenAI content-part input verbatim."""
         parts = [
