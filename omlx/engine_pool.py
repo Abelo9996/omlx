@@ -62,6 +62,7 @@ from .model_settings import (
     ane_prefill_fraction,
     validate_ane_prefill,
 )
+from .patches.qwen35_yarn import yarn_factor
 from .scheduler import SchedulerConfig
 from .utils.fatal import exit_if_gpu_submissions_ignored
 from .utils.generation_config import SAMPLING_SETTING_KEYS, load_sampling_defaults
@@ -1086,6 +1087,13 @@ class EnginePool:
                 "deepseek_v41_ced_prefill_enabled",
                 getattr(settings, "deepseek_v41_ced_prefill_enabled", False),
             )
+            factor = yarn_factor(
+                entry.config_model_type,
+                entry.model_context_length,
+                data.get("max_context_window"),
+            )
+            if factor is not None:
+                add("yarn_factor", factor)
 
         turboquant_active = bool(data.get("turboquant_kv_enabled", False))
         add("turboquant_kv_enabled", turboquant_active)
