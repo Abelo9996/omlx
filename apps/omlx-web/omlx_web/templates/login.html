@@ -277,6 +277,8 @@
                     console.error('Login error:', err);
                 } finally {
                     this.loading = false;
+                    // The input loses focus while it is disabled for the request.
+                    if (this.error) this.$nextTick(() => document.getElementById('api_key').focus());
                 }
             },
 
@@ -323,6 +325,7 @@
                     console.error('Setup error:', err);
                 } finally {
                     this.loading = false;
+                    if (this.error) this.$nextTick(() => document.getElementById('setup_api_key').focus());
                 }
             }
         }
