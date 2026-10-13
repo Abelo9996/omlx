@@ -11,7 +11,10 @@ so the engine can give the GPU to other models between steps.
 
 import json
 import logging
-from collections.abc import Callable, Generator
+import os
+import tempfile
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +23,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx_vlm.utils import load as vlm_load
 
-from ..model_discovery import _vision_weight_bytes
+from ..model_discovery import DECISION_SIDECAR_WEIGHTS, _vision_weight_bytes
 from ..utils.image import load_image
 from ..utils.model_loading import (
     lm_load_compat,
@@ -47,6 +50,24 @@ def round4(value: float) -> float:
 
 def decode_images(urls: list[str] | None) -> list:
     return [load_image(url, field="images") for url in urls or []]
+
+
+@contextmanager
+def _backbone_files(path: Path) -> Iterator[Path]:
+    """Yield ``path``, or a symlinked view of it without decision head weights.
+
+    Without an index mlx-vlm loads every ``*.safetensors`` file, so a head next
+    to a single backbone shard would be loaded into the backbone (d3-nano).
+    """
+    heads = {name for name in DECISION_SIDECAR_WEIGHTS if (path / name).is_file()}
+    if not heads or (path / "model.safetensors.index.json").is_file():
+        yield path
+        return
+    with tempfile.TemporaryDirectory(prefix="omlx-decision-") as view:
+        for entry in path.iterdir():
+            if entry.name not in heads:
+                os.symlink(entry.absolute(), Path(view) / entry.name)
+        yield Path(view)
 
 
 class DecisionBackbone:
@@ -78,9 +99,11 @@ class DecisionBackbone:
         if _vision_weight_bytes(path) > 0:
             # Also installs the Qwen3.5 GatedDeltaNet q/k norm fix for mlx-vlm.
             maybe_apply_pre_load_patches(self.model_path, for_vlm=True)
-            model, processor = vlm_load(
-                self.model_path, trust_remote_code=self.trust_remote_code
-            )
+            # load() evaluates the weights, so the view can go away after it.
+            with _backbone_files(path) as files:
+                model, processor = vlm_load(
+                    str(files), trust_remote_code=self.trust_remote_code
+                )
             tokenizer = processor.tokenizer
             self.image_processor = processor.image_processor
         else:

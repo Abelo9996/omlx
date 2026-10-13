@@ -1,4 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+#
+# The question rules, prompt text, answer format and video frame sampling are
+# adapted from the d3 runtime (d3_format.py, d3_runtime.py) shipped with the
+# Decision 3.0 checkpoints (https://huggingface.co/vllm-sr), Copyright 2026
+# vLLM Semantic Router Team, Apache License 2.0.
 """
 Decision 3.0 (vllm-sr d3) decision models.
 
@@ -22,6 +27,7 @@ import mlx.core as mx
 import numpy as np
 from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import Qwen3VLVideoProcessor
 
+from ..exceptions import InvalidRequestError
 from ..model_discovery import D3_DECISION_CONFIG, D3_FORMAT_ID, D3_READOUT_WEIGHTS
 from ..patches.sdpa256_attention import apply_sdpa256_attention_patch
 from ..utils.video import require_opencv, write_video_data_uri
@@ -296,7 +302,7 @@ def sample_indices(total: int, fps: float) -> list[int]:
 def decode_video(url: str) -> D3Video:
     """Decode an inline video with OpenCV and sample its frames."""
     cv2 = require_opencv(field="videos")
-    path, _ = write_video_data_uri(url, field="videos")
+    path, _ = write_video_data_uri(url, field="videos", subject="the video")
     try:
         api = cv2.CAP_ANY
         try:
@@ -524,10 +530,7 @@ class D3Model:
         ]
         plan = D3Plan(request["questions"], items, [], [])
         images = decode_images(request.get("images"))
-        videos = [
-            self._decode_video(url, number)
-            for number, url in enumerate(request.get("videos") or [])
-        ]
+        videos = request.get("videos") or []
         merge = backbone.image_processor.merge_size
         image_counts: list[int] = []
         if images:
@@ -581,17 +584,25 @@ class D3Model:
             return decode_video(url)
         except DecisionRequestError as exc:
             raise DecisionRequestError(f"videos[{number}]: {exc}") from exc
+        except InvalidRequestError as exc:
+            raise InvalidRequestError(
+                f"videos[{number}]: {exc}", field="videos"
+            ) from exc
 
-    def _preprocess_videos(
-        self, plan: D3Plan, videos: list[D3Video]
-    ) -> list[list[int]]:
-        """Patch every video and return each one's placeholder token ids."""
+    def _preprocess_videos(self, plan: D3Plan, urls: list[str]) -> list[list[int]]:
+        """Decode and patch every video; return each one's placeholder token ids.
+
+        Videos are read one at a time, so a request over the video token budget
+        stops at the first video that crosses it.
+        """
         backbone = self.backbone
         image_processor = backbone.image_processor
         merge = image_processor.merge_size
         temporal = image_processor.temporal_patch_size
-        pixels, grids = [], []
-        for number, video in enumerate(videos):
+        pixels, grids, placeholders = [], [], []
+        tokens = 0
+        for number, url in enumerate(urls):
+            video = self._decode_video(url, number)
             processor = Qwen3VLVideoProcessor(
                 patch_size=image_processor.patch_size,
                 temporal_patch_size=temporal,
@@ -605,18 +616,15 @@ class D3Model:
                 out = processor(videos=[video.frames])
             except ValueError as exc:
                 raise DecisionRequestError(f"videos[{number}]: {exc}") from exc
+            grid = out["video_grid_thw"][0]
+            tokens += int(np.prod(grid)) // merge**2
+            if tokens > VIDEO_MAX_TOKENS:
+                raise DecisionRequestError(
+                    f"the first {number + 1} videos take {tokens:,} input tokens, "
+                    f"over the {VIDEO_MAX_TOKENS:,} a request may spend on videos"
+                )
             pixels.append(out["pixel_values_videos"])
-            grids.append(out["video_grid_thw"][0])
-        plan.video_pixels = np.concatenate(pixels, axis=0)
-        plan.video_grids = np.asarray(grids)
-        tokens = int(np.prod(plan.video_grids, axis=1).sum()) // merge**2
-        if tokens > VIDEO_MAX_TOKENS:
-            raise DecisionRequestError(
-                f"the videos take {tokens:,} input tokens, over the "
-                f"{VIDEO_MAX_TOKENS:,} a request may spend on videos"
-            )
-        placeholders = []
-        for video, grid in zip(videos, plan.video_grids, strict=True):
+            grids.append(grid)
             per_patch = int(grid[1] * grid[2]) // merge**2
             text = "".join(
                 f"<{time:.1f} seconds><|vision_start|>"
@@ -625,6 +633,8 @@ class D3Model:
                 for time in frame_timestamps(video, temporal)
             )
             placeholders.append(backbone.tokenize(text))
+        plan.video_pixels = np.concatenate(pixels, axis=0)
+        plan.video_grids = np.asarray(grids)
         return placeholders
 
     def _expand(

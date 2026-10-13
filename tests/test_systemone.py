@@ -2,6 +2,7 @@
 """Tests for the decision models behind /v1/systemone (Clef, OpenJev, d3)."""
 
 import copy
+import inspect
 import json
 import math
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ mx = pytest.importorskip("mlx.core")
 import mlx.nn as nn  # noqa: E402
 from mlx.utils import tree_flatten  # noqa: E402
 
-from omlx.models import clef, d3, openjev  # noqa: E402
+from omlx.exceptions import InvalidRequestError  # noqa: E402
+from omlx.models import clef, d3, decision, openjev  # noqa: E402
 from omlx.models.decision import (  # noqa: E402
     DecisionBackbone,
     DecisionContextLengthError,
@@ -491,6 +493,24 @@ def test_lm_head_rows_are_dequantized():
     assert np.allclose(np.array(rows), np.array(expected), atol=2e-2)
 
 
+def test_backbone_files_hide_a_head_beside_an_unindexed_shard(tmp_path):
+    for name in ("model.safetensors", "readout.safetensors", "config.json"):
+        (tmp_path / name).write_text(name)
+    with decision._backbone_files(tmp_path) as view:
+        assert view != tmp_path
+        assert sorted(p.name for p in view.iterdir()) == [
+            "config.json",
+            "model.safetensors",
+        ]
+        assert (view / "model.safetensors").read_text() == "model.safetensors"
+    assert not view.exists()
+
+    # An index already names the backbone shards.
+    (tmp_path / "model.safetensors.index.json").write_text("{}")
+    with decision._backbone_files(tmp_path) as view:
+        assert view == tmp_path
+
+
 # --------------------------------------------------------------------------
 # Decision 3.0 (d3)
 
@@ -770,6 +790,50 @@ def test_d3_rejects_literal_placeholder_with_media(tiny_d3, monkeypatch):
         tiny_d3.encode(request)
 
 
+def test_d3_video_encode_and_token_budget(tiny_d3, monkeypatch):
+    decoded = []
+
+    def decode(url):
+        decoded.append(url)
+        return d3.D3Video(np.zeros((4, 64, 64, 3), np.uint8), 2.0, [0, 1, 2, 3])
+
+    monkeypatch.setattr(d3, "decode_video", decode)
+    tiny_d3.backbone.image_processor = SimpleNamespace(
+        patch_size=16,
+        temporal_patch_size=2,
+        merge_size=2,
+        image_mean=[0.5] * 3,
+        image_std=[0.5] * 3,
+    )
+    request = {
+        "state": "a clip",
+        "videos": ["v0", "v1"],
+        "questions": {"q": {"type": "noul"}},
+    }
+    # Four 64 x 64 frames are two temporal patches of 2 x 2 tokens.
+    plan = tiny_d3.encode(request)
+    assert plan.video_grids.tolist() == [[2, 4, 4], [2, 4, 4]]
+    (ids,) = plan.ids
+    assert int((ids == 301).sum()) == 16
+    assert plan.positions[0].shape == (3, len(ids))
+
+    # Decoding stops at the first video over the budget.
+    decoded.clear()
+    monkeypatch.setattr(d3, "VIDEO_MAX_TOKENS", 20)
+    request["videos"] = [f"v{i}" for i in range(5)]
+    with pytest.raises(DecisionRequestError, match="first 3 videos take 24"):
+        tiny_d3.encode(request)
+    assert decoded == ["v0", "v1", "v2"]
+
+
+def test_d3_video_uri_errors_name_the_video(tiny_d3, monkeypatch):
+    monkeypatch.setattr(d3, "require_opencv", lambda field: None)
+    with pytest.raises(InvalidRequestError) as error:
+        tiny_d3._decode_video("data:video/mp4,AAAA", 1)
+    assert str(error.value) == "videos[1]: the video must use a base64 video data URI."
+    assert error.value.field == "videos"
+
+
 @pytest.mark.parametrize("model_class", [clef.ClefModel, openjev.OpenJevModel])
 def test_clef_and_openjev_reject_videos(model_class):
     model = model_class("unused")
@@ -809,15 +873,30 @@ def _base_config(**overrides):
     }
 
 
-def test_layer_types_and_headless_base_model():
+@pytest.fixture
+def base_compat(monkeypatch):
+    """Install the base-model compat patch for one test, then restore mlx-vlm."""
+    from mlx_vlm.models.qwen3_5 import config, language, qwen3_5
+
+    from omlx.patches import mlx_vlm_qwen35_base_compat as compat
+
+    for target, name in (
+        (config.TextConfig, "from_dict"),
+        (config.ModelConfig, "from_dict"),
+        (language.Qwen3_5DecoderLayer, "__init__"),
+        (language.Qwen3_5Model, "__init__"),
+        (language.LanguageModel, "__init__"),
+        (qwen3_5, "sanitize_key"),
+    ):
+        monkeypatch.setattr(target, name, inspect.getattr_static(target, name))
+    monkeypatch.setattr(compat, "_APPLIED", False)
+    assert compat.apply_mlx_vlm_qwen35_base_compat_patch()
+    return compat
+
+
+def test_layer_types_and_headless_base_model(base_compat):
     from mlx_vlm.models.qwen3_5 import Model, ModelConfig
 
-    from omlx.patches.mlx_vlm_qwen35_base_compat import (
-        apply_mlx_vlm_qwen35_base_compat_patch,
-        needs_base_compat,
-    )
-
-    apply_mlx_vlm_qwen35_base_compat_patch()
     schedule = [
         "linear_attention",
         "full_attention",
@@ -827,7 +906,7 @@ def test_layer_types_and_headless_base_model():
     config = _base_config(
         text={"layer_types": schedule}, architectures=["Qwen3_5Model"]
     )
-    assert needs_base_compat(config)
+    assert base_compat.needs_base_compat(config)
     model = Model(ModelConfig.from_dict(config))
     layers = model.language_model.model.layers
     assert [layer.is_linear for layer in layers] == [True, False, False, True]
@@ -841,7 +920,7 @@ def test_layer_types_and_headless_base_model():
         text={"layer_types": periodic},
         architectures=["Qwen3_5ForConditionalGeneration"],
     )
-    assert not needs_base_compat(stock)
+    assert not base_compat.needs_base_compat(stock)
     model = Model(ModelConfig.from_dict(stock))
     assert [layer.is_linear for layer in model.language_model.model.layers] == [
         True,
