@@ -3,6 +3,7 @@
 
 import json
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -16,7 +17,7 @@ from omlx.cache.paged_cache import PagedCacheManager
 from omlx.cache.paged_ssd_cache import PagedSSDCacheManager
 from omlx.cache.prefix_cache import BlockAwarePrefixCache
 from omlx.request import Request, SamplingParams
-from omlx.scheduler import Scheduler, SchedulerConfig
+from omlx.scheduler import Scheduler, SchedulerConfig, _cache_base_sizes
 
 
 def _tiny_hybrid_model():
@@ -386,5 +387,124 @@ def test_prefill_tail_reuse_matches_cold_forward(
         request = _run_through_scheduler(scheduler, second, 13, "turn-2")
         assert request.cached_tokens == 7
         _assert_restored_matches_cold(model, scheduler, prefix, second + [7, 8], 13)
+    finally:
+        scheduler.shutdown()
+
+
+def _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind):
+    """A chunked-prefill scheduler over a tiny model and a real paged SSD cache."""
+    mx.random.seed(7)
+    if kind == "gdn":
+        model = _tiny_hybrid_model()
+        layer_types = ["ArraysCache", "KVCache"]
+    else:
+        model = _tiny_rotating_model()
+        layer_types = ["RotatingKVCache", "KVCache"]
+    scheduler = Scheduler(
+        model=model,
+        tokenizer=mock_tokenizer,
+        config=SchedulerConfig(
+            paged_cache_block_size=4, prefill_step_size=4, chunked_prefill=True
+        ),
+    )
+    paged = PagedCacheManager(
+        block_size=4, max_blocks=128, initial_blocks=128, model_name="tiny"
+    )
+    ssd = PagedSSDCacheManager(
+        cache_dir=tmp_path / "cache",
+        max_size_bytes=16 * 1024**2,
+        expected_model_name="tiny",
+        expected_num_layers=2,
+        expected_block_size=4,
+        expected_layer_cache_types=layer_types,
+    )
+    boundary = BoundarySnapshotSSDStore(tmp_path / "cache")
+    prefix = BlockAwarePrefixCache(
+        model=model, paged_cache_manager=paged, paged_ssd_cache_manager=ssd
+    )
+    prefix.set_gdn_checkpoint_loader(boundary.load_file)
+    scheduler.paged_cache_manager = paged
+    scheduler.paged_ssd_cache_manager = ssd
+    scheduler._boundary_snapshot_store = boundary
+    scheduler.block_aware_cache = prefix
+    # The rig attaches the cache after construction, so add the async writer a
+    # configured paged SSD cache would have.
+    scheduler._store_cache_executor = ThreadPoolExecutor(max_workers=1)
+    scheduler._get_stop_tokens = lambda: set()
+    # Non-NAX hosts with 64 GB+ widen Qwen3.5 prefill chunks past these prompts.
+    scheduler._qwen35_prefill_floor = 0
+    return model, scheduler, prefix
+
+
+@pytest.mark.parametrize("kind", ["gdn", "rotating"])
+def test_memory_requeue_resumes_decode_from_stored_prefix(
+    mock_tokenizer, tmp_path, kind
+):
+    """A memory requeue stores two decoding rows and a chunked prefill, resumes
+    them from the paged SSD cache, and streams every token once with the
+    original usage."""
+    model, scheduler, prefix = _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind)
+
+    prompts = {
+        "a": list(range(3, 13)),
+        "b": list(range(4, 12)),
+        "c": [5 + i % 20 for i in range(30)],
+    }
+    requests = {
+        rid: Request(
+            request_id=rid,
+            prompt=list(tokens),
+            sampling_params=SamplingParams(max_tokens=12, temperature=0),
+        )
+        for rid, tokens in prompts.items()
+    }
+    streamed = {rid: [] for rid in requests}
+    finals = {}
+
+    def step():
+        for output in scheduler.step().outputs:
+            streamed[output.request_id].extend(output.new_token_ids)
+            if output.finished:
+                finals[output.request_id] = output
+
+    try:
+        for rid in ("a", "b"):
+            scheduler.add_request(requests[rid])
+        for _ in range(100):
+            step()
+            if all(len(requests[rid].output_token_ids) >= 5 for rid in ("a", "b")):
+                break
+        scheduler.add_request(requests["c"])
+        for _ in range(100):
+            step()
+            state = scheduler._prefill_states.get("c")
+            if state is not None and _cache_base_sizes(state.cache) >= 8:
+                break
+        prefilled = _cache_base_sizes(scheduler._prefill_states["c"].cache)
+        sent = {rid: len(r.output_token_ids) for rid, r in requests.items()}
+        assert sent["c"] == 0
+
+        assert scheduler.request_memory_requeue() == 3
+        step()
+        for rid, request in requests.items():
+            assert request.memory_requeues == 1
+            assert request.requeued_output_tokens == sent[rid]
+            assert len(request.prompt_token_ids) == len(prompts[rid]) + sent[rid]
+            resumed = request.prompt_token_ids
+            # A decoding row keeps every full block but its last token; a
+            # prefill keeps every block it finished.
+            stored = (len(resumed) - 1) // 4 * 4 if sent[rid] else prefilled // 4 * 4
+            _assert_restored_matches_cold(model, scheduler, prefix, resumed, stored)
+
+        for _ in range(200):
+            step()
+            if len(finals) == len(requests):
+                break
+        for rid, request in requests.items():
+            assert streamed[rid] == request.output_token_ids
+            assert len(streamed[rid]) == 12
+            assert finals[rid].prompt_tokens == len(prompts[rid])
+            assert finals[rid].completion_tokens == 12
+            assert finals[rid].cached_tokens == 0
     finally:
         scheduler.shutdown()
