@@ -133,6 +133,22 @@ class RuntimePLEForkTests(unittest.TestCase):
         self.reader.close()
         self.temp.cleanup()
 
+    def test_selected_rows_own_storage_after_reader_close(self):
+        for indices in ([], [3], [7, 2, 7, 0]):
+            with self.subTest(indices=indices):
+                copied, dtype = self.reader.rows_np("weight", indices)
+                self.assertEqual(dtype, "F32")
+                self.assertTrue(copied.flags.owndata)
+                np.testing.assert_array_equal(copied, self.values[indices])
+                if indices:
+                    copied[0, 0] = -1
+                    np.testing.assert_array_equal(
+                        self.reader.rows_np("weight", indices)[0], self.values[indices]
+                    )
+        copied, _ = self.reader.rows_np("weight", [7, 2, 7, 0])
+        self.reader.close()
+        np.testing.assert_array_equal(copied, self.values[[7, 2, 7, 0]])
+
     def embedding(self):
         e = object.__new__(NS["DiskBackedShardedEmbedding"])
         e._owner_pid = os.getpid()

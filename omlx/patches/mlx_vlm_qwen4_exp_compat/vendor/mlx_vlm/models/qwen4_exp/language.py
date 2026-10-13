@@ -3305,7 +3305,8 @@ class _SafeTensorMMap:
             buffer=self._mapping,
             offset=self._data_start + start,
         )
-        copied = np.array(view[row_indices], copy=True)
+        # Integer-array indexing already copies the selected rows out of mmap.
+        copied = view[row_indices]
         if gather_start is not None:
             self._rearm_if_slow(time.perf_counter() - gather_start, row_indices.size)
         return copied, dtype
