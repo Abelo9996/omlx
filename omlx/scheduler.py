@@ -9264,12 +9264,6 @@ class Scheduler:
         prompt_tokens = list(request.prompt_token_ids or [])
         if _output_tokens_cacheable(request):
             prompt_tokens += list(getattr(request, "output_token_ids", None) or [])
-        boundary_len = (len(prompt_tokens) // block_size) * block_size
-        if boundary_len <= 0:
-            return None
-
-        token_sequence = prompt_tokens[:boundary_len]
-
         boundary_override = self._get_boundary_store_override(request_id, prompt_tokens)
         if boundary_override is not None:
             (
@@ -9342,6 +9336,11 @@ class Scheduler:
         if self._detect_boundary_snapshot_need():
             return None
 
+        boundary_len = (len(prompt_tokens) // block_size) * block_size
+        if boundary_len <= 0:
+            return None
+
+        token_sequence = prompt_tokens[:boundary_len]
         live_payload = self._extract_live_request_cache_for_store(
             request_id,
             uid,
