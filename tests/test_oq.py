@@ -31,6 +31,7 @@ from omlx.oq import (
     _affine_minmax_params,
     _affine_perturb_group_size,
     _bpw_targets_for_level,
+    _build_model_sanitizer,
     _build_proxy_for_sensitivity,
     _build_quant_plan,
     _build_streaming_proxy_for_sensitivity,
@@ -43,6 +44,7 @@ from omlx.oq import (
     _discover_sanitize_plan,
     _DiscoveredPlan,
     _extract_layer_index,
+    _find_model_layers,
     _format_size,
     _forward_layer,
     _forward_layer_result,
@@ -2135,6 +2137,69 @@ def _write_safetensors(path, tensors):
 
 
 @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
+class TestEmbeddingGemma2Calibration:
+    _TEXT = {
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "head_dim": 8,
+        "hidden_size_per_layer_input": 4,
+        "embedding_dim": 8,
+        "sliding_window": 2,
+        "layer_types": ["sliding_attention", "full_attention"],
+    }
+
+    def test_layer_walk_matches_the_encoder_forward(self):
+        """Calibration replays the bidirectional encoder with its PLE inputs."""
+        pytest.importorskip("mlx_vlm.models.embedding_gemma2")
+        from mlx_vlm.models.embedding_gemma2 import Model, ModelConfig
+
+        mx.random.seed(0)
+        model = Model(
+            ModelConfig.from_dict(
+                {
+                    "model_type": "embedding_gemma2",
+                    "text_config": self._TEXT,
+                    "vision_config": None,
+                    "audio_config": None,
+                }
+            )
+        )
+        ids = mx.array([[3, 7, 1, 9, 4, 2, 8, 5]])
+        embed_fn, layers = _find_model_layers(model)
+        assert embed_fn is model.language_model.embed_tokens
+
+        hidden, masks, state = _prepare_layer_inputs(model, layers, ids, embed_fn(ids))
+        for layer_idx, layer in enumerate(layers):
+            hidden, _ = _forward_layer_result(
+                layer, hidden, masks[layer_idx], state, layer_idx=layer_idx
+            )
+        text = model.language_model
+        walked = text.embedding_projection(text.norm(hidden))
+        scaled = embed_fn(ids) * mx.array(16**0.5, dtype=mx.float32)
+        expected = text(scaled, mx.ones_like(ids))
+        assert mx.allclose(walked, expected, atol=1e-5)
+
+    def test_vlm_sanitizer_keeps_vision_weights(self):
+        """The sanitize proxy answers EmbeddingGemma 2's vision_tower check."""
+        pytest.importorskip("mlx_vlm.models.embedding_gemma2")
+        config = {
+            "model_type": "embedding_gemma2",
+            "architectures": ["EmbeddingGemma2Model"],
+            "text_config": self._TEXT,
+            "vision_config": {"hidden_size": 8},
+        }
+        sanitize = _build_model_sanitizer(config, text_only=False)
+        weights = {
+            "vision_tower.encoder.layers.0.mlp.up_proj.weight": mx.zeros((2, 2)),
+            "language_model.norm.weight": mx.zeros((16,)),
+        }
+        assert set(sanitize(weights)) == set(weights)
+
+
 class TestLazyTensorIndex:
     @pytest.fixture
     def sf_file(self, tmp_path):
