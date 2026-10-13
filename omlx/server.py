@@ -4411,9 +4411,6 @@ def _extract_chat_messages(
         ),
     )
     is_vlm = isinstance(engine, VLMBatchedEngine)
-    is_dflash_vlm = not is_vlm and getattr(
-        engine, "supports_multimodal_fallback", False
-    )
     extractor = getattr(engine, "message_extractor", None)
     if extractor is not None:
         extractor_kwargs = {}
@@ -4428,8 +4425,8 @@ def _extract_chat_messages(
             engine.tokenizer,
             **extractor_kwargs,
         )
-    elif is_vlm or is_dflash_vlm:
-        # VLM or DFlash with VLM fallback: preserve image_url content parts
+    elif is_vlm:
+        # VLM: preserve image_url content parts
         messages = extract_multimodal_content(
             request.messages,
             max_tool_result_tokens,
@@ -7148,9 +7145,6 @@ async def create_anthropic_message(
         # Convert Anthropic format to internal format
         # Harmony models need special handling to preserve tool format
         is_vlm = isinstance(engine, VLMBatchedEngine)
-        is_dflash_vlm = not is_vlm and getattr(
-            engine, "supports_multimodal_fallback", False
-        )
         native_reasoning = uses_native_reasoning_content(
             resolved_model,
             config_model_type=(
@@ -7177,7 +7171,7 @@ async def create_anthropic_message(
                 request,
                 max_tool_result_tokens,
                 engine.tokenizer,
-                preserve_images=is_vlm or is_dflash_vlm,
+                preserve_images=is_vlm,
                 native_reasoning_content=native_reasoning,
                 consolidate_system_messages=False,
             )
@@ -7838,9 +7832,7 @@ async def create_response(
         # Images in function_call_output lists survive only for engines that
         # can extract them; text engines get a placeholder instead so base64
         # payloads never reach the prompt (#2989).
-        preserve_tool_images = isinstance(engine, VLMBatchedEngine) or getattr(
-            engine, "supports_multimodal_fallback", False
-        )
+        preserve_tool_images = isinstance(engine, VLMBatchedEngine)
 
         current_input_messages = convert_responses_input_to_messages(
             request.input,
