@@ -3652,7 +3652,7 @@ class DiskBackedShardedEmbedding(nn.Module):
         shape = indices.shape
         host = self._host_indices(indices)
         if host.size == 0:
-            return mx.zeros((*shape, self.dims), dtype=mx.bfloat16)
+            return mx.zeros((*shape, self.dims), dtype=self.weight_scale.dtype)
         pending = self._pending.pop(host.tobytes(), None)
         if pending is not None:
             plan, buffers = pending[0], pending[1].result()
@@ -3678,7 +3678,9 @@ class DiskBackedShardedEmbedding(nn.Module):
                 bits=bits,
                 mode="affine",
             )
-        values = values.astype(mx.bfloat16) * self.weight_scale
+        # Decode in the checkpoint's scale dtype. bf16 rows times an fp16
+        # scale promote to fp32.
+        values = values.astype(self.weight_scale.dtype) * self.weight_scale
         return values.reshape(*shape, self.dims)
 
     def _gather_per_shard(self, host_indices: list[int], shape) -> mx.array:
@@ -3690,7 +3692,7 @@ class DiskBackedShardedEmbedding(nn.Module):
         touched = tuple(sorted(set(shard_indices)))
         self.last_touched_shards = touched
         self.rows_read = 0
-        result = mx.zeros((len(host_indices), self.dims), dtype=mx.bfloat16)
+        result = mx.zeros((len(host_indices), self.dims), dtype=self.weight_scale.dtype)
         for shard_index in touched:
             positions = [
                 i
@@ -3718,7 +3720,7 @@ class DiskBackedShardedEmbedding(nn.Module):
                     bits=bits,
                     mode="affine",
                 )
-            values = values.astype(mx.bfloat16) * self.weight_scale
+            values = values.astype(self.weight_scale.dtype) * self.weight_scale
             self.rows_read += len(local)
             result = result.at[mx.array(positions, dtype=mx.int32)].add(values)
         return result.reshape(*shape, self.dims)
@@ -4248,7 +4250,8 @@ class Qwen4ExpPLELayer(nn.Module):
             history = self.ple_embedding._previous_context(
                 input_ids.astype(mx.int64), cache
             )
-        embeddings = self.ple_embedding(input_ids, cache)
+        # Any other table dtype would promote the residual stream to fp32.
+        embeddings = self.ple_embedding(input_ids, cache).astype(hidden_states.dtype)
         keys = self.norm_key(
             (
                 _target_verify_linear(self.key_proj, embeddings)
