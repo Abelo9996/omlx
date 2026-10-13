@@ -100,6 +100,7 @@ _COMPONENT_ORDER = (
     "Audio",
     "MTP head",
     "Joint schema head",
+    "Decision readout",
 )
 _REDOWNLOAD_NOTICE = (
     "> [!NOTE]\n"
