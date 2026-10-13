@@ -647,6 +647,18 @@ def maybe_apply_pre_load_patches(
                 )
 
     model_type = config.get("model_type")
+    if for_vlm and model_type == "qwen3_5":
+        from ..patches.mlx_vlm_qwen35_base_compat import (
+            apply_mlx_vlm_qwen35_base_compat_patch,
+            needs_base_compat,
+        )
+
+        if needs_base_compat(config) and apply_mlx_vlm_qwen35_base_compat_patch():
+            logger.info(
+                "Qwen3.5 base-checkpoint mlx-vlm compatibility patch applied for %s",
+                model_name,
+            )
+
     if for_vlm and model_type in {"moondream1", "moondream2"}:
         from ..patches.moondream2_compat import apply_moondream2_compat_patch
 
