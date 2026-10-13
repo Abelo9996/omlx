@@ -433,6 +433,9 @@ def _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind):
     scheduler._get_stop_tokens = lambda: set()
     # Non-NAX hosts with 64 GB+ widen Qwen3.5 prefill chunks past these prompts.
     scheduler._qwen35_prefill_floor = 0
+    # Fairness gates chunks on wall-clock decode time; a slow host would let the
+    # decoding rows finish before the chunked prefill reaches its probe point.
+    scheduler._decode_fairness = False
     return model, scheduler, prefix
 
 
