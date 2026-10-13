@@ -33,7 +33,6 @@ def make_family(
         active_params=int((active_b or total_b) * 1e9),
         kv_bytes_per_token=kv,
         kv_fixed_bytes=fixed,
-        table_bytes=table,
         max_context=262144,
         vision=True,
         audio=False,
@@ -45,6 +44,7 @@ def make_family(
                 False,
                 True,
                 int(gb * 1e9),
+                table,
             )
             for level, gb in builds.items()
         ),
@@ -134,7 +134,9 @@ class TestMemoryBudgets:
 
     def test_custom_ceiling_caps_models_until_aggressive(self, monkeypatch):
         memory = mac(monkeypatch, 512, metal_gib=486)
-        memory = MemoryInputs(memory.total_ram, "custom", True, 28 * GiB, memory.metal_cap)
+        memory = MemoryInputs(
+            memory.total_ram, "custom", True, 28 * GiB, memory.metal_cap
+        )
 
         scenarios = rec.memory_scenarios(memory)
 
@@ -156,7 +158,7 @@ class TestEstimates:
         on_ssd = rec.evaluate(FLASH_NEXT, build, small, 546)
         assert on_ssd is not None and on_ssd.table_on_ssd
         assert on_ssd.resident_bytes == int(
-            (build.file_bytes - FLASH_NEXT.table_bytes) * 1.05
+            (build.file_bytes - build.table_bytes) * 1.05
         )
 
         large = rec.memory_scenarios(mac(monkeypatch, 256, metal_gib=240))["now"]
@@ -278,6 +280,23 @@ class TestSections:
         assert not table["table_on_ssd"]
         assert table["relative_speed"] > 2
 
+    def test_unlock_skips_tables_that_cost_no_speed_on_ssd(self, monkeypatch):
+        v41 = make_family(
+            "DeepSeek-V4.1-Flash",
+            566.6,
+            {4: 432.0},
+            active_b=31.5,
+            kv=80 * 1024,
+            table=int(122.9e9),
+            model_type="deepseek_v41",
+        )
+
+        sections = sections_for(monkeypatch, 512, families=[v41], bandwidth=819)
+
+        assert sections["best"][0]["table_on_ssd"]
+        # No SSD slowdown is known for the Engram table, so nothing to unlock.
+        assert sections["unlock"] == []
+
     def test_unlock_is_empty_on_the_highest_settings(self, monkeypatch):
         raised = (128 * GiB - 128 * GiB // 20) / GiB
         sections = sections_for(monkeypatch, 128, metal_gib=raised, tier="aggressive")
@@ -302,13 +321,22 @@ class TestSections:
         )
 
 
-def row(repo_id, *, tags=(), pipeline="image-text-to-text", downloads=10, total=27e9):
+def row(
+    repo_id,
+    *,
+    tags=(),
+    pipeline="image-text-to-text",
+    downloads=10,
+    total=27e9,
+    model_type="qwen3_5",
+):
     return SimpleNamespace(
         id=repo_id,
         tags=list(tags),
         pipeline_tag=pipeline,
         downloads=downloads,
         sha="abc",
+        config={"model_type": model_type},
         safetensors={"parameters": {"U32": int(total)}, "total": int(total)},
     )
 
@@ -318,6 +346,7 @@ class TestCatalog:
     def _reset(self, monkeypatch):
         monkeypatch.setattr(rec, "_catalog", None)
         monkeypatch.setattr(rec, "_facts_cache", {})
+        monkeypatch.setattr(rec, "_table_cache", {})
         monkeypatch.setattr(rec, "_get_hf_api", lambda: (object(), None))
 
     def _patch_hub(self, monkeypatch, rows, sizes, facts):
@@ -376,7 +405,34 @@ class TestCatalog:
         assert not complete
         v41 = by_name["DeepSeek-V4.1-Flash"]
         assert v41.total_params == 566591466194
-        assert v41.table_bytes == 122883656000
+        assert v41.builds[0].table_bytes == 122883656000
+
+    @pytest.mark.asyncio
+    async def test_qwen4_exp_reads_the_table_of_every_build(self, monkeypatch):
+        rows = [
+            row(f"Jundot/Qwen3.8-Flash-Next-oQ{level}e-mtp", model_type="qwen4_exp")
+            for level in (4, 6, 8)
+        ]
+        rows[0].downloads = 100
+        sizes = {r.id: int(150e9) for r in rows}
+        facts = {
+            rows[0].id: {"config": {"num_hidden_layers": 4}, "model_type": "qwen4_exp"}
+        }
+        self._patch_hub(monkeypatch, rows, sizes, facts)
+
+        def table_bytes(api, endpoint, repo_id, revision):
+            if "oQ6e" in repo_id:
+                raise TimeoutError
+            return int(57.6e9 if "oQ8e" in repo_id else 32.0e9)
+
+        monkeypatch.setattr(rec, "_ngram_table_bytes", table_bytes)
+
+        families, complete = await rec._fetch_families("Jundot")
+
+        # oQ8 keeps an 8-bit table; a build whose table is unknown waits for a retry.
+        tables = {b.level: b.table_bytes for b in families[0].builds}
+        assert tables == {4.0: int(32.0e9), 8.0: int(57.6e9)}
+        assert not complete
 
     @pytest.mark.asyncio
     async def test_failed_refresh_serves_the_last_catalog(self, monkeypatch):

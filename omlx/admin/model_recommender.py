@@ -15,6 +15,7 @@ import logging
 import math
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,6 +117,7 @@ _FP16_CHIPS = frozenset({"M1", "M2"})
 _CATALOG_TTL = 3600.0
 _INCOMPLETE_CATALOG_TTL = 60.0
 _FAMILY_FETCH_CONCURRENCY = 8
+_SHARD_FETCH_CONCURRENCY = 8
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,8 @@ class Build:
     fp16: bool
     mtp: bool
     file_bytes: int
+    # N-gram / Engram lookup tables the runtime can leave on SSD.
+    table_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -139,8 +143,6 @@ class Family:
     active_params: int
     kv_bytes_per_token: int
     kv_fixed_bytes: int
-    # N-gram / Engram lookup tables the runtime can leave on SSD.
-    table_bytes: int
     max_context: int
     vision: bool
     audio: bool
@@ -271,8 +273,8 @@ def evaluate(
         return None
     resident = int(build.file_bytes * _WEIGHT_OVERHEAD)
     table_on_ssd = False
-    if family.table_bytes > 0:
-        mmap = int((build.file_bytes - family.table_bytes) * _WEIGHT_OVERHEAD)
+    if build.table_bytes > 0:
+        mmap = int((build.file_bytes - build.table_bytes) * _WEIGHT_OVERHEAD)
         if family.model_type == "deepseek_v41":
             mmap += _ENGRAM_MMAP_SLACK
         if _table_goes_to_ssd(resident, mmap, budget):
@@ -289,7 +291,7 @@ def evaluate(
         return None
 
     smarts = math.log2(dense_equivalent_params(family) * retention)
-    weight_bytes = max(1, build.file_bytes - family.table_bytes)
+    weight_bytes = max(1, build.file_bytes - build.table_bytes)
     bytes_per_token = family.active_params * weight_bytes / max(1, family.total_params)
     tps = bandwidth_gbps * 1e9 * _BANDWIDTH_EFFICIENCY / max(1.0, bytes_per_token)
     if build.mtp:
@@ -501,7 +503,12 @@ def _unlock_section(
         if not fit.table_on_ssd:
             continue
         resident = _reevaluate(fit, both, bandwidth)
-        if resident is None or resident.table_on_ssd:
+        # Only offer it where the table on SSD costs speed.
+        if (
+            resident is None
+            or resident.table_on_ssd
+            or resident.tokens_per_second <= fit.tokens_per_second
+        ):
             continue
         rows.append(
             {
@@ -539,7 +546,7 @@ def _serialize(fit: Fit, base: Fit) -> dict:
         "download_bytes": build.file_bytes,
         "resident_bytes": fit.resident_bytes,
         "table_on_ssd": fit.table_on_ssd,
-        "table_bytes": family.table_bytes,
+        "table_bytes": build.table_bytes,
         "max_context": fit.max_context,
         "model_max_context": family.max_context,
         "smarts": round(fit.smarts, 3),
@@ -692,23 +699,11 @@ def kv_cache_cost(config: dict) -> tuple[int, int]:
     return per_token, fixed
 
 
-def _ngram_table_bytes(api: HfApi, repo_id: str) -> int:
-    """Bytes of Qwen4-Exp PLE n-gram tables, from safetensors headers."""
-    metadata = api.get_safetensors_metadata(
-        repo_id, token=False, timeout=_HF_API_TIMEOUT
-    )
-    total = 0
-    for file_metadata in metadata.files_metadata.values():
-        for name, tensor in file_metadata.tensors.items():
-            if _NGRAM_EMBEDDING_MARKER in name:
-                start, end = tensor.data_offsets
-                total += end - start
-    return total
-
-
-def _read_config(endpoint: str | None, repo_id: str, revision: str | None) -> dict:
-    """Fetch config.json into memory; the HF cache would keep a weightless entry."""
-    url = hf_hub_url(repo_id, "config.json", revision=revision, endpoint=endpoint)
+def _read_json(
+    endpoint: str | None, repo_id: str, filename: str, revision: str | None
+) -> dict:
+    """Fetch a small JSON file into memory; the HF cache would keep a weightless entry."""
+    url = hf_hub_url(repo_id, filename, revision=revision, endpoint=endpoint)
     response = get_session().get(
         url,
         headers=build_hf_headers(token=False),
@@ -719,16 +714,43 @@ def _read_config(endpoint: str | None, repo_id: str, revision: str | None) -> di
     return response.json()
 
 
+def _ngram_table_bytes(
+    api: HfApi, endpoint: str | None, repo_id: str, revision: str | None
+) -> int:
+    """Bytes of Qwen4-Exp PLE n-gram tables, from the shards that hold them."""
+    index = _read_json(endpoint, repo_id, "model.safetensors.index.json", revision)
+    files = {
+        filename
+        for name, filename in (index.get("weight_map") or {}).items()
+        if _NGRAM_EMBEDDING_MARKER in name
+    }
+
+    def shard_bytes(filename: str) -> int:
+        metadata = api.parse_safetensors_file_metadata(
+            repo_id, filename, revision=revision, token=False, timeout=_HF_API_TIMEOUT
+        )
+        return sum(
+            tensor.data_offsets[1] - tensor.data_offsets[0]
+            for name, tensor in metadata.tensors.items()
+            if _NGRAM_EMBEDDING_MARKER in name
+        )
+
+    with ThreadPoolExecutor(max_workers=_SHARD_FETCH_CONCURRENCY) as pool:
+        return sum(pool.map(shard_bytes, sorted(files)))
+
+
+def _model_type(config: dict) -> str:
+    return str(config.get("model_type") or "").replace("-", "_").lower()
+
+
 def _family_facts(
     api: HfApi, endpoint: str | None, repo_id: str, revision: str | None
 ) -> dict:
     """Config-derived facts for one family, read from its representative build."""
-    config = _read_config(endpoint, repo_id, revision)
-    model_type = str(config.get("model_type") or "").replace("-", "_").lower()
+    config = _read_json(endpoint, repo_id, "config.json", revision)
+    model_type = _model_type(config)
     facts: dict[str, Any] = {"config": config, "model_type": model_type}
-    if model_type == "qwen4_exp":
-        facts["table_bytes"] = _ngram_table_bytes(api, repo_id)
-    elif model_type == "deepseek_v41":
+    if model_type == "deepseek_v41":
         report = (config.get("omlx_deepseek_v41") or {}).get(
             "quantization_report"
         ) or {}
@@ -741,18 +763,26 @@ def _family_facts(
     return facts
 
 
-# Config-derived facts keyed by (repo_id, sha); a re-upload changes the sha.
+# Facts and per-build table bytes keyed by (repo_id, sha); a re-upload changes the sha.
 _facts_cache: dict[tuple[str, str | None], dict] = {}
+_table_cache: dict[tuple[str, str | None], int] = {}
 _catalog: tuple[float, float, list[Family]] | None = None
 _catalog_lock = asyncio.Lock()
 
 
 def _assemble_family(
-    name: str, rows: list[tuple[Any, tuple]], facts: dict, sizes: dict
+    name: str,
+    rows: list[tuple[Any, tuple]],
+    facts: dict,
+    sizes: dict,
+    tables: dict[str, int],
 ) -> Family | None:
+    """`tables` maps each build with known lookup-table bytes to that size."""
     config = facts["config"]
     representative = rows[0][0]
-    table_bytes = int(facts.get("table_bytes") or 0)
+    if representative.id not in tables:
+        return None
+    table_bytes = tables[representative.id]
     total = int(facts.get("total_params") or 0)
     if total <= 0:
         params = _safetensors_parameters(getattr(representative, "safetensors", None))
@@ -765,9 +795,9 @@ def _assemble_family(
         return None
     per_token, fixed = kv_cache_cost(config)
     builds = tuple(
-        Build(row.id, level, fp16, mtp, int(sizes.get(row.id, 0)))
+        Build(row.id, level, fp16, mtp, int(sizes[row.id]), tables[row.id])
         for row, (_, level, fp16, mtp) in rows
-        if sizes.get(row.id, 0) > 0
+        if sizes.get(row.id, 0) > 0 and row.id in tables
     )
     if not builds:
         return None
@@ -778,7 +808,6 @@ def _assemble_family(
         active_params=active_params(config, total),
         kv_bytes_per_token=per_token,
         kv_fixed_bytes=fixed,
-        table_bytes=table_bytes,
         max_context=_config_int(
             config, "max_position_embeddings", 32768, maximum=100_000_000
         ),
@@ -811,40 +840,69 @@ async def _fetch_families(author: str) -> tuple[list[Family], bool]:
             continue
         groups.setdefault(parsed[0], []).append((row, parsed))
 
-    sizes = await _blob_bytes_for_repos(
-        api, [row.id for rows_ in groups.values() for row, _ in rows_]
-    )
+    # Separate slots, so slow table reads do not hold back the family configs.
+    config_slots = asyncio.Semaphore(_FAMILY_FETCH_CONCURRENCY)
+    table_slots = asyncio.Semaphore(_FAMILY_FETCH_CONCURRENCY)
 
-    semaphore = asyncio.Semaphore(_FAMILY_FETCH_CONCURRENCY)
-
-    async def facts_for(rows_: list[tuple[Any, tuple]]) -> dict | None:
-        # The most downloaded build stands in for the family.
-        rows_.sort(key=lambda item: -(getattr(item[0], "downloads", 0) or 0))
-        row = rows_[0][0]
+    async def cached(cache: dict, row: Any, read, slots: asyncio.Semaphore) -> Any:
         key = (row.id, getattr(row, "sha", None))
-        if key in _facts_cache:
-            return _facts_cache[key]
-        async with semaphore:
+        if key in cache:
+            return cache[key]
+        async with slots:
             try:
-                facts = await asyncio.wait_for(
-                    asyncio.to_thread(_family_facts, api, endpoint, row.id, key[1]),
+                value = await asyncio.wait_for(
+                    asyncio.to_thread(read, api, endpoint, row.id, key[1]),
                     timeout=_HF_API_TIMEOUT * 3,
                 )
-            except Exception as e:  # noqa: BLE001 - one family must not sink the list
+            except Exception as e:  # noqa: BLE001 - one build must not sink the list
                 logger.warning("Could not read model facts for %s: %s", row.id, e)
                 return None
-        _facts_cache[key] = facts
-        return facts
+        cache[key] = value
+        return value
+
+    async def resolve(rows_: list[tuple[Any, tuple]]) -> tuple[dict, dict] | None:
+        # The most downloaded build stands in for the family.
+        rows_.sort(key=lambda item: -(getattr(item[0], "downloads", 0) or 0))
+        representative = rows_[0][0]
+        # The n-gram table bits follow the oQ level, so every Qwen4-Exp build
+        # is read, alongside the family config.
+        listed = getattr(representative, "config", None) or {}
+        table_rows = (
+            [row for row, _ in rows_] if _model_type(listed) == "qwen4_exp" else []
+        )
+        facts, *values = await asyncio.gather(
+            cached(_facts_cache, representative, _family_facts, config_slots),
+            *(
+                cached(_table_cache, row, _ngram_table_bytes, table_slots)
+                for row in table_rows
+            ),
+        )
+        if facts is None:
+            return None
+        table_bytes = int(facts.get("table_bytes") or 0)
+        tables = {row.id: table_bytes for row, _ in rows_}
+        for row, value in zip(table_rows, values):
+            if value is None:
+                del tables[row.id]
+            else:
+                tables[row.id] = value
+        return facts, tables
 
     names = list(groups)
-    resolved = await asyncio.gather(*(facts_for(groups[name]) for name in names))
+    sizes, resolved = await asyncio.gather(
+        _blob_bytes_for_repos(
+            api, [row.id for rows_ in groups.values() for row, _ in rows_]
+        ),
+        asyncio.gather(*(resolve(groups[name]) for name in names)),
+    )
     families = []
     complete = True
-    for name, facts in zip(names, resolved):
-        if facts is None:
+    for name, result in zip(names, resolved):
+        if result is None:
             complete = False
             continue
-        family = _assemble_family(name, groups[name], facts, sizes)
+        facts, tables = result
+        family = _assemble_family(name, groups[name], facts, sizes, tables)
         if family is None:
             complete = False
             continue
