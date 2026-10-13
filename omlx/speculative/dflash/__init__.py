@@ -30,7 +30,7 @@ from mlx_vlm.utils import get_model_path
 from ...model_settings import MAX_LIGHTNING_MTP_DRAFT_TOKENS
 from ...patches import qwen35_packed_linear
 from .drafter import DFlashDrafter
-from .variants import apply_partial_rope
+from .variants import apply_partial_rope, load_mask_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +110,15 @@ def load_dflash_drafter(
             quant_bits,
             quant_group_size,
         )
-    config = json.loads((get_model_path(path) / "config.json").read_text())
+    local = get_model_path(path)
+    config = json.loads((local / "config.json").read_text())
     apply_partial_rope(model, config)
+    mask_path = local / "mask_embedding.pt"
+    mask_embedding = (
+        load_mask_embedding(mask_path, int(config["hidden_size"]))
+        if mask_path.is_file()
+        else None
+    )
     # Laguna checks the target vocabulary through the tokenizer when the
     # target (an mlx-lm model) carries no config.
     if (
@@ -137,6 +144,8 @@ def load_dflash_drafter(
         source_path=path,
         adaptive=adaptive,
         window_size=window_size,
+        value_scale=(config.get("dflash_config") or {}).get("attention_value_scale"),
+        mask_embedding=mask_embedding,
     )
     logger.info(
         "DFlash drafter loaded: path=%s kind=%s block=%d adaptive=%s target_layers=%s",

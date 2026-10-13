@@ -1630,6 +1630,8 @@ class TestEnginePoolAsync:
     ):
         pool = pool_with_mock_engines
         pool.get_entry("model-a").config_model_type = "qwen3"
+        # The drafter estimate charges a context ring per scheduler row.
+        pool._scheduler_config.max_num_seqs = 8
         engine = MagicMock()
         engine.start = AsyncMock()
 
@@ -1678,6 +1680,36 @@ class TestEnginePoolAsync:
         base_engine.stop.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_dflash_without_a_draft_uses_the_bundled_draft(
+        self, pool_with_mock_engines, small_mock_model_dir
+    ):
+        """MiMo ships its DFlash draft in ``dflash/`` inside the checkpoint."""
+        pool = pool_with_mock_engines
+        pool._scheduler_config.max_num_seqs = 8
+        entry = pool.get_entry("model-a")
+        entry.config_model_type = "mimo_v2"
+        draft_path = small_mock_model_dir / "model-a" / "dflash"
+        draft_path.mkdir()
+        (draft_path / "config.json").write_text("{}")
+        (draft_path / "model.safetensors").touch()
+        engine = MagicMock()
+        engine.start = AsyncMock()
+
+        with (
+            patch("omlx.engine_pool.BatchedEngine", return_value=engine),
+            patch("omlx.engine_pool.load_dflash_drafter") as load,
+        ):
+            await pool.get_engine(
+                "model-a", runtime_settings=ModelSettings(dflash_enabled=True)
+            )
+
+        assert load.call_args.args[0] == str(draft_path)
+        engine.set_dflash_drafter.assert_called_once_with(load.return_value)
+        assert entry.runtime_settings_signature == pool._engine_runtime_signature(
+            "model-a", ModelSettings(dflash_enabled=True)
+        )
+
+    @pytest.mark.asyncio
     async def test_dflash_drafter_failure_reuses_requested_variant_while_leased(
         self, pool_with_mock_engines
     ):
@@ -1686,6 +1718,7 @@ class TestEnginePoolAsync:
 
         pool = pool_with_mock_engines
         pool.get_entry("model-a").config_model_type = "qwen3"
+        pool._scheduler_config.max_num_seqs = 8
         settings = ModelSettings(
             dflash_enabled=True,
             dflash_draft_model="/draft",

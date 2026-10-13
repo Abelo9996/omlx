@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Per-checkpoint pieces of the draft forward.
 
-DFlash2, DFlash v1, Laguna and the Muse Glimmer assistant differ in how they
-project the captured context, split Q/K/V, gate the attention output and
-rotate positions. mlx-vlm loads each class; these helpers apply the
+DFlash2, DFlash v1, Laguna, MiMo V2 and the Muse Glimmer assistant differ in
+how they project the captured context, split Q/K/V, gate or scale the
+attention and rotate positions. mlx-vlm loads each class; these helpers apply the
 difference inside the batched forward.
 """
 
 from __future__ import annotations
 
+import zipfile
+from pathlib import Path
+
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 from mlx_vlm.models.rope_utils import initialize_rope
 
 from ...patches import qwen35_verify_qmm
@@ -103,3 +107,19 @@ def apply_partial_rope(model: nn.Module, config: dict) -> None:
         scaling_config=scaling,
         max_position_embeddings=config.get("max_position_embeddings"),
     )
+
+
+def load_mask_embedding(path: Path, hidden_size: int) -> mx.array:
+    """Read MiMo's bf16 mask vector from its torch zip archive."""
+    with zipfile.ZipFile(path) as archive:
+        names = [name for name in archive.namelist() if name.endswith("/data/0")]
+        if len(names) != 1:
+            raise ValueError(f"{path} must hold exactly one tensor")
+        raw = archive.read(names[0])
+    if len(raw) != int(hidden_size) * 2:
+        raise ValueError(f"{path} holds {len(raw)} bytes, expected {hidden_size} bf16")
+    values = mx.array(np.frombuffer(raw, dtype=np.uint16).copy()).view(mx.bfloat16)
+    # The engine drafts on its own executor thread; a lazy view would stay
+    # bound to this loading thread's stream.
+    mx.eval(values)
+    return values

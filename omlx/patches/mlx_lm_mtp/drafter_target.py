@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Block-drafter hooks for plain-attention target models.
 
-Qwen3, Qwen3-MoE and Laguna (mlx-lm) and Muse Glimmer (mlx-vlm) checkpoints
-draft with DFlash on the batched engines. Their forward returns logits only,
-so this patch lets one forward also return chosen decoder-layer outputs
-(prefill seeding and verify), feeds the drafter from ordinary one-token
-steps, and rolls a rejected verify back by trimming the KV caches.
+Qwen3, Qwen3-MoE, Laguna and MiMo V2 (mlx-lm) and Muse Glimmer (mlx-vlm)
+checkpoints draft with DFlash on the batched engines. Their forward returns
+logits only, so this patch lets one forward also return chosen decoder-layer
+outputs (prefill seeding and verify), feeds the drafter from ordinary
+one-token steps, and rolls a rejected verify back by trimming the KV caches.
 
 Layer outputs are recorded by wrapping the decoder layer class and running
 the model's own forward, so its logits transform (Muse's output scale and
@@ -35,6 +35,16 @@ class _Sink:
         if self.count in self.wanted:
             self.outputs[self.count] = hidden
         self.count += 1
+
+
+def record(hidden: Any) -> None:
+    """Report a decoder layer output from a loop that skips the layer call.
+
+    MiMo's fused decode loop runs the layer math inline.
+    """
+    sink = getattr(_CAPTURE, "sink", None)
+    if sink is not None:
+        sink.add(hidden)
 
 
 def _wrap_layer(layer_cls: Any) -> None:
@@ -119,7 +129,9 @@ def _patch_model(model_cls: Any) -> None:
         return accepted
 
     model_cls.__call__ = __call__
-    model_cls.mtp_partial_rollback = mtp_partial_rollback
+    # MiMo keeps its own rollback, which checks the caches can trim first.
+    if not hasattr(model_cls, "mtp_partial_rollback"):
+        model_cls.mtp_partial_rollback = mtp_partial_rollback
     model_cls.rollback_speculative_cache = rollback_speculative_cache
     model_cls._omlx_drafter_single_row = True
     model_cls._omlx_drafter_target = True

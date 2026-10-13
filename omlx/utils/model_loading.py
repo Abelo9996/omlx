@@ -897,7 +897,7 @@ def maybe_apply_pre_load_patches(
     # patches are installed even when the checkpoint declares no MTP heads.
     dflash_batched = dflash_batched_supported(
         model_type, "vlm" if for_vlm else "batched"
-    ) and dflash_batched_requested(model_settings)
+    ) and dflash_batched_requested(model_settings, model_name)
     if _is_mtp_compatible(config, model_type) or dflash_batched:
         mtp_enabled = bool(
             model_settings is not None and getattr(model_settings, "mtp_enabled", False)
@@ -1328,7 +1328,15 @@ _DFLASH_BATCHED_MODEL_TYPES = {
         "gemma4_unified",
         "muse_glimmer",
     ),
-    "batched": ("qwen3_5", "qwen3_5_moe", "qwen3", "qwen3_moe", "laguna"),
+    "batched": (
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3",
+        "qwen3_moe",
+        "laguna",
+        "mimo_v2",
+        "mimo_v2_flash",
+    ),
 }
 
 
@@ -1344,17 +1352,36 @@ def dflash_compatibility(
     if dflash_batched_supported(model_type, engine_type):
         return True, ""
     return False, (
-        "DFlash supports Qwen3, Qwen3.5/3.6, Laguna, GLM-5.3, Gemma 4 and Muse "
-        f"Glimmer models (model_type='{model_type or ''}', engine='{engine_type}')"
+        "DFlash supports Qwen3, Qwen3.5/3.6, Laguna, MiMo V2, GLM-5.3, Gemma 4 and "
+        f"Muse Glimmer models (model_type='{model_type or ''}', "
+        f"engine='{engine_type}')"
     )
 
 
-def dflash_batched_requested(model_settings: Any | None) -> bool:
-    return bool(
-        model_settings is not None
-        and getattr(model_settings, "dflash_enabled", False)
-        and getattr(model_settings, "dflash_draft_model", None)
-    )
+def bundled_dflash_draft(model_path: str | Path | None) -> str | None:
+    """A DFlash draft shipped inside the target checkpoint (MiMo's ``dflash/``)."""
+    if not model_path:
+        return None
+    path = Path(model_path) / "dflash"
+    if (path / "config.json").is_file() and any(path.glob("*.safetensors")):
+        return str(path)
+    return None
+
+
+def dflash_draft_for(
+    model_settings: Any | None, model_path: str | Path | None
+) -> str | None:
+    """The configured DFlash draft, else one bundled with the target."""
+    if model_settings is None or not getattr(model_settings, "dflash_enabled", False):
+        return None
+    configured = getattr(model_settings, "dflash_draft_model", None)
+    return configured or bundled_dflash_draft(model_path)
+
+
+def dflash_batched_requested(
+    model_settings: Any | None, model_path: str | Path | None = None
+) -> bool:
+    return dflash_draft_for(model_settings, model_path) is not None
 
 
 def _nax_available() -> bool:

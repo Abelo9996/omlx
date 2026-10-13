@@ -101,10 +101,16 @@ class DFlashDrafter:
         source_path: str,
         adaptive: bool = True,
         window_size: int | None = None,
+        value_scale: float | None = None,
+        mask_embedding: mx.array | None = None,
     ):
         self.model = model
         self.source_path = source_path
         self._window_size = window_size
+        # MiMo scales attention values and embeds masked block positions with
+        # a trained vector instead of the mask token's embedding.
+        self.value_scale = value_scale
+        self.mask_embedding = mask_embedding
         self.target_layer_ids: list[int] = [
             int(i) for i in model.config.target_layer_ids
         ]
@@ -599,6 +605,12 @@ class DFlashDrafter:
         )
         inputs = mx.concatenate([anchors[:, None], masks], axis=1)
         h = model._embed_input_tokens(inputs)
+        if self.mask_embedding is not None:
+            fill = self.mask_embedding.astype(h.dtype)
+            h = mx.concatenate(
+                [h[:, :1], mx.broadcast_to(fill, (batch, block - 1, h.shape[-1]))],
+                axis=1,
+            )
 
         cohort = self._assemble_cohort(uids, dtype)
         base_arr = mx.array(bases, dtype=mx.int32)
@@ -659,6 +671,8 @@ class DFlashDrafter:
             ctx_values = ctx_values.reshape(
                 batch, width, attn.n_kv_heads, -1
             ).transpose(0, 2, 1, 3)
+            if self.value_scale is not None:
+                ctx_values = ctx_values * self.value_scale
             ctx_keys = model.rope(ctx_keys, offset=base_arr)
 
             ring_keys = mx.stop_gradient(cohort.keys[layer_index])
@@ -678,6 +692,8 @@ class DFlashDrafter:
             prop_values = prop_values.reshape(
                 batch, block, attn.n_kv_heads, -1
             ).transpose(0, 2, 1, 3)
+            if self.value_scale is not None:
+                prop_values = prop_values * self.value_scale
             queries = model.rope(queries, offset=query_offsets)
             prop_keys = model.rope(prop_keys, offset=query_offsets)
             keys = mx.concatenate([ring_keys, prop_keys], axis=2)

@@ -80,8 +80,9 @@ from .utils.fatal import exit_if_gpu_submissions_ignored
 from .utils.generation_config import SAMPLING_SETTING_KEYS, load_sampling_defaults
 from .utils.metal_sync import unreleased_graphics_bytes
 from .utils.model_loading import (
-    dflash_batched_requested,
+    bundled_dflash_draft,
     dflash_batched_supported,
+    dflash_draft_for,
     lightning_mtp_supported,
 )
 from .utils.proc_memory import get_phys_footprint
@@ -625,15 +626,17 @@ class EnginePool:
                         getattr(runtime_settings, "mtp_enabled", False)
                     ),
                 )
-        if dflash_batched_requested(runtime_settings) and dflash_batched_supported(
+        drafter_id = dflash_draft_for(runtime_settings, entry.model_path)
+        if drafter_id and dflash_batched_supported(
             entry.config_model_type, entry.engine_type
         ):
-            extra += self._dflash_drafter_estimated_bytes(runtime_settings)
+            extra += self._dflash_drafter_estimated_bytes(drafter_id, runtime_settings)
         return base + extra
 
-    def _dflash_drafter_estimated_bytes(self, runtime_settings: object) -> int:
+    def _dflash_drafter_estimated_bytes(
+        self, drafter_id: str, runtime_settings: object
+    ) -> int:
         """Weights of the batched DFlash drafter plus its per-row context rings."""
-        drafter_id = getattr(runtime_settings, "dflash_draft_model", None) or ""
         drafter_entry = self._entries.get(drafter_id)
         path = Path(drafter_entry.model_path if drafter_entry else drafter_id)
         try:
@@ -1223,6 +1226,8 @@ class EnginePool:
 
         dflash_enabled = bool(data.get("dflash_enabled", False)) and not is_diffusion
         dflash_draft = data.get("dflash_draft_model")
+        if dflash_enabled and not dflash_draft and entry is not None:
+            dflash_draft = bundled_dflash_draft(entry.model_path)
         dflash_active = dflash_enabled and bool(dflash_draft)
         add("dflash_enabled", dflash_active)
         if dflash_active:
@@ -3785,7 +3790,7 @@ class EnginePool:
                 and effective_type != "decision"
             ):
                 dflash_enabled = getattr(model_settings, "dflash_enabled", False)
-                dflash_draft = getattr(model_settings, "dflash_draft_model", None)
+                dflash_draft = dflash_draft_for(model_settings, entry.model_path)
                 if dflash_enabled and self._entry_is_diffusion_model(entry):
                     logger.warning(
                         "DFlash is not supported for diffusion models; "
@@ -4034,13 +4039,12 @@ class EnginePool:
 
             # Batched DFlash: load the block drafter and attach it to the
             # Lightning MTP verify path. Fail-soft like the VLM MTP drafter.
+            drafter_id = dflash_draft_for(model_settings, entry.model_path)
             if (
-                model_settings is not None
-                and dflash_batched_requested(model_settings)
+                drafter_id
                 and dflash_batched_supported(entry.config_model_type, effective_type)
                 and hasattr(engine, "set_dflash_drafter")
             ):
-                drafter_id = model_settings.dflash_draft_model
                 drafter_entry = self._entries.get(drafter_id)
                 drafter_path = drafter_entry.model_path if drafter_entry else drafter_id
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 import pytest
 from mlx_vlm.speculative.drafters.dflash2.config import DFlash2Config
 from mlx_vlm.speculative.drafters.dflash2.dflash2 import DFlash2DraftModel
@@ -21,11 +24,15 @@ from mlx_vlm.speculative.drafters.muse_glimmer_assistant import (
 from mlx_vlm.speculative.drafters.muse_glimmer_assistant import (
     MuseGlimmerAssistantDraftModel,
 )
+from mlx_vlm.speculative.drafters.qwen3_dflash.config import (
+    DFlashConfig as V1DFlashConfig,
+)
+from mlx_vlm.speculative.drafters.qwen3_dflash.dflash import DFlashDraftModel
 
 from omlx.model_settings import ModelSettings
 from omlx.scheduler import Scheduler
 from omlx.speculative import dflash as dd
-from omlx.speculative.dflash import kernels, selection
+from omlx.speculative.dflash import kernels, selection, variants
 
 VOCAB = 64
 HIDDEN = 32
@@ -478,6 +485,89 @@ def test_short_context_matches_reference_draft_block(make_drafter, longest):
             [(SimpleNamespace(uid=0), row, context, anchor, None)]
         )[0][0]
         assert got.tolist() == expected.tolist()
+
+
+def test_mimo_value_scale_and_mask_embedding_match_reference():
+    """MiMo scales attention values and embeds masked block positions with a
+    trained vector. The draft must equal a reference whose v_proj weights
+    carry the scale and whose mask token embeds as that vector."""
+    scale = 0.6
+    mx.random.seed(11)
+    mask = mx.random.normal((HIDDEN,))
+
+    def build():
+        config = V1DFlashConfig.from_dict(
+            {
+                "hidden_size": HIDDEN,
+                "intermediate_size": 48,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "head_dim": 8,
+                "vocab_size": VOCAB,
+                "max_position_embeddings": 4096,
+                "tie_word_embeddings": False,
+                "dflash_config": {
+                    "mask_token_id": VOCAB - 1,
+                    "target_layer_ids": TARGET_LAYER_IDS,
+                    "num_target_layers": TARGET_LAYERS,
+                    "attention_sink_bias": True,
+                },
+            }
+        )
+        mx.random.seed(0)
+        model = DFlashDraftModel(config)
+        params = {
+            key: mx.random.normal(value.shape) * 0.2
+            for key, value in nn.utils.tree_flatten(model.parameters())
+        }
+        model.load_weights(list(params.items()), strict=False)
+        return model, _tiny_target()
+
+    model, target = build()
+    model.bind(target)
+    drafter = dd.DFlashDrafter(
+        model,
+        block_size=BLOCK,
+        source_path="tiny",
+        value_scale=scale,
+        mask_embedding=mask,
+    )
+
+    reference, ref_target = build()
+    for layer in reference.layers:
+        layer.self_attn.v_proj.weight = layer.self_attn.v_proj.weight * scale
+    embed = ref_target.language_model.model.embed_tokens
+    embed.weight[VOCAB - 1] = mask
+    reference.bind(ref_target)
+    mx.eval(reference.parameters(), embed.parameters())
+
+    context = mx.concatenate(_captured(5, seed=90), axis=-1)
+    anchor = mx.array([7], dtype=mx.int32)
+    cache = reference.make_cache()
+    expected = reference.draft_block(
+        anchor, context, cache, BLOCK, lambda logits: mx.argmax(logits, axis=-1)
+    )
+    got = drafter._draft_batched(
+        [(SimpleNamespace(uid=0), drafter._row(0), context, anchor, None)]
+    )[0][0]
+    assert got.tolist() == expected.tolist()
+
+
+def test_mimo_mask_embedding_loads_for_another_thread(tmp_path):
+    """The drafter loads on one executor thread and drafts on the engine's."""
+    values = np.arange(HIDDEN, dtype=np.float32)
+    path = tmp_path / "mask_embedding.pt"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mask_embedding/byteorder", "little")
+        archive.writestr(
+            "mask_embedding/data/0",
+            (values.view(np.uint32) >> 16).astype(np.uint16).tobytes(),
+        )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        mask = executor.submit(variants.load_mask_embedding, path, HIDDEN).result()
+    assert mask.dtype == mx.bfloat16
+    assert (mask.astype(mx.float32) + 1).tolist() == (values + 1).tolist()
 
 
 def test_prefill_capture_accepts_bound_prefill_of_the_model():
