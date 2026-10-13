@@ -30,6 +30,7 @@ from mlx_vlm.speculative.drafters.qwen3_dflash.config import (
 from mlx_vlm.speculative.drafters.qwen3_dflash.dflash import DFlashDraftModel
 
 from omlx.model_settings import ModelSettings
+from omlx.request import SamplingParams
 from omlx.scheduler import Scheduler
 from omlx.speculative import dflash as dd
 from omlx.speculative.dflash import kernels, selection, variants
@@ -403,7 +404,7 @@ def test_prefix_hit_restores_context_kept_from_finished_request():
 
     # Other prefixes, or a hit past the kept rows, restore nothing.
     assert drafter.prepare_request("x", [0] * 9, 9) == 0
-    assert drafter.prepare_request("x", tokens, 12) == 0
+    assert drafter.prepare_request("y", tokens, 12) == 0
 
     scheduler = SimpleNamespace(model=SimpleNamespace(_omlx_drafter=drafter))
     request = SimpleNamespace(prompt_token_ids=tokens[:9] + [1, 2, 3], request_id="b")
@@ -421,6 +422,98 @@ def test_prefix_hit_restores_context_kept_from_finished_request():
     reference = _tiny_drafter()
     reference.seed(9, rows(0, 11))
     assert restored_drafts == _draft_one(reference, 9, rows(11, 12), 7)
+
+
+def test_finished_request_keeps_context_at_its_fed_end():
+    """Rows queued while the batch decodes without drafting are not part of
+    the kept context, so its end is the last fed position."""
+    raw = _captured(12, seed=4)
+    rows = lambda lo, hi: [layer[:, lo:hi] for layer in raw]  # noqa: E731
+    drafter = _tiny_drafter()
+    drafter.seed_request("a", rows(0, 6), position=0)
+    drafter.bind_uid("a", 1)
+    _draft_one(drafter, 1, rows(6, 8), 5)
+    for position in range(8, 11):
+        drafter.observe((1,), rows(position, position + 1))
+    drafter.release_request("a", list(range(50, 70)))
+    kept = drafter._kept["a"]
+    assert (kept.end, kept.context.shape[1]) == (8, 8)
+
+
+def test_released_context_is_dropped_once_its_request_is_gone():
+    """A row the batch removes after its request finished, or a request that
+    finishes without tokens, leaves no released context behind."""
+    drafter = _tiny_drafter()
+    drafter.seed_request("a", _captured(4, seed=5), position=0)
+    drafter.bind_uid("a", 1)
+    _draft_one(drafter, 1, _captured(1, seed=6), 5)
+    # A scheduler-side stop finishes the request before the batch removal.
+    drafter.release_request("a", list(range(50, 70)))
+    drafter.release([1])
+    assert not drafter._released
+
+    drafter.seed_request("m", _captured(4, seed=7), position=0)
+    drafter.bind_uid("m", 2)
+    _draft_one(drafter, 2, _captured(1, seed=8), 6)
+    drafter.release([2])
+    drafter.release_request("m")
+    assert not drafter._released
+
+
+def test_resumed_prefill_keeps_its_first_preparation():
+    """A prefill paused for eviction resumes with more cached tokens; the
+    seeds of its first attempt already cover them, so nothing is restored
+    on top."""
+    raw = _captured(12, seed=9)
+    rows = lambda lo, hi: [layer[:, lo:hi] for layer in raw]  # noqa: E731
+    tokens = list(range(50, 70))
+    drafter = _tiny_drafter()
+    drafter.seed_request("a", rows(0, 10), position=0)
+    drafter.bind_uid("a", 1)
+    _draft_one(drafter, 1, rows(10, 11), 5)
+    drafter.release([1])
+    drafter.release_request("a", tokens)
+
+    assert drafter.prepare_request("b", tokens, 4) == 4
+    drafter.seed_request("b", rows(4, 6), position=4)
+    assert drafter.prepare_request("b", tokens, 6) == 0
+    drafter.bind_uid("b", 2)
+    assert drafter._rows[2].end == 6
+
+
+def test_fully_cached_prompt_binds_at_its_cached_position():
+    """With every prompt token but the last cached and no kept context, the
+    row still starts at the cached position, so it can be kept later."""
+    drafter = _tiny_drafter()
+    assert drafter.prepare_request("a", list(range(50, 70)), 19) == 0
+    drafter.bind_uid("a", 1)
+    assert drafter._rows[1].end == 19
+    _draft_one(drafter, 1, _captured(1, seed=10), 5)
+    drafter.release_request("a", list(range(50, 71)))
+    assert drafter._kept["a"].end == 20
+
+
+def test_new_batch_generator_resets_drafter_rows():
+    """A replaced generator numbers rows from 0 again; rows of the old one
+    must not leak into new requests, while kept contexts stay."""
+    drafter = _tiny_drafter()
+    drafter.seed_request("a", _captured(4, seed=11), position=0)
+    drafter.bind_uid("a", 0)
+    _draft_one(drafter, 0, _captured(1, seed=12), 5)
+    drafter.release([0])
+    drafter.release_request("a", list(range(50, 70)))
+    drafter.seed_request("b", _captured(3, seed=13), position=0)
+    drafter.bind_uid("b", 0)
+    drafter.seed_request("c", _captured(2, seed=14), position=0)
+
+    scheduler = SimpleNamespace(
+        model=SimpleNamespace(_omlx_drafter=drafter),
+        batch_generator=None,
+        _create_batch_generator=lambda params: object(),
+    )
+    Scheduler._ensure_batch_generator(scheduler, SamplingParams())
+    assert not drafter._rows and not drafter._request_uids
+    assert "a" in drafter._kept and "c" in drafter._request_seeds
 
 
 def test_sampled_rows_get_sparse_candidate_distributions():

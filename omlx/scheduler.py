@@ -4118,6 +4118,9 @@ class Scheduler:
         n_tokens = len(tokens)
         if n_tokens <= 1:
             # Nothing to prefill, return cache + tokens as-is.
+            Scheduler._dflash_prepare_request(
+                self, request, len(request.prompt_token_ids) - n_tokens
+            )
             cache = existing_cache or make_prompt_cache(self.model)
             # TurboQuant: a TQ cache here makes _merge_caches() build a
             # BatchTurboQuantKVCache (via the monkey-patched merge), so the
@@ -5547,20 +5550,28 @@ class Scheduler:
         if drafter is None or prefill_owner is not self.model:
             return None
         keep_from = len(request.prompt_token_ids) - drafter.window
-        if (
-            first_chunk
-            and start > max(keep_from, 0)
-            and not getattr(request, "vlm_extra_keys_for_cache", None)
-        ):
-            # Cached tokens skip prefill; a finished request may have kept
-            # the drafter context for them. Tokens alone cannot tell media
-            # apart, so media requests keep no context.
-            drafter.prepare_request(request.request_id, request.prompt_token_ids, start)
+        if first_chunk:
+            Scheduler._dflash_prepare_request(self, request, start)
         end = start + n_tokens
         if end <= keep_from:
             return None
         model_kwargs["capture_layer_ids"] = list(drafter.target_layer_ids)
         return max(0, keep_from - start)
+
+    def _dflash_prepare_request(self, request: "Request", cached: int) -> None:
+        """Let the drafter restore context for the cached prompt tokens.
+
+        Cached tokens skip prefill; a finished request may have kept the
+        drafter context for them. Tokens alone cannot tell media apart, so
+        media requests keep no context.
+        """
+        drafter = _block_drafter_for(self.model)
+        if drafter is None or getattr(request, "vlm_extra_keys_for_cache", None):
+            return
+        if cached > max(len(request.prompt_token_ids) - drafter.window, 0):
+            drafter.prepare_request(
+                request.request_id, request.prompt_token_ids, cached
+            )
 
     def _dflash_seed_prefill(
         self, request: "Request", output: Any, keep_from: int, position: int
@@ -8141,6 +8152,10 @@ class Scheduler:
         # Only create once; per-request samplers are passed at insert time.
         if self.batch_generator is None:
             self.batch_generator = self._create_batch_generator(sampling_params)
+            # A new generator numbers rows from 0 again.
+            drafter = _block_drafter_for(self.model)
+            if drafter is not None:
+                drafter.reset_rows()
 
         # Track latest params for debugging/metrics.
         self._current_sampler_params = (

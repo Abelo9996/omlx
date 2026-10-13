@@ -63,6 +63,33 @@ def resolve_verify_mode(mode: str | None) -> bool:
     raise ValueError(f"unknown dflash_verify_mode {mode!r}")
 
 
+def context_bytes_per_row(config: dict, window: int | None = None) -> int:
+    """Bytes one request's drafter context can hold, from the draft config.
+
+    A row keeps its K/V ring and the projected history for the window, and
+    while it decodes without drafting it queues up to a window of raw layer
+    captures. bf16 throughout.
+    """
+    hidden = int(config["hidden_size"])
+    heads = int(config.get("num_attention_heads") or 1)
+    head_dim = int(config.get("head_dim") or hidden // heads)
+    kv_heads = int(config.get("num_key_value_heads") or heads)
+    dflash_config = config.get("dflash_config") or {}
+    captures = len(
+        dflash_config.get("target_layer_ids") or config.get("target_layer_ids") or ()
+    )
+    window = int(
+        window
+        or dflash_config.get("draft_window_size")
+        or config.get("draft_window_size")
+        or config.get("sliding_window")
+        or 2048
+    )
+    layers = int(config["num_hidden_layers"])
+    per_token = 2 * (layers * 2 * kv_heads * head_dim + hidden + captures * hidden)
+    return window * per_token
+
+
 def quantize_drafter(model: nn.Module, *, bits: int, group_size: int) -> int:
     """Affine-quantize the drafter's linear layers; returns the layer count."""
     quantized = 0
@@ -184,6 +211,7 @@ def detach_drafter(language_model: Any) -> DFlashDrafter | None:
 __all__ = [
     "DFlashDrafter",
     "attach_drafter",
+    "context_bytes_per_row",
     "detach_drafter",
     "load_dflash_drafter",
     "quantize_drafter",

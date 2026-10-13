@@ -22,7 +22,7 @@ from ..model_settings import (
 )
 from ..patches.mlx_lm_mtp import drafter_target
 from ..reasoning_effort import apply_chat_template_with_reasoning_effort_fallback
-from ..speculative.dflash import attach_drafter
+from ..speculative.dflash import attach_drafter, detach_drafter
 from ..utils.tokenizer import get_tokenizer_config
 from .base import (
     BaseEngine,
@@ -873,6 +873,8 @@ class BatchedEngine(BaseEngine):
                 logger.warning(
                     "ANE prefill state release failed during stop", exc_info=True
                 )
+        if self._dflash_drafter is not None and self._model is not None:
+            detach_drafter(self._dflash_host())
         _clear_teardown_references(
             self,
             none_attrs=(

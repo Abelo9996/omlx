@@ -53,7 +53,7 @@ from ..patches.gemma4_audio import apply_gemma4_audio_patch
 from ..patches.mlx_lm_mtp import drafter_target
 from ..patches.mlx_vlm_pixtral_torch_free import apply_pixtral_torch_free_patch
 from ..reasoning_effort import apply_chat_template_with_reasoning_effort_fallback
-from ..speculative.dflash import attach_drafter
+from ..speculative.dflash import attach_drafter, detach_drafter
 from ..utils.image import (
     compute_image_hash,
     compute_per_image_hashes,
@@ -2942,6 +2942,9 @@ class VLMBatchedEngine(BaseEngine):
         # pass has already run. Mark unloaded first: the scheduler is no longer
         # reachable once _engine is cleared.
         self._loaded = False
+        language_model = getattr(self._adapter, "_language_model", None)
+        if self._dflash_drafter is not None and language_model is not None:
+            detach_drafter(language_model)
         _clear_teardown_references(
             self,
             none_attrs=(

@@ -267,11 +267,20 @@ def test_block_drafter_captures_requested_layers_then_the_last():
         assert mx.array_equal(got, expected).item()
     assert mx.array_equal(out.logits, plain.logits).item()
 
+    # Prefill captures and observed decode rows follow the drafter's order.
+    prefill = lm(tokens, cache=lm.make_cache(), capture_layer_ids=[1, 0])
+    for got, expected in zip(prefill.hidden_states, (layer1, layer0)):
+        assert mx.array_equal(got, expected).item()
+    reference_cache = lm.make_cache()
+    lm(tokens, cache=reference_cache)
+    step = lm(mx.array([[7]]), cache=reference_cache, capture_layer_ids=[1, 0])
+
     drafter.scope_uids = (5,)
     lm(mx.array([[7]]), cache=cache)
     [(uids, caps)] = observed
     assert uids == (5,)
-    assert [tuple(c.shape[:2]) for c in caps] == [(1, 1), (1, 1)]
+    for got, expected in zip(caps, step.hidden_states):
+        assert mx.array_equal(got, expected).item()
 
 
 def test_single_row_rollback_trims_rejected_rows():

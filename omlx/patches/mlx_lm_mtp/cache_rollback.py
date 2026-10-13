@@ -28,6 +28,8 @@ import logging
 import sys
 import threading
 
+from mlx_vlm.models import cache as vlm_cache
+
 logger = logging.getLogger(__name__)
 
 # Thread-local so concurrent engine steps of other models never see the
@@ -181,10 +183,6 @@ def _attach_rotating_undo() -> bool:
         BatchRotatingKVCache,
         ("keys", "values", "offset", "_offset", "_idx", "rotated", "left_padding"),
     )
-    try:
-        from mlx_vlm.models import cache as vlm_cache
-    except ImportError:
-        return True
     # mlx-vlm's own rotating caches (Gemma 4 sliding layers) share the
     # layout; their stock trim leaves rejected rows in a full window.
     _wrap_rotating(vlm_cache.RotatingKVCache, ("keys", "values", "offset", "_idx"))

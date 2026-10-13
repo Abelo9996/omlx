@@ -35,6 +35,7 @@ class _RowContext:
     """
 
     pending: list[mx.array] = field(default_factory=list)
+    pending_len: int = 0
     fed: int = 0
     keys: list[mx.array] | None = None
     values: list[mx.array] | None = None
@@ -45,9 +46,11 @@ class _RowContext:
     # Context restored for a prefix-cache hit, already projected by ``fc``
     # and ``hidden_norm``; it precedes ``pending``.
     restored: mx.array | None = None
-    # The newest fed rows after projection, as chunks, oldest first.
+    # The newest fed rows after projection, as chunks, oldest first, and the
+    # absolute position after them. Rows still pending are not in history.
     history: list[mx.array] = field(default_factory=list)
     history_len: int = 0
+    history_end: int | None = None
 
 
 @dataclass
@@ -132,6 +135,7 @@ class DFlashDrafter:
         self._request_starts: dict[str, int] = {}
         self._request_restored: dict[str, tuple[mx.array, int]] = {}
         self._request_uids: dict[str, Any] = {}
+        self._uid_requests: dict[Any, str] = {}
         # Contexts of rows the batch released, until the scheduler names
         # their tokens, and of finished requests kept for prefix hits.
         self._released: OrderedDict[Any, tuple[list[mx.array], int]] = OrderedDict()
@@ -184,13 +188,19 @@ class DFlashDrafter:
     @staticmethod
     def _queue(row: _RowContext, context: mx.array) -> None:
         row.pending.append(context)
+        row.pending_len += int(context.shape[1])
         if row.end is not None:
             row.end += int(context.shape[1])
+
+    @staticmethod
+    def _take_pending(row: _RowContext) -> list[mx.array]:
+        pending, row.pending, row.pending_len = row.pending, [], 0
+        return pending
 
     def _bound_pending(self, row: _RowContext) -> None:
         # Only the newest ring_slots rows are ever attended, so rows queued
         # while drafting is off are dropped here; fed still counts them.
-        drop = sum(int(p.shape[1]) for p in row.pending) - self.ring_slots
+        drop = row.pending_len - self.ring_slots
         if row.restored is not None:
             drop += int(row.restored.shape[1])
             older = min(drop, int(row.restored.shape[1]))
@@ -202,6 +212,7 @@ class DFlashDrafter:
         if drop <= 0:
             return
         row.fed += drop
+        row.pending_len -= drop
         while drop > 0:
             head = row.pending[0]
             if int(head.shape[1]) <= drop:
@@ -243,11 +254,13 @@ class DFlashDrafter:
         Cached tokens skip prefill, so the drafter never sees their layer
         captures. A kept request whose tokens match the first ``cached``
         prompt tokens supplies the rows just before ``cached``. Returns the
-        number of restored rows.
+        number of restored rows. Only the first call per request counts: a
+        prefill resumed after a pause keeps what its first attempt captured.
         """
         cached = int(cached)
-        if cached <= 0:
+        if cached <= 0 or request_id in self._request_starts:
             return 0
+        self._request_starts[request_id] = cached
         prefix = list(prompt_tokens[:cached])
         for key in reversed(self._kept):
             kept = self._kept[key]
@@ -266,10 +279,11 @@ class DFlashDrafter:
 
     def bind_uid(self, request_id: str, uid: Any) -> None:
         self._request_uids[request_id] = uid
+        self._uid_requests[uid] = request_id
         restored = self._request_restored.pop(request_id, None)
         start = self._request_starts.pop(request_id, None)
         seeds = self._request_seeds.pop(request_id, None)
-        if restored is None and not seeds:
+        if restored is None and not seeds and start is None:
             return
         row = self._row(uid)
         if restored is not None:
@@ -289,13 +303,15 @@ class DFlashDrafter:
         self._request_starts.pop(request_id, None)
         self._request_restored.pop(request_id, None)
         uid = self._request_uids.pop(request_id, None)
-        if tokens is None or uid is None:
+        if uid is None:
+            return
+        self._uid_requests.pop(uid, None)
+        released = self._released.pop(uid, None)
+        if tokens is None:
             return
         row = self._rows.get(uid)
         if row is not None:
-            released = (row.history, row.end) if row.history else None
-        else:
-            released = self._released.pop(uid, None)
+            released = (row.history, row.history_end) if row.history else None
         if released is None:
             return
         history, end = released
@@ -326,27 +342,39 @@ class DFlashDrafter:
             if row is None:
                 continue
             self._detach_cohort()
-            if row.history and row.end is not None:
-                self._released[uid] = (row.history, row.end)
+            # Keep the context only while its request can still claim it.
+            if row.history and uid in self._uid_requests:
+                self._released[uid] = (row.history, row.history_end)
                 while len(self._released) > _RELEASED_ROWS:
                     self._released.popitem(last=False)
 
-    def clear(self) -> None:
+    def reset_rows(self) -> None:
+        """Forget every row after the batch generator was replaced.
+
+        A new generator numbers rows from 0 again. Requests that have not
+        bound a row yet and finished requests' contexts stay.
+        """
         self._predraft = None
         self._rows.clear()
         self._cohort = None
+        self._request_uids.clear()
+        self._uid_requests.clear()
+        self._released.clear()
+
+    def clear(self) -> None:
+        self.reset_rows()
         self._request_seeds.clear()
         self._request_starts.clear()
         self._request_restored.clear()
-        self._request_uids.clear()
-        self._released.clear()
         self._kept.clear()
 
     def _remember(self, row: _RowContext, context: mx.array) -> None:
         """Keep the newest ring_slots projected rows of a fed context."""
         if row.end is None or not int(context.shape[1]):
             return
-        row.history.append(context)
+        # A slice of the batched projection would keep the whole buffer.
+        row.history.append(mx.contiguous(context))
+        row.history_end = row.end
         row.history_len += int(context.shape[1])
         while row.history_len - int(row.history[0].shape[1]) >= self.ring_slots:
             row.history_len -= int(row.history.pop(0).shape[1])
@@ -373,12 +401,10 @@ class DFlashDrafter:
                 raise RuntimeError(
                     f"DFlash drafter has no context for uid={state.uid!r}"
                 )
+            pending = self._take_pending(row)
             context = (
-                row.pending[0]
-                if len(row.pending) == 1
-                else mx.concatenate(row.pending, axis=1)
+                pending[0] if len(pending) == 1 else mx.concatenate(pending, axis=1)
             )
-            row.pending = []
             anchor = committed.reshape(-1)[-1:].astype(mx.int32)
             # Stochastic rows draw proposals from a per-row sampler; the
             # normalized draft distribution feeds Leviathan acceptance.
@@ -420,7 +446,7 @@ class DFlashDrafter:
         row = self._row(state.uid)
         if row.restored is not None:
             return False
-        unfed = sum(int(p.shape[1]) for p in row.pending)
+        unfed = row.pending_len
         context = mx.concatenate([*row.pending, _concat_captured(captured)], axis=1)
         if int(context.shape[1]) > self.ring_slots:
             return False
@@ -451,7 +477,7 @@ class DFlashDrafter:
         cohort.keys, cohort.values, cohort.pos = pre.keys, pre.values, pre.pos
         row = self._row(state.uid)
         row.fed = pre.bases[0] + pre.unfed[0] + int(count)
-        row.pending = []
+        self._take_pending(row)
         if row.end is not None:
             row.end += int(count)
         self._remember(row, pre.contexts[0][:, : pre.unfed[0] + int(count)])

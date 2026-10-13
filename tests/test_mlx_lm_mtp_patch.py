@@ -18,16 +18,20 @@ from mlx.utils import tree_flatten
 from omlx.cache.type_registry import CacheTypeRegistry
 from mlx_lm.generate_utils import BatchCounters
 from mlx_lm.generate import BatchGenerator
+from mlx_lm.models import qwen3, qwen3_5
 from mlx_lm.models.cache import KVCache, make_prompt_cache
+from mlx_vlm.speculative.drafters.dflash2.config import DFlash2Config
+from mlx_vlm.speculative.drafters.dflash2.dflash2 import DFlash2DraftModel
 
 from omlx.model_settings import ModelSettings
 from omlx.patches import mlx_lm_mtp
+from omlx.patches.laguna import laguna_model
 from omlx.patches.mlx_lm_mtp import batch_generator as bg
 from omlx.patches.mlx_lm_mtp import (
     batched_head,
     cache_rollback,
-    drafter_target,
     fused_batch,
+    qwen35_model,
 )
 from omlx.patches.mlx_lm_mtp.batch_policy import BatchPolicy
 from omlx.patches.mlx_vlm_mtp import qwen35_verify_linear
@@ -3652,8 +3656,6 @@ def test_block_drafter_clips_sampled_draft_distributions():
 
 
 def _tiny_qwen3(seed=0, layers=6, hidden=32, vocab=64):
-    from mlx_lm.models import qwen3
-
     mx.random.seed(seed)
     model = qwen3.Model(
         qwen3.ModelArgs(
@@ -3677,8 +3679,6 @@ def _tiny_qwen3(seed=0, layers=6, hidden=32, vocab=64):
 
 def _tiny_laguna(seed=0):
     """Six-layer Laguna target whose sliding window wraps within a test."""
-    from omlx.patches.laguna import laguna_model
-
     mx.random.seed(seed)
     model = laguna_model.Model(
         laguna_model.ModelArgs(
@@ -3701,10 +3701,6 @@ def _tiny_laguna(seed=0):
 
 
 def _tiny_qwen35_text():
-    from mlx_lm.models import qwen3_5
-
-    from omlx.patches.mlx_lm_mtp import qwen35_model
-
     assert qwen35_model.apply()
     mx.random.seed(1)
     model = qwen3_5.TextModel(
@@ -3737,12 +3733,12 @@ def _tiny_qwen35_text():
 
 
 @pytest.mark.parametrize("family", ["qwen3", "qwen3_5"])
-def test_text_targets_return_drafter_layer_captures(family):
+def test_text_targets_return_drafter_layer_captures(family, apply_drafter_target):
     """mlx-lm text targets return requested layer outputs in request order,
     append the head hidden on verify, and feed the drafter on decode."""
     if family == "qwen3":
         model = _tiny_qwen3()
-        drafter_target.apply(model)
+        apply_drafter_target(model)
     else:
         model = _tiny_qwen35_text()
     layers = len(model.model.layers)
@@ -3784,20 +3780,19 @@ def test_text_targets_return_drafter_layer_captures(family):
 
 
 @pytest.mark.parametrize("make_target", [_tiny_qwen3, _tiny_laguna])
-def test_plain_attention_target_drafts_like_plain_decode(monkeypatch, make_target):
+def test_plain_attention_target_drafts_like_plain_decode(
+    monkeypatch, apply_drafter_target, make_target
+):
     """A Qwen3 or Laguna target with a DFlash2 drafter emits the plain decode
     tokens, and rejected verify rows are trimmed from the KV caches, also
     after Laguna's sliding window wraps."""
-    from mlx_vlm.speculative.drafters.dflash2.config import DFlash2Config
-    from mlx_vlm.speculative.drafters.dflash2.dflash2 import DFlash2DraftModel
-
     prompts, limits = [[1, 2, 3, 4]], [24]
     plain_model = make_target(seed=3)
     plain_model._omlx_mtp_decode_enabled = False
     expected, _ = generate(plain_model, prompts, limits)
 
     model = make_target(seed=3)
-    drafter_target.apply(model)
+    apply_drafter_target(model)
     config = DFlash2Config.from_dict(
         {
             "model_type": "qwen3",

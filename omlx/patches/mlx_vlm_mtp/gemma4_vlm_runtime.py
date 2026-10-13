@@ -41,6 +41,7 @@ patched ``LanguageModel.__init__`` attaches the head for weight binding.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
@@ -254,26 +255,39 @@ def _patch_vlm_language_model(g4_lang: Any) -> None:
         return_hidden = kwargs.pop("return_hidden", False)
         kwargs.pop("n_confirmed", None)
         if not return_hidden:
+            requested = kwargs.pop("capture_layer_ids", None)
             scope = drafter.scope_uids
-            if (
-                scope
+            observe = bool(
+                requested is None
+                and scope
                 and inputs is not None
                 and inputs.ndim == 2
                 and tuple(inputs.shape) == (len(scope), 1)
-                and kwargs.get("capture_layer_ids") is None
-            ):
-                out = original_call(
-                    self,
-                    inputs,
-                    inputs_embeds,
-                    mask,
-                    cache,
-                    capture_layer_ids=list(drafter.target_layer_ids),
-                    **kwargs,
+            )
+            if observe:
+                requested = list(drafter.target_layer_ids)
+            if not requested:
+                return original_call(
+                    self, inputs, inputs_embeds, mask, cache, **kwargs
                 )
-                drafter.observe(scope, out.hidden_states)
+            # The stock forward returns captures in layer order; the drafter
+            # concatenates them in its own order.
+            layer_ids = sorted(set(requested))
+            out = original_call(
+                self,
+                inputs,
+                inputs_embeds,
+                mask,
+                cache,
+                capture_layer_ids=layer_ids,
+                **kwargs,
+            )
+            by_layer = dict(zip(layer_ids, out.hidden_states))
+            captures = [by_layer[i] for i in requested]
+            if observe:
+                drafter.observe(scope, captures)
                 return out
-            return original_call(self, inputs, inputs_embeds, mask, cache, **kwargs)
+            return dataclasses.replace(out, hidden_states=captures)
         requested = list(kwargs.pop("capture_layer_ids", None) or [])
         last = len(self.model.layers) - 1
         layer_ids = sorted({*requested, last})

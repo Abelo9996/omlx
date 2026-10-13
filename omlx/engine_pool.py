@@ -75,7 +75,7 @@ from .model_settings import (
 from .patches.qwen35_yarn import yarn_factor
 from .scheduler import SchedulerConfig
 from .settings import get_settings as get_global_settings
-from .speculative.dflash import load_dflash_drafter
+from .speculative.dflash import context_bytes_per_row, load_dflash_drafter
 from .utils.fatal import exit_if_gpu_submissions_ignored
 from .utils.generation_config import SAMPLING_SETTING_KEYS, load_sampling_defaults
 from .utils.metal_sync import unreleased_graphics_bytes
@@ -651,7 +651,14 @@ class EnginePool:
             # codebooks stay unquantized, so keep a third as headroom.
             weights = int(weights * max(bits / 16 + 0.05, 0.34))
         rows = int(getattr(self._scheduler_config, "max_num_seqs", 8) or 8)
-        return weights + rows * 48 * 1024 * 1024
+        try:
+            config = json.loads((path / "config.json").read_text())
+            row_bytes = context_bytes_per_row(
+                config, getattr(runtime_settings, "dflash_draft_window_size", None)
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            row_bytes = 48 * 1024 * 1024
+        return weights + rows * row_bytes
 
     def _resident_leaves_no_prompt_room(self, estimate: object, ceiling: int) -> bool:
         """Whether a resident load would sit above the prompt admission line.
