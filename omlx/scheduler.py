@@ -2258,6 +2258,8 @@ class Scheduler:
         # Thread-safe set for deferred aborts (main thread → executor thread)
         # CPython GIL guarantees set.add() and `x in set` are atomic.
         self._pending_abort_ids: set[str] = set()
+        # Client cancels whose computed prefix is stored before the abort.
+        self._abort_keep_cache_ids: set[str] = set()
 
         # Deferred between-turn Metal reclaim, requested by the (asyncio-thread)
         # ProcessMemoryEnforcer under pinned-model memory pressure. A bare bool
@@ -2933,7 +2935,7 @@ class Scheduler:
                     # Cleanup uid maps now that the slot is reclaimable.
                     _unregister_uid_row(self.model, uid)
                     del self.uid_to_request_id[uid]
-                if self.request_id_to_uid.get(request_id) == uid:
+                if uid is not None and self.request_id_to_uid.get(request_id) == uid:
                     del self.request_id_to_uid[request_id]
                 self._inflight_store_futures.pop(request_id, None)
                 self._inflight_store_info.pop(request_id, None)
@@ -11344,7 +11346,7 @@ class Scheduler:
                 aborted.append(uid)
         return aborted
 
-    def abort_request(self, request_id: str) -> bool:
+    def abort_request(self, request_id: str, keep_cache: bool = False) -> bool:
         """
         Enqueue a request for deferred abort.
 
@@ -11354,10 +11356,14 @@ class Scheduler:
 
         Args:
             request_id: The request ID to abort
+            keep_cache: Store the computed prefix first, so a client that
+                cancels and resends the prompt resumes from it.
 
         Returns:
             True (abort is always enqueued)
         """
+        if keep_cache:
+            self._abort_keep_cache_ids.add(request_id)
         self._pending_abort_ids.add(request_id)
         logger.debug(f"Enqueued deferred abort for request {request_id}")
         return True
@@ -11499,6 +11505,8 @@ class Scheduler:
         Returns:
             True if request was found and aborted, False otherwise
         """
+        keep_cache = request_id in self._abort_keep_cache_ids
+        self._abort_keep_cache_ids.discard(request_id)
         request = self.requests.get(request_id)
         if request is None:
             return False
@@ -11522,6 +11530,18 @@ class Scheduler:
             if request is None:
                 return False
 
+        keep_cache = keep_cache and self._abort_keeps_cache(request)
+        if (
+            keep_cache
+            and request_id in self.running
+            and self.request_id_to_uid.get(request_id, -1) >= 0
+        ):
+            # Store the prompt as a finished request does; the row leaves the
+            # batch once that store completes.
+            request.set_finished(RequestStatus.FINISHED_ABORTED)
+            self._cleanup_finished({request_id})
+            return True
+
         self._clear_request_admission_bookkeeping(request_id)
 
         # Remove from waiting queue
@@ -11532,8 +11552,11 @@ class Scheduler:
                 pass
 
         # Remove from chunked-prefill queue (if mid-prefill)
+        store_future = None
         if request_id in self._prefill_states:
-            self._prefill_states.pop(request_id, None)
+            state = self._prefill_states.pop(request_id, None)
+            if keep_cache and state is not None:
+                store_future = self._submit_abort_prefill_store(request, state)
             self.prefilling = deque(
                 r for r in self.prefilling if r.request_id != request_id
             )
@@ -11569,8 +11592,9 @@ class Scheduler:
         # forever (#766).
         self._cleanup_specprefill(request_id)
 
-        # Release blocks for eviction (same as _cleanup_finished)
-        if self.paged_cache_manager is not None:
+        # Release blocks for eviction (same as _cleanup_finished). A prefill
+        # store in flight releases them itself when it completes.
+        if self.paged_cache_manager is not None and store_future is None:
             block_table = self.paged_cache_manager.get_block_table(request_id)
             if block_table is None and hasattr(request, "block_table"):
                 block_table = request.block_table
@@ -11585,7 +11609,7 @@ class Scheduler:
                     )
 
         # Clear request entry from block_aware_cache
-        if self.block_aware_cache is not None:
+        if self.block_aware_cache is not None and store_future is None:
             self.block_aware_cache.clear_request_entry(request_id)
 
         # Clean up streaming detokenizer to prevent state contamination
@@ -11600,9 +11624,10 @@ class Scheduler:
         if hasattr(self.model, "clear_pending_embeddings"):
             self.model.clear_pending_embeddings()
 
-        # Drop any boundary snapshot for this request.
+        # Drop any boundary snapshot for this request. A store in flight may
+        # still read the on-disk snapshots; the async drain removes them.
         self._boundary_cache_snapshots.pop(request_id, None)
-        if self._boundary_snapshot_store is not None:
+        if self._boundary_snapshot_store is not None and store_future is None:
             self._boundary_snapshot_store.cleanup_request(request_id)
 
         # Remove from prefill progress tracker.
@@ -11615,11 +11640,13 @@ class Scheduler:
         # Remove from requests dict and clear cache references to release
         # MLX arrays promptly (mirrors _cleanup_finished behavior).
         # _cleanup_request (engine_core) no longer calls remove_finished_request,
-        # so this is the single cleanup point for aborted requests.
-        req_to_remove = self.requests.pop(request_id, None)
-        if req_to_remove is not None:
-            req_to_remove._extracted_cache = None
-            req_to_remove.prompt_cache = None
+        # so this is the single cleanup point for aborted requests. With a store
+        # in flight the async drain pops it instead.
+        if store_future is None:
+            req_to_remove = self.requests.pop(request_id, None)
+            if req_to_remove is not None:
+                req_to_remove._extracted_cache = None
+                req_to_remove.prompt_cache = None
 
         # Schedule the deferred Metal clear that _cleanup_finished would have
         # scheduled: aborts free KV/activation arrays into MLX's buffer pool
@@ -11632,6 +11659,65 @@ class Scheduler:
 
         logger.debug(f"Aborted request {request_id}")
         return True
+
+    def _abort_keeps_cache(self, request: "Request") -> bool:
+        """Whether a client cancel stores the request's computed prefix."""
+        return (
+            self.block_aware_cache is not None
+            and not self._admission_paused
+            and not getattr(request, "skip_cache_store", False)
+            and request.specprefill_indices is None
+            and not self._model_has_unreconstructible_cache()
+        )
+
+    def _submit_abort_prefill_store(
+        self, request: "Request", state: _PrefillState
+    ) -> Any | None:
+        """Store a cancelled chunked prefill up to its progress, off-thread."""
+        # Prefill KV is still dense; TurboQuant blocks use another layout.
+        if self._turboquant_kv_bits is not None or self._store_cache_executor is None:
+            return None
+        request_id = request.request_id
+        tokens = list(request.prompt_token_ids[: _cache_base_sizes(state.cache)])
+        try:
+            _safe_sync_stream(self._stream)
+            prepared = self._prepare_live_cache_store(request_id, state.cache, tokens)
+        except Exception as e:
+            logger.debug("Cancelled prefill store skipped for %s: %s", request_id, e)
+            return None
+        if prepared is None:
+            return None
+        tokens, cache_to_store, model_cache_config, snapshots = prepared
+        gate = self._store_cache_gate
+        if gate is not None:
+            gate.note_submitted()
+        try:
+            future = self._store_cache_executor.submit(
+                self._async_store_cache_worker,
+                request_id,
+                tokens,
+                cache_to_store,
+                model_cache_config,
+                snapshots,
+                request.vlm_extra_keys_for_cache,
+                request.vlm_extra_key_token_start_for_cache,
+                request.vlm_extra_key_ranges_for_cache,
+                not self._bypass_hot_cache_under_pressure(),
+            )
+        except BaseException:
+            if gate is not None:
+                gate.note_done()
+            raise
+        self._inflight_store_futures[request_id] = future
+        self._inflight_store_info[request_id] = _InflightStoreInfo(
+            tokens=list(tokens),
+            extra_keys=request.vlm_extra_keys_for_cache,
+            extra_key_token_start=request.vlm_extra_key_token_start_for_cache,
+            extra_key_ranges=request.vlm_extra_key_ranges_for_cache,
+        )
+        # No batch row: the drain only waits for the store, then cleans up.
+        self._pending_async_removes.append((None, request_id, future))
+        return future
 
     def has_requests(self) -> bool:
         """Check if there are any pending or running requests.

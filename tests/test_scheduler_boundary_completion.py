@@ -508,3 +508,64 @@ def test_memory_requeue_resumes_decode_from_stored_prefix(
             assert finals[rid].cached_tokens == 0
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("kind", ["gdn", "rotating"])
+def test_client_cancel_keeps_computed_prefix(mock_tokenizer, tmp_path, kind):
+    """A client cancel stores a decoding row's prompt and a chunked prefill's
+    progress for a resend; a cancel under memory pressure stores nothing."""
+    model, scheduler, prefix = _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind)
+    prompts = {
+        "decode": list(range(3, 13)),
+        "pressure": list(range(14, 24)),
+        "prefill": [5 + i % 9 for i in range(30)],
+    }
+    requests = {
+        rid: Request(
+            request_id=rid,
+            prompt=list(tokens),
+            sampling_params=SamplingParams(max_tokens=50, temperature=0),
+        )
+        for rid, tokens in prompts.items()
+    }
+    try:
+        for rid in ("decode", "pressure"):
+            scheduler.add_request(requests[rid])
+        for _ in range(100):
+            scheduler.step()
+            if all(
+                len(requests[r].output_token_ids) >= 3 for r in ("decode", "pressure")
+            ):
+                break
+        scheduler.add_request(requests["prefill"])
+        for _ in range(100):
+            scheduler.step()
+            state = scheduler._prefill_states.get("prefill")
+            if state is not None and _cache_base_sizes(state.cache) >= 8:
+                break
+        prefilled = _cache_base_sizes(scheduler._prefill_states["prefill"].cache)
+
+        scheduler.abort_request("decode", keep_cache=True)
+        scheduler.abort_request("prefill", keep_cache=True)
+        scheduler.step()
+        scheduler._admission_paused = True
+        scheduler.abort_request("pressure", keep_cache=True)
+        scheduler.step()
+        for future in list(scheduler._inflight_store_futures.values()):
+            future.result(timeout=30)
+        scheduler._drain_pending_async_removes()
+        assert not scheduler.requests
+
+        table, _ = prefix.fetch_cache("probe-decode", prompts["decode"])
+        assert table is not None and table.num_tokens >= 8
+        prefix.release_cache("probe-decode")
+        _assert_restored_matches_cold(
+            model, scheduler, prefix, prompts["decode"], table.num_tokens
+        )
+        _assert_restored_matches_cold(
+            model, scheduler, prefix, prompts["prefill"], prefilled // 4 * 4
+        )
+        table, _ = prefix.fetch_cache("probe-pressure", prompts["pressure"])
+        assert table is None or table.num_tokens == 0
+    finally:
+        scheduler.shutdown()
