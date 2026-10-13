@@ -3211,7 +3211,10 @@ def _ple_require_owner(owner_pid=None):
         )
 
 
-_PLE_IO_POOL = ThreadPoolExecutor(max_workers=48, thread_name_prefix="ple-io")
+_PLE_IO_WORKERS = 48
+_PLE_IO_POOL = ThreadPoolExecutor(
+    max_workers=_PLE_IO_WORKERS, thread_name_prefix="ple-io"
+)
 _PLE_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
 # Slow gathers may indicate page eviction. Allow normal gather overhead and
 # rate-limit retries; elapsed time is a heuristic, not a residency check.
@@ -3338,28 +3341,32 @@ class _SafeTensorMMap:
             return True
         fd = self._file.fileno()
 
-        def touch(page: int) -> None:
-            offset = int(page) * _PLE_PAGE_SIZE
-            remaining = _PLE_PAGE_SIZE
-            while remaining > 0:
-                chunk = os.pread(fd, remaining, offset + (_PLE_PAGE_SIZE - remaining))
-                if not chunk:
-                    break
-                remaining -= len(chunk)
+        def touch(pages) -> None:
+            for page in pages:
+                offset = int(page) * _PLE_PAGE_SIZE
+                remaining = _PLE_PAGE_SIZE
+                while remaining > 0:
+                    chunk = os.pread(
+                        fd, remaining, offset + (_PLE_PAGE_SIZE - remaining)
+                    )
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
 
         # #3602 (Matt Barnson) uses submit/wait to drain failed page batches.
         # Also drain partial submission here before releasing the reader mutex;
         # otherwise close could recycle an FD still used by another page read.
         futures = []
         try:
-            for page in fresh.tolist():
-                futures.append(_PLE_IO_POOL.submit(touch, int(page)))
+            # Preserve page-read parallelism without one Future per page.
+            task_count = min(fresh.size, _PLE_IO_WORKERS)
+            for index in range(task_count):
+                futures.append(_PLE_IO_POOL.submit(touch, fresh[index::task_count]))
             for future in futures:
                 future.result()
         finally:
             wait(futures)
-        for page in fresh.tolist():
-            self._seen_pages[page] = 1
+        seen[fresh] = 1
         return False
 
     def _rearm_if_slow(self, elapsed: float, row_count: int) -> None:
