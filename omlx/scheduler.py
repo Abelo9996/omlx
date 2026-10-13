@@ -10008,7 +10008,8 @@ class Scheduler:
             # Filter before ranking so an ineligible larger store cannot
             # hide a smaller one whose prefix can actually be reused.
             restorable = (common // block) * block
-            if restorable == len(prompt):
+            exact_hit = restorable == len(prompt)
+            if exact_hit:
                 # Match exact-hit generation kickoff in prefix preparation:
                 # GDN sidecars drop the final block; other stateful caches
                 # cannot trim to N-1 and require a full prefill.
@@ -10016,7 +10017,18 @@ class Scheduler:
                     restorable = max(0, restorable - block)
                 elif self._detect_boundary_snapshot_need():
                     restorable = 0
-            if restorable < block:
+            # A stateful store's tail-terminal block matches below one block, so
+            # a prompt the store fully covers is restorable from it.
+            tail_reusable = (
+                not exact_hit
+                and common > 0
+                and restorable < common
+                and common == len(info.tokens)
+                and self._detect_boundary_snapshot_need()
+            )
+            if tail_reusable:
+                restorable = common
+            if restorable < block and not tail_reusable:
                 continue
             if (
                 len(info.tokens)
