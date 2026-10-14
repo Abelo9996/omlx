@@ -12,6 +12,9 @@ inputs must produce non-trivial diversity at temperature > 0.
 
 from __future__ import annotations
 
+import math
+import random
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -340,3 +343,80 @@ def test_shared_sampler_filters_a_batch_like_one_row_calls(kwargs):
         [sampler._mtp_sampling_logits(logprobs[e : e + 1]) for e in range(8)], axis=0
     )
     assert mx.array_equal(sampler._mtp_sampling_logits(logprobs), rows).item()
+
+
+def _reference_no_repeat_ngram(sequence, ngram_size, window):
+    """Unlimited-OCR's SlidingWindowNoRepeatNgramProcessor for one row.
+
+    ``window=0`` searches the whole sequence, which is transformers'
+    ``no_repeat_ngram_size``.
+    """
+    if len(sequence) < ngram_size:
+        return set()
+    search_start = max(0, len(sequence) - window) if window else 0
+    search_end = len(sequence) - ngram_size + 1
+    if search_end <= search_start:
+        return set()
+    current_prefix = tuple(sequence[-(ngram_size - 1) :]) if ngram_size > 1 else ()
+    banned = set()
+    for idx in range(search_start, search_end):
+        ngram = sequence[idx : idx + ngram_size]
+        if ngram_size == 1 or tuple(ngram[:-1]) == current_prefix:
+            banned.add(ngram[-1])
+    return banned
+
+
+@pytest.mark.parametrize("dtype", [mx.int32, mx.uint32])
+def test_no_repeat_ngram_matches_reference(dtype):
+    from omlx.utils.sampling import make_no_repeat_ngram_processor
+
+    rng = random.Random(0)
+    for _ in range(400):
+        vocab = rng.choice([6, 64])
+        alphabet = rng.randint(1, 4)
+        sequence = [rng.randrange(alphabet) for _ in range(rng.randint(0, 48))]
+        ngram_size = rng.choice([1, 2, 3, 5])
+        # Windows shorter and longer than the sequence, and none at all.
+        window = rng.choice([0, ngram_size, ngram_size + 4, 16, 100])
+        logits = mx.random.normal((1, vocab)).astype(mx.bfloat16)
+
+        processor = make_no_repeat_ngram_processor(ngram_size, window)
+        out = processor(mx.array(sequence, dtype=dtype), logits)
+
+        expected = _reference_no_repeat_ngram(sequence, ngram_size, window)
+        assert out.dtype == logits.dtype
+        banned = mx.isinf(out[0]).tolist()
+        assert {i for i, b in enumerate(banned) if b} == expected
+        kept = mx.logical_not(mx.isinf(out))
+        assert mx.array_equal(mx.where(kept, out, 0), mx.where(kept, logits, 0)).item()
+
+
+def test_no_repeat_ngram_window_limits_the_search():
+    from omlx.utils.sampling import make_no_repeat_ngram_processor
+
+    tokens = mx.array([5, 6, 7, 1, 2, 5, 6])
+
+    def banned(ngram_size, window=0, history=tokens):
+        processor = make_no_repeat_ngram_processor(ngram_size, window)
+        out = processor(history, mx.zeros((1, 8)))[0].tolist()
+        return [i for i, v in enumerate(out) if v == -math.inf]
+
+    assert banned(3) == [7]
+    assert banned(3, window=4) == []
+    # n=1 bans every token in the window.
+    assert banned(1, window=2) == [5, 6]
+    # Too short to hold an n-gram.
+    assert banned(3, history=tokens[:2]) == []
+
+
+def test_no_repeat_ngram_reads_a_lazy_token_buffer():
+    from mlx_lm.models.cache import TokenBuffer
+
+    from omlx.utils.sampling import make_no_repeat_ngram_processor
+
+    # The decode loop hands processors a slice of a TokenBuffer that holds the
+    # prompt and is extended with the not yet evaluated sampled token.
+    buffer = TokenBuffer([1, 2, 3, 1])
+    context = buffer.update_and_fetch(mx.array([2]) + 0)
+    out = make_no_repeat_ngram_processor(3)(context, mx.zeros((1, 6)))
+    assert mx.isinf(out[0]).tolist() == [False, False, False, True, False, False]

@@ -524,6 +524,22 @@ class TestVLMDiffusionLane:
     @pytest.mark.skipif(
         not HAS_MLX, reason="mlx is required to import VLMBatchedEngine"
     )
+    async def test_diffusion_preflight_rejects_no_repeat_ngram(self):
+        """The denoising loop has no logits processors to apply the ban."""
+        from omlx.exceptions import InvalidRequestError
+
+        engine = _make_loaded_engine(model_type="diffusion_gemma")
+        engine._diffusion_family = "block"
+
+        with pytest.raises(InvalidRequestError, match="no_repeat_ngram_size"):
+            await engine.preflight_chat(
+                [{"role": "user", "content": "hi"}], no_repeat_ngram_size=35
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not HAS_MLX, reason="mlx is required to import VLMBatchedEngine"
+    )
     async def test_diffusion_stream_generate_rejects_precomputed_vlm_inputs(self):
         from omlx.exceptions import InvalidRequestError
 
@@ -3259,6 +3275,41 @@ class TestVLMEngineFrequencyPenalty:
 
         call_kwargs = engine._engine.generate.call_args.kwargs
         assert call_kwargs["sampling_params"].frequency_penalty == 0.42
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not HAS_MLX, reason="mlx is required to import VLMBatchedEngine"
+    )
+    async def test_no_repeat_ngram_reaches_sampling_params(self):
+        engine = _make_loaded_engine(model_type="test-vlm")
+        engine._engine = SimpleNamespace(
+            generate=AsyncMock(return_value=self._fake_output())
+        )
+        await engine.generate("a prompt", no_repeat_ngram_size=35, ngram_window=128)
+        params = engine._engine.generate.call_args.kwargs["sampling_params"]
+        assert (params.no_repeat_ngram_size, params.ngram_window) == (35, 128)
+
+        engine._engine = MagicMock()
+        engine._engine.add_request = AsyncMock(return_value="req-1")
+        engine._engine.abort_request = AsyncMock(return_value=True)
+
+        async def _one_output_stream(_request_id):
+            yield SimpleNamespace(
+                output_text="ok",
+                new_text="ok",
+                prompt_tokens=1,
+                completion_tokens=1,
+                finished=True,
+                finish_reason="stop",
+                tool_calls=None,
+                cached_tokens=0,
+            )
+
+        engine._engine.stream_outputs = _one_output_stream
+        async for _ in engine.stream_generate("hello", no_repeat_ngram_size=3):
+            pass
+        params = engine._engine.add_request.call_args.kwargs["sampling_params"]
+        assert (params.no_repeat_ngram_size, params.ngram_window) == (3, 0)
 
 
 # ---------------------------------------------------------------------------

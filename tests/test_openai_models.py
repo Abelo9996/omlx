@@ -797,6 +797,43 @@ class TestCompletionModels:
                 }
             )
 
+    def test_no_repeat_ngram_fields_are_kept(self):
+        chat = ChatCompletionRequest.model_validate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "no_repeat_ngram_size": 35,
+                "ngram_window": 128,
+            }
+        )
+        completion = CompletionRequest(
+            model="m", prompt="hello", no_repeat_ngram_size=3
+        )
+        assert (chat.no_repeat_ngram_size, chat.ngram_window) == (35, 128)
+        assert (completion.no_repeat_ngram_size, completion.ngram_window) == (3, None)
+        # 0 turns the ban off, as in transformers; a window then does nothing.
+        off = CompletionRequest(
+            model="m", prompt="hello", no_repeat_ngram_size=0, ngram_window=128
+        )
+        assert off.no_repeat_ngram_size == 0
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"no_repeat_ngram_size": -1},
+            {"ngram_window": -1},
+            # A window shorter than the n-gram can never hold one.
+            {"no_repeat_ngram_size": 35, "ngram_window": 34},
+        ],
+    )
+    def test_no_repeat_ngram_fields_are_validated(self, fields):
+        with pytest.raises(ValidationError):
+            ChatCompletionRequest.model_validate(
+                {"model": "m", "messages": [{"role": "user", "content": "hi"}]} | fields
+            )
+        with pytest.raises(ValidationError):
+            CompletionRequest.model_validate({"model": "m", "prompt": "hi"} | fields)
+
     def test_completion_request(self):
         """Test creating completion request."""
         req = CompletionRequest(
