@@ -4553,6 +4553,15 @@ class Scheduler:
                 if vlm_embeds is not None and _saved_rope_deltas is not None:
                     self.model._language_model._rope_deltas = _saved_rope_deltas
                 request._prefill_saved_rope_deltas = None
+                # A client cancel keeps this progress; the cache is only
+                # reachable here, so extract it before the references drop.
+                if (
+                    request.request_id in self._abort_keep_cache_ids
+                    and self._abort_keeps_cache(request)
+                ):
+                    request._abort_store_prepared = self._prepare_abort_prefill_store(
+                        request, prompt_cache
+                    )
 
                 # Drop partial-prefill references before clearing the Metal pool.
                 # Otherwise the traceback frame can keep large KV/cache arrays
@@ -11553,13 +11562,19 @@ class Scheduler:
 
         # Remove from chunked-prefill queue (if mid-prefill)
         store_future = None
+        # An external prefill extracts its progress at the abort point, before
+        # it drops the cache; see _do_external_prefill.
+        prepared = getattr(request, "_abort_store_prepared", None)
+        request._abort_store_prepared = None
         if request_id in self._prefill_states:
             state = self._prefill_states.pop(request_id, None)
             if keep_cache and state is not None:
-                store_future = self._submit_abort_prefill_store(request, state)
+                prepared = self._prepare_abort_prefill_store(request, state.cache)
             self.prefilling = deque(
                 r for r in self.prefilling if r.request_id != request_id
             )
+        if keep_cache and prepared is not None:
+            store_future = self._submit_abort_store(request, prepared)
 
         # Remove from running (BatchGenerator)
         if request.request_id in self.request_id_to_uid:
@@ -11670,23 +11685,27 @@ class Scheduler:
             and not self._model_has_unreconstructible_cache()
         )
 
-    def _submit_abort_prefill_store(
-        self, request: "Request", state: _PrefillState
-    ) -> Any | None:
-        """Store a cancelled chunked prefill up to its progress, off-thread."""
+    def _prepare_abort_prefill_store(
+        self, request: "Request", prompt_cache: list[Any]
+    ) -> tuple[list[int], list[Any], Any, Any] | None:
+        """Extract a cancelled prefill's progress for an off-thread store."""
         # Prefill KV is still dense; TurboQuant blocks use another layout.
         if self._turboquant_kv_bits is not None or self._store_cache_executor is None:
             return None
         request_id = request.request_id
-        tokens = list(request.prompt_token_ids[: _cache_base_sizes(state.cache)])
+        tokens = list(request.prompt_token_ids[: _cache_base_sizes(prompt_cache)])
         try:
             _safe_sync_stream(self._stream)
-            prepared = self._prepare_live_cache_store(request_id, state.cache, tokens)
+            return self._prepare_live_cache_store(request_id, prompt_cache, tokens)
         except Exception as e:
             logger.debug("Cancelled prefill store skipped for %s: %s", request_id, e)
             return None
-        if prepared is None:
-            return None
+
+    def _submit_abort_store(
+        self, request: "Request", prepared: tuple[list[int], list[Any], Any, Any]
+    ) -> Any:
+        """Store a cancelled request's extracted progress off-thread."""
+        request_id = request.request_id
         tokens, cache_to_store, model_cache_config, snapshots = prepared
         gate = self._store_cache_gate
         if gate is not None:

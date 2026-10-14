@@ -572,3 +572,48 @@ def test_client_cancel_keeps_computed_prefix(mock_tokenizer, tmp_path, kind):
         assert table is None or table.num_tokens == 0
     finally:
         scheduler.shutdown()
+
+
+@pytest.mark.parametrize("kind", ["gdn", "rotating"])
+def test_client_cancel_keeps_external_prefill_progress(mock_tokenizer, tmp_path, kind):
+    """A cancel that lands inside the external prefill loop stores the blocks
+    that loop finished, so a resend restores them."""
+    model, scheduler, prefix = _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind)
+    scheduler.config.chunked_prefill = False
+    prompt = [5 + i % 9 for i in range(30)]
+    scheduler.add_request(
+        Request(
+            request_id="external",
+            prompt=list(prompt),
+            sampling_params=SamplingParams(max_tokens=8, temperature=0),
+        )
+    )
+    check_aborts = scheduler._check_pending_aborts_for_uids
+    chunks = []
+
+    def cancel_after_two_chunks(uids):
+        chunks.append(len(uids))
+        if len(chunks) == 2:
+            scheduler.abort_request("external", keep_cache=True)
+        return check_aborts(uids)
+
+    scheduler._check_pending_aborts_for_uids = cancel_after_two_chunks
+    try:
+        for _ in range(10):
+            scheduler.step()
+            if "external" not in scheduler.requests:
+                break
+        for future in list(scheduler._inflight_store_futures.values()):
+            future.result(timeout=30)
+        scheduler._drain_pending_async_removes()
+        assert len(chunks) == 2
+        assert not scheduler.requests
+
+        table, _ = prefix.fetch_cache("probe-external", prompt)
+        assert table is not None and table.num_tokens >= 4
+        prefix.release_cache("probe-external")
+        _assert_restored_matches_cold(
+            model, scheduler, prefix, prompt, table.num_tokens
+        )
+    finally:
+        scheduler.shutdown()
