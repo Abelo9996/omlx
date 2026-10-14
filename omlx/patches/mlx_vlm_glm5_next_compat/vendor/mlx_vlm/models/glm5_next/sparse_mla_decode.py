@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Split-K NoPE sparse MLA attention for decode and MTP verify (GLM-5.3-Flash DSA layers).
+"""Split-K NoPE sparse MLA attention for GLM-5.3 decode and verify blocks.
 
-Inputs are the indexer's top-k *window* ids, not expanded token ids: each
-threadgroup expands its 128 selected slots in-kernel (window w -> tokens
-4w..4w+3, then the incomplete-window tail), checks validity (window complete
-and causal for this row), and runs NAX fragment attention (MLX
-steel nax.h) over that single key block. A second kernel merges the
-per-block (max, sum, O) partials. This replaces the index expansion ops, the
-gathered KV copy and the unfused 512-dim SDPA of the general decode path.
+Each threadgroup expands 128 selected key slots from the indexer's top-k
+windows (plus the incomplete-window tail) and attends to them on NAX; a second
+kernel merges the per-block (max, sum, O) partials in fp32.
 """
 
 import os
@@ -15,9 +11,7 @@ import re
 
 import mlx.core as mx
 
-# The NAX attention tile spans four 32-key column fragments. Each head
-# fragment has sixteen rows; latent dimensions divide into float4 packs
-# across four column fragments and a 32-lane simdgroup.
+# Key tile: four 32-key column fragments. Head fragments have 16 rows.
 _NAX_COLUMN_FRAGMENTS = 4
 _NAX_FRAGMENT_HEAD_ROWS = 16
 _METAL_SIMDGROUP_LANES = 32
@@ -389,18 +383,9 @@ def sparse_mla_decode(
     )[0]
 
 
-# ---------------------------------------------------------------------------
-# Batched (continuous batching) variant.
-#
-# Query rows are flattened to r = b * S + s. Per batch row b the kernel reads
-# ``rows[b] = (n_pool, before, left_pad)``: windows are validated against the
-# row's own pooled count and causal position ``before + s`` exactly as in the
-# single-row kernel, and the resulting row-relative token t is read from KV
-# index ``t + left_pad`` (mlx BatchKVCache left-pads, the pooling cache never
-# does). KV is addressed through an explicit batch stride so the padded
-# BatchKVCache buffer can be passed without copying its unused capacity.
-# The math is textually the single-row kernel's; only addressing differs.
-# ---------------------------------------------------------------------------
+# Batched variant: the same kernel text with query rows flattened to
+# r = b * S + s, per-row (n_pool, before, left_pad) and a KV batch stride, so
+# the BatchKVCache buffer is read in place. Row token t sits at KV t + left_pad.
 
 
 def _batched_source(src, edits):

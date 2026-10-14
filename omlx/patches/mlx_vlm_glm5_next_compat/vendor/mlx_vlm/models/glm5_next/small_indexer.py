@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Small-S (decode / MTP verify) fast path for the GLM-5.3 DSA indexer.
+"""GLM-5.3 DSA indexer scores for decode and verify blocks (S <= 8).
 
-Scores: one Metal kernel computes sum_h w[s,h] * relu(q[s,h] . k[p]) with fp32
-accumulation, writes the result in the query dtype and masks incomplete
-windows with -1e30, matching the native scorer + mx.where of the general path.
-Selection requires the native 16-bit radix top-k; index expansion follows the
-general path (4-token window expansion plus the incomplete-window tail).
-The general path pads a single query row to 64 for the prefill scorer, which
-dominates the indexer cost at decode.
+score[s, p] = sum_h w[s, h] * relu(q[s, h] . k[p]) with fp32 accumulation, in
+the query dtype; incomplete or future windows get -1e30 like the general path.
 """
 
 import mlx.core as mx
@@ -103,23 +98,8 @@ def small_scores(q, pool_keys, weights, before, kpool):
     return out[None]
 
 
-# ---------------------------------------------------------------------------
-# Batched (continuous batching) variant.
-#
-# Per-row contract, mirroring the general path of Glm5NextIndexer.__call__:
-#   before[b]   tokens row b had processed before this call (pool-relative,
-#               i.e. without KV left padding); query row s sits at before[b]+s
-#   plen[b]     row b's valid pooled windows (BatchPoolingCache._pool_lengths);
-#               the pooled tensor itself is padded to the extent P = max
-#   lpad[b]     KV-cache left padding: token t of row b lives at KV index
-#               t + lpad[b] (BatchPoolingCache itself never left-pads)
-# Every row advances by exactly S tokens (no right padding inside the call);
-# the caller checks that before dispatching here.
-#
-# The score of (b, s, p) is computed with exactly the arithmetic of the B == 1
-# kernel above (same lane/head split, fp32 accumulate, query-dtype output),
-# so a batched row reproduces its single-row scores bit for bit.
-# ---------------------------------------------------------------------------
+# Batched variant with the same arithmetic per row. rows[b] holds (pooled
+# windows, tokens before) of row b; query row s sits at position before + s.
 
 _BATCHED_SRC = """
     uint p = threadgroup_position_in_grid.x;
@@ -167,12 +147,8 @@ def _get_batched_kernel():
 
 
 def _pool_storage(pool_keys, pool_cache):
-    """(keys, batch stride) without copying a padded pooled view.
-
-    BatchPoolingCache.pooled is a column slice of its backing buffer; handing
-    that view to a Metal kernel would copy the whole pool every call. The
-    backing buffer holds the same rows at a larger row stride.
-    """
+    """(keys, batch stride). Reads the backing buffer in place, because the
+    sliced ``pooled`` view would be copied for the kernel on every call."""
     batch_size, pool_extent, head_dim = pool_keys.shape
     buf = getattr(pool_cache, "_pool_buf", None)
     if (
@@ -189,10 +165,7 @@ def _pool_storage(pool_keys, pool_cache):
 
 
 def small_scores_batched(q, pool_keys, weights, before, plen, kpool, pool_cache=None):
-    """q (B,S,H,D), pool_keys (B,P,D), weights (B,S,H) -> (B,S,P) in q.dtype.
-
-    ``before``/``plen`` are per-row int lists (see the contract above).
-    """
+    """q (B,S,H,D), pool_keys (B,P,D), weights (B,S,H) -> (B,S,P) in q.dtype."""
     _validate_scores(q, pool_keys, weights, before, plen)
     batch_size, query_rows, query_heads, head_dim = q.shape
     pool_extent = pool_keys.shape[1]

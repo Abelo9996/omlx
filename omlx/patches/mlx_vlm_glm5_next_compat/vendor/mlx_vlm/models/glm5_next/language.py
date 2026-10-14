@@ -78,9 +78,7 @@ def _cache_parts(cache):
 # They run on M3 and newer GPUs (decode_kernels.fused_decode_supported).
 _DECODE_FUSION = _decode_kernels.fused_decode_supported()
 _DECODE_BLOCK = DECODE_BLOCK_SIZE
-# The existing fused projection lane serves at most _DECODE_BLOCK rows.
-# Its qmv-wide kernel uses eight lanes per output row; larger blocks keep
-# the prefill scorer and existing attention dispatch.
+# Split-K decode/verify (small_indexer.py, sparse_mla_decode.py) on NAX GPUs.
 _SMALL_QUERY_VERIFY_ROWS = _DECODE_BLOCK
 _SMALL_QUERY_INDEXER = True
 _DSA_DECODE_FUSED = True
@@ -785,14 +783,8 @@ def _small_selector_ok(indexer, pool, batch_size, query_rows):
 
 
 def _batched_rows(pool, kv, batch_size: int, query_rows: int):
-    """Per-row ``processed`` list for the batched small-S DSA path, or None.
-
-    Host-side only (no device sync). Eligible states are the ones the general
-    path handles with plain per-row arithmetic: every row advances by exactly
-    ``S`` tokens in this call (no right padding inside the block, so each row
-    is right-aligned in the KV cache and row token ``t`` sits at KV index
-    ``t + left_padding[row]``), and the KV left padding is a per-row vector.
-    """
+    """Per-row ``processed`` for the batched path, or None when a row is
+    right-padded inside the block or the KV left padding is not per row."""
     processed = Glm5NextIndexer._processed(pool)
     if not isinstance(processed, list):
         processed = [int(processed)] * batch_size
@@ -989,14 +981,9 @@ class Glm5NextIndexer(nn.Module):
         )
 
     def small_windows(self, x, qr, cache, projected=None):
-        """Decode/verify fast path: advance the pool, score, native top-k.
-
-        Returns (windows [S, n_select] int32, tokens processed before, pooled
-        window count), or None when selection is bypassed for short contexts.
-        The caller expands windows for the existing gathered attention.
-        ``projected``: (wq_b(qr), wk(x), weights_proj(x)) from the attention's
-        fused decode projections (entries may be None).
-        """
+        """Advance the pool and select top-k windows for one sequence.
+        Returns (windows [S, 512], tokens before, pooled windows), or None
+        for the dense bypass."""
         batch_size, query_rows, _ = x.shape
         q_raw, k_raw, w_raw = projected if projected is not None else (None, None, None)
         if q_raw is None:
@@ -1020,13 +1007,8 @@ class Glm5NextIndexer(nn.Module):
         return selected[0], before, pool_keys.shape[1]
 
     def small_windows_batched(self, x, qr, cache, kv_cache, projected=None):
-        """Batched decode/verify fast path (see small_indexer.py contract).
-
-        Returns (windows [B, S, n_select] int32, rows [B, 3] int32 holding
-        (pooled windows, tokens before, KV left padding) per row), or None
-        when every row is short enough for the dense bypass.
-        ``projected``: as in small_windows.
-        """
+        """Batched small_windows. Returns (windows [B, S, 512], rows [B, 3]
+        of (pooled windows, tokens before, KV left padding)), or None."""
         batch_size, query_rows, _ = x.shape
         q_raw, k_raw, w_raw = projected if projected is not None else (None, None, None)
         if q_raw is None:

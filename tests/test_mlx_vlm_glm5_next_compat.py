@@ -3087,6 +3087,77 @@ def test_nax_sparse_mla_deterministic_many_threadgroups():
         assert mx.array_equal(out, first).item()
 
 
+def _split_k_tokens(windows, before, n_pool):
+    """Tokens of the valid top-k windows, then the incomplete-window tail."""
+    w = np.array(windows)
+    n = w.shape[1] * 4
+    out = np.full((w.shape[0], n + 3), -1, np.int32)
+    for s, row in enumerate(w):
+        qpos = before + s
+        ok = (row >= 0) & (row < n_pool) & ((row + 1) * 4 - 1 <= qpos)
+        tokens = (row[:, None] * 4 + np.arange(4)).reshape(-1)
+        out[s, :n] = np.where(np.repeat(ok, 4), tokens, -1)
+        count = (qpos + 1) % 4
+        out[s, n : n + count] = qpos + 1 - count + np.arange(count)
+    return mx.array(out)[None, None]
+
+
+@_needs_nax_sparse_mla
+@pytest.mark.parametrize("width", [1, 3, 8])
+def test_split_k_decode_matches_fp32_reference(width):
+    from mlx_vlm.models.glm5_next import sparse_mla_decode as split_k
+
+    K, scale = 2603, 256**-0.5
+    before, n_pool = K - width, K // 4
+    q, kv, _ = _smla_inputs(width, K, 1, seed=width)
+    # Distinct windows, including negative, past-the-pool and incomplete ids.
+    order = mx.argsort(mx.random.uniform(shape=(width, n_pool + 8)), axis=-1)
+    windows = (order[:, :512] - 4).astype(mx.int32)
+    out = split_k.sparse_mla_decode(q, kv, windows, before, n_pool, scale)
+    ref = _smla_reference(q, kv, _split_k_tokens(windows, before, n_pool), scale)
+    err = mx.abs(out.astype(mx.float32) - ref)
+    assert mx.all(err <= mx.abs(ref) * 2.0**-8 + 1e-3).item()
+
+    # The same row twice in a batch buffer: unpadded and left-padded.
+    pad = mx.zeros((1, 1, 5, 512), kv.dtype)
+    kv_rows = mx.concatenate(
+        [mx.concatenate([kv, pad, pad], 2), mx.concatenate([pad, kv, pad], 2)]
+    )
+    rows = mx.array([[n_pool, before, 0], [n_pool, before, 5]], mx.int32)
+    q_rows, windows_rows = mx.concatenate([q, q]), mx.stack([windows, windows])
+    batched = split_k.sparse_mla_decode_batched(
+        q_rows, kv_rows, K + 5, windows_rows, rows, scale
+    )
+    assert mx.array_equal(batched[:1], out).item()
+    assert mx.array_equal(batched[1:], out).item()
+
+
+@pytest.mark.skipif(not mx.metal.is_available(), reason="needs a Metal GPU")
+@pytest.mark.parametrize("width", [1, 8])
+def test_small_query_scores_match_fp32_reference(width):
+    from mlx_vlm.models.glm5_next import small_indexer
+
+    mx.random.seed(width)
+    before, plen = [140, 118], [37, 29]
+    q = mx.random.normal((2, width, 32, 128)).astype(mx.bfloat16)
+    keys = mx.random.normal((2, 37, 128)).astype(mx.bfloat16)
+    weights = (mx.random.normal((2, width, 32)) * 0.1).astype(mx.bfloat16)
+    batched = small_indexer.small_scores_batched(q, keys, weights, before, plen, 4)
+    for b, n in enumerate(plen):
+        got = small_indexer.small_scores(
+            q[b : b + 1], keys[b : b + 1, :n], weights[b : b + 1], before[b], 4
+        )
+        assert mx.array_equal(batched[b : b + 1, :, :n], got).item()
+        assert (batched[b, :, n:] <= -1e29).all().item()
+        ref = q[b].astype(mx.float32) @ keys[b, :n].astype(mx.float32).T
+        ref = (mx.maximum(ref, 0) * weights[b].astype(mx.float32)[..., None]).sum(1)
+        ref = ref.astype(mx.bfloat16).astype(mx.float32)
+        valid = (mx.arange(n) + 1) * 4 - 1 <= before[b] + mx.arange(width)[:, None]
+        assert mx.array_equal(got[0] <= -1e29, ~valid).item()
+        got = mx.where(valid, got[0].astype(mx.float32), 0)
+        assert mx.allclose(got, mx.where(valid, ref, 0), atol=0.02, rtol=0.01).item()
+
+
 # ---------------------------------------------------------------------------
 # Fused decode/verify kernels (bitwise against the reference op graphs)
 
