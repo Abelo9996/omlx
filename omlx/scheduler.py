@@ -14059,6 +14059,9 @@ class Scheduler:
 
     def _reset_request_for_reprefill(self, request: Request) -> None:
         """Reset request-owned decode state so it can be prefilled again."""
+        drafter = _block_drafter_for(self.model)
+        if drafter is not None:
+            drafter.release_request(request.request_id)
         request.status = RequestStatus.WAITING
         request.batch_uid = None
         request.prompt_cache = None

@@ -30,7 +30,7 @@ from mlx_vlm.speculative.drafters.qwen3_dflash.config import (
 from mlx_vlm.speculative.drafters.qwen3_dflash.dflash import DFlashDraftModel
 
 from omlx.model_settings import ModelSettings
-from omlx.request import SamplingParams
+from omlx.request import Request, RequestStatus, SamplingParams
 from omlx.scheduler import Scheduler
 from omlx.speculative import dflash as dd
 from omlx.speculative.dflash import kernels, selection, variants
@@ -517,6 +517,60 @@ def test_new_batch_generator_resets_drafter_rows():
     Scheduler._ensure_batch_generator(scheduler, SamplingParams())
     assert not drafter._rows and not drafter._request_uids
     assert "a" in drafter._kept and "c" in drafter._request_seeds
+
+
+@pytest.mark.parametrize("failure", ["corruption", "overflow"])
+def test_reprefill_retry_discards_failed_drafter_context(
+    failure, mock_model, mock_tokenizer, monkeypatch
+):
+    drafter = _tiny_drafter()
+    tokens = list(range(6))
+    drafter.seed_request("finished", _captured(4, seed=90), position=0)
+    drafter.bind_uid("finished", 0)
+    _draft_one(drafter, 0, _captured(1, seed=91), 7)
+    drafter.release([0])
+    drafter.release_request("finished", tokens)
+
+    mock_model._omlx_drafter = drafter
+    scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+    monkeypatch.setattr(scheduler, "_create_batch_generator", lambda params: object())
+    try:
+        request = Request(
+            request_id="retry",
+            prompt="example",
+            prompt_token_ids=tokens,
+            num_prompt_tokens=len(tokens),
+            sampling_params=SamplingParams(),
+            status=RequestStatus.RUNNING,
+            cached_tokens=3,
+        )
+        scheduler.requests[request.request_id] = request
+        scheduler.prefilling.append(request)
+        assert drafter.prepare_request(request.request_id, tokens, 3) == 3
+        drafter.seed_request(request.request_id, _captured(2, seed=92), position=3)
+
+        if failure == "corruption":
+            scheduler._recover_from_cache_error()
+            scheduler._reschedule_running_requests(is_corruption=True)
+        else:
+            scheduler._recover_from_generation_overflow_error()
+            scheduler._reschedule_generation_overflow_requests()
+
+        assert list(scheduler.waiting) == [request]
+        assert request.cached_tokens == 0
+        scheduler._ensure_batch_generator(request.sampling_params)
+        drafter.seed_request(request.request_id, _captured(5, seed=93), position=0)
+        drafter.bind_uid(request.request_id, 0)
+        assert drafter._rows[0].end == 5
+        assert drafter._rows[0].pending_len == 5
+
+        _draft_one(drafter, 0, _captured(1, seed=94), 7)
+        drafter.release([0])
+        drafter.release_request(request.request_id, tokens + [7, 8])
+        assert drafter.prepare_request("next", tokens, len(tokens)) == len(tokens)
+    finally:
+        scheduler.shutdown()
+        scheduler.deep_reset()
 
 
 def test_sampled_rows_get_sparse_candidate_distributions():
