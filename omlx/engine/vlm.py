@@ -2622,7 +2622,9 @@ class VLMBatchedEngine(BaseEngine):
 
             configure_qwen4_decode(
                 self._vlm_model,
-                wide_projections=scheduler_config.qwen4_gdn_decode_wide_proj,
+                wide_projections=bool(
+                    getattr(self._model_settings, "qwen4_gdn_decode_wide_proj", False)
+                ),
             )
             apply_qwen35_gdn_prework_patch()
         except Exception:

@@ -905,6 +905,26 @@ class TestQwenCpuShareMemoryEstimate:
         settings.deepseek_v41_ced_prefill_enabled = False
         assert pool._engine_runtime_signature("v41", settings) == off
 
+    def test_qwen4_wide_decode_setting_changes_engine_signature(self, tmp_path):
+        from omlx.model_settings import ModelSettings
+
+        pool = _make_pool(ceiling=500)
+        entry = EngineEntry(
+            model_id="qwen4",
+            model_path=str(tmp_path),
+            model_type="vlm",
+            engine_type="vlm",
+            config_model_type="qwen4_exp",
+            estimated_size=100,
+        )
+        pool._entries[entry.model_id] = entry
+        settings = ModelSettings()
+        off = pool._engine_runtime_signature("qwen4", settings)
+        settings.qwen4_gdn_decode_wide_proj = True
+        on = pool._engine_runtime_signature("qwen4", settings)
+        assert off != on
+        assert dict(on)["qwen4_gdn_decode_wide_proj"] == "True"
+
     @pytest.mark.asyncio
     async def test_v41_live_admission_keeps_viable_mmap_fallback(self, tmp_path):
         """Real pressure may select mmap without making that override sticky."""

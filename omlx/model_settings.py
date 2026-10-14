@@ -344,6 +344,9 @@ class ModelSettings:
     # through mmap. The runtime may force this on when resident loading cannot
     # fit under the configured model-memory ceiling but mmap loading can.
     qwen4_ple_ssd_offload: bool = False
+    # Qwen4-Exp only: admit any canonical affine GDN projection recipe to the
+    # fused one-row decode route, not only the oQe allow-list.
+    qwen4_gdn_decode_wide_proj: bool = False
     deepseek_v41_engram_ssd_offload: bool = False
     # DeepSeek V4.1 CED: during prefill the decoder half only forwards the
     # last window-size tokens; decoder global KV is the encoder-final

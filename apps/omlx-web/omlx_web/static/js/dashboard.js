@@ -192,7 +192,7 @@
             // Global settings
             globalSettings: {
                 base_path: '',
-                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk', burst_decode_mode: 'balanced', preserve_mid_system_cache: true, qwen4_gdn_decode_wide_proj: false, distributed_inference_enabled: false, distributed_inference_active: false, max_audio_upload_size: '100MB' },
+                server: { host: '127.0.0.1', port: 8000, log_level: 'info', sse_keepalive_mode: 'chunk', burst_decode_mode: 'balanced', preserve_mid_system_cache: true, distributed_inference_enabled: false, distributed_inference_active: false, max_audio_upload_size: '100MB' },
                 model: { model_dirs: [''], model_fallback: false, hide_helper_models: false },
                 memory: { prefill_memory_guard: true, memory_guard_tier: 'balanced', memory_guard_custom_ceiling_gb: 0 },
                 scheduler: { max_concurrent_requests: 8, embedding_batch_size: 32, chunked_prefill: false, prefill_priority: 'context', decode_fairness: true },
@@ -1439,7 +1439,6 @@
                             sse_keepalive_mode: this.globalSettings.server.sse_keepalive_mode,
                             burst_decode_mode: this.globalSettings.server.burst_decode_mode,
                             preserve_mid_system_cache: this.globalSettings.server.preserve_mid_system_cache,
-                            qwen4_gdn_decode_wide_proj: this.globalSettings.server.qwen4_gdn_decode_wide_proj,
                             distributed_inference_enabled: this.globalSettings.server.distributed_inference_enabled,
                             max_audio_upload_size: this.globalSettings.server.max_audio_upload_size,
                             model_dirs: this.globalSettings.model.model_dirs.filter(d => d.trim()),
@@ -2156,6 +2155,10 @@
                         s.deepseek_v41_ced_prefill_enabled === true,
                     deepseek_v41_ced_prefill_supported:
                         String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_') === 'deepseek_v41',
+                    qwen4_gdn_decode_wide_proj:
+                        s.qwen4_gdn_decode_wide_proj === true,
+                    qwen4_gdn_decode_wide_proj_supported:
+                        String(model?.config_model_type || '').toLowerCase().replaceAll('-', '_') === 'qwen4_exp',
                     deepseek_v41_engram_ssd_offload: model?.deepseek_v41_engram_ssd_offload_forced === true
                         || s.deepseek_v41_engram_ssd_offload === true,
                     deepseek_v41_engram_ssd_offload_requested:
@@ -3196,6 +3199,8 @@
                                         : !!this.modelSettings.qwen4_ple_ssd_offload,
                                 deepseek_v41_ced_prefill_enabled:
                                     !!this.modelSettings.deepseek_v41_ced_prefill_enabled,
+                                qwen4_gdn_decode_wide_proj:
+                                    !!this.modelSettings.qwen4_gdn_decode_wide_proj,
                                 deepseek_v41_engram_ssd_offload:
                                     this.modelSettings.deepseek_v41_engram_ssd_offload_forced
                                         ? !!this.modelSettings.deepseek_v41_engram_ssd_offload_requested

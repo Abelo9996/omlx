@@ -391,6 +391,31 @@ def test_oq_a8_toggle_is_gated_to_qwen35_models():
     assert "modelSettings.qwen35_oq_a8_min_tokens" in section
 
 
+def test_qwen4_wide_decode_is_a_qwen4_acceleration_setting():
+    root = Path(__file__).resolve().parents[1]
+    html = _model_settings_template()
+    acceleration = _section(html, "<!-- Acceleration -->", "<!-- Memory Saving -->")
+    row = _section(
+        acceleration,
+        "<!-- Qwen4 Extended Fused Decode -->",
+        "<!-- Qwen 3.5/3.6/3.8 oQ INT8-activation prefill kernels -->",
+    )
+    assert 'x-show="modelSettings.qwen4_gdn_decode_wide_proj_supported"' in row
+    assert "modelSettings.qwen4_gdn_decode_wide_proj =" in row
+
+    js = _dashboard_script()
+    supported = js.split("qwen4_gdn_decode_wide_proj_supported:", 1)[1]
+    assert "=== 'qwen4_exp'" in supported.split("\n", 2)[1]
+    assert "!!this.modelSettings.qwen4_gdn_decode_wide_proj," in js
+    assert "globalSettings.server.qwen4_gdn_decode_wide_proj" not in js
+    global_html = (root / "omlx_web/templates/dashboard/_settings.html").read_text()
+    assert "qwen4_gdn_decode_wide_proj" not in global_html
+
+    catalog = json.loads((root / "omlx_web/i18n/en.json").read_text())
+    assert "modal.model_settings.qwen4_gdn_decode_wide_proj" in catalog
+    assert "modal.model_settings.qwen4_gdn_decode_wide_proj_hint" in catalog
+
+
 def test_oq_a8_offers_no_kernel_choice():
     """The tile is not a user-facing choice: the dispatcher picks it per bit
     width from a measured default, so the modal exposes only the toggle and

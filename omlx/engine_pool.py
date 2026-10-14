@@ -1105,6 +1105,10 @@ class EnginePool:
         if entry is not None:
             qwen4_offload, _, _ = self._qwen4_ple_offload_status(entry, settings)
             add("qwen4_ple_ssd_offload", qwen4_offload)
+            add(
+                "qwen4_gdn_decode_wide_proj",
+                getattr(settings, "qwen4_gdn_decode_wide_proj", False),
+            )
             v41_offload, _, _ = self._deepseek_v41_engram_offload_status(
                 entry, settings
             )
