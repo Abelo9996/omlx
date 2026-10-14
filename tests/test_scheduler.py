@@ -2383,6 +2383,49 @@ class TestSchedulerReset:
         assert len(scheduler._pending_async_removes) == 0
         assert len(scheduler._inflight_store_futures) == 0
 
+    @pytest.mark.parametrize("phase", ["decode", "prefill", "external_prefill"])
+    def test_reset_does_not_start_cancel_cache_store(
+        self, mock_model, mock_tokenizer, phase
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        request = Request(
+            request_id="cancel-before-reset",
+            prompt=[3, 4, 5],
+            sampling_params=SamplingParams(),
+        )
+        scheduler.add_request(request)
+        scheduler._abort_keeps_cache = MagicMock(return_value=True)
+        scheduler._cleanup_finished = MagicMock()
+        scheduler._submit_abort_store = MagicMock()
+        scheduler._prepare_abort_prefill_store = MagicMock(return_value=object())
+        if phase == "decode":
+            scheduler.running[request.request_id] = request
+            scheduler.request_id_to_uid[request.request_id] = 0
+            scheduler.uid_to_request_id[0] = request.request_id
+        elif phase == "prefill":
+            scheduler._prefill_states[request.request_id] = SimpleNamespace(cache=[])
+            scheduler.prefilling.append(request)
+        else:
+            request._abort_store_prepared = object()
+        scheduler.abort_request(request.request_id, keep_cache=True)
+
+        abort = scheduler._do_abort_request
+
+        def abort_with_late_cancel(request_id, **kwargs):
+            # A client can cancel after reset clears the pending flags.
+            scheduler.abort_request(request_id, keep_cache=True)
+            return abort(request_id, **kwargs)
+
+        with patch.object(
+            scheduler, "_do_abort_request", side_effect=abort_with_late_cancel
+        ):
+            scheduler.reset()
+
+        scheduler._cleanup_finished.assert_not_called()
+        scheduler._submit_abort_store.assert_not_called()
+        assert not scheduler._abort_keep_cache_ids
+        assert not scheduler.requests
+
     def test_reset_waits_for_store_worker_before_snapshot_and_cache_cleanup(
         self, mock_model, mock_tokenizer
     ):

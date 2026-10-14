@@ -149,6 +149,19 @@ class Request:
     # Paged cache fields (for BlockAwarePrefixCache)
     block_table: Optional["BlockTable"] = None  # Block table for paged cache
     shared_prefix_blocks: int = 0  # Number of shared prefix blocks
+
+    # Memory-pressure requeue. The first ``requeued_output_tokens`` outputs
+    # are folded into ``prompt_token_ids`` so re-admission prefills them;
+    # ``requeue_row_state`` carries the row's sampler, logits processors and
+    # stop matcher into the next insert.
+    memory_requeues: int = 0
+    requeued_output_tokens: int = 0
+    requeue_reported_cached_tokens: int = 0
+    requeue_row_state: Optional[Tuple[Any, List[Any], Any]] = None
+    # Token index after the last media placeholder. Embeddings are gone by
+    # then, so the resumed prefix must cover every media token.
+    requeue_media_end: int = 0
+
     # Skip the post-completion prefix/SSD cache store for this request.
     # Set by internal probes (context benchmark) whose KV must never
     # pollute the shared cache tiers or trigger the completion-time
