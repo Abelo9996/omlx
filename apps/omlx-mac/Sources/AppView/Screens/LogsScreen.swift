@@ -1,18 +1,11 @@
-// Logs screen. The web console's log viewer, in the app's own dress: a filter
-// row (view, minimum level, auto-scroll) and one of two views of the same
-// window. The table lists records with fixed columns and a detail card for the
-// row you click — which is where a repeated line shows every occurrence behind
-// its ×N badge. Raw shows the text as served, for copying and Find.
-//
-// `LogRecords.swift` owns the parsing, the aggregation and the raw filter;
-// `LogsScreenVM` owns the tail, the view and the selection.
+// Logs screen. Same viewer as the web UI: Table lists one row per record with
+// a detail card for the selected row, Raw shows the text as served.
 
 import SwiftUI
 import AppKit
 
 struct LogsScreen: View {
     @Environment(AppServices.self) private var services
-    @Environment(\.omlxTheme) private var theme
     @State private var vm = LogsScreenVM()
 
     var body: some View {
@@ -32,10 +25,15 @@ struct LogsScreen: View {
 
             LogControls(vm: vm)
 
-            LogPane(vm: vm)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 8)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Group {
+                switch vm.viewMode {
+                case .table: LogTable(vm: vm)
+                case .raw: LogRawPane(vm: vm)
+                }
+            }
+            .frame(minHeight: 360, idealHeight: 480, maxHeight: .infinity)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
 
             FooterBar(error: vm.lastError)
         }
@@ -56,21 +54,33 @@ struct LogsScreen: View {
 
     @ViewBuilder
     private var logLinesPicker: some View {
+        let lineOptions = [
+            (100,
+             String(localized: "logs.lines.100",
+                    defaultValue: "Last 100",
+                    comment: "Popup option to show the most recent 100 log lines")),
+            (500,
+             String(localized: "logs.lines.500",
+                    defaultValue: "Last 500",
+                    comment: "Popup option to show the most recent 500 log lines")),
+            (1000,
+             String(localized: "logs.lines.1000",
+                    defaultValue: "Last 1,000",
+                    comment: "Popup option to show the most recent 1,000 log lines")),
+            (5000,
+             String(localized: "logs.lines.5000",
+                    defaultValue: "Last 5,000",
+                    comment: "Popup option to show the most recent 5,000 log lines")),
+            (20000,
+             String(localized: "logs.lines.20000",
+                    defaultValue: "Last 20,000",
+                    comment: "Popup option to show the most recent 20,000 log lines")),
+        ]
+
         Popup(
             selection: $vm.lines,
             width: .controlCompact,
-            options: [
-                (100, String(localized: "logs.lines.100", defaultValue: "Last 100",
-                             comment: "Popup option to show the most recent 100 log lines")),
-                (500, String(localized: "logs.lines.500", defaultValue: "Last 500",
-                             comment: "Popup option to show the most recent 500 log lines")),
-                (1000, String(localized: "logs.lines.1000", defaultValue: "Last 1,000",
-                              comment: "Popup option to show the most recent 1,000 log lines")),
-                (5000, String(localized: "logs.lines.5000", defaultValue: "Last 5,000",
-                              comment: "Popup option to show the most recent 5,000 log lines")),
-                (20000, String(localized: "logs.lines.20000", defaultValue: "Last 20,000",
-                               comment: "Popup option to show the most recent 20,000 log lines")),
-            ]
+            options: lineOptions
         )
     }
 
@@ -87,12 +97,8 @@ struct LogsScreen: View {
 
 // MARK: - Controls
 
-/// The filter row: the six severities (the web console puts the same six above
-/// its list), the file selector, and auto-scroll.
 private struct LogControls: View {
     @Bindable var vm: LogsScreenVM
-
-    private var levels: [LogLevel] { [.trace, .debug, .info, .warning, .error, .critical] }
 
     var body: some View {
         ListGroup {
@@ -130,10 +136,10 @@ private struct LogControls: View {
                 Segmented(
                     selection: $vm.minLevel,
                     titleKey: "logs.row.level.label",
-                    options: levels.map { (value: $0, label: $0.rawValue) }
+                    options: LogLevel.allCases.map { (value: $0, label: $0.rawValue) }
                 )
                 .help(String(localized: "logs.row.level.help",
-                             defaultValue: "Hide everything below this level",
+                             defaultValue: "Filters this view only. It does not change the level the log file saves.",
                              comment: "Tooltip on the log level filter explaining what it does"))
             }
 
@@ -149,192 +155,286 @@ private struct LogControls: View {
     }
 }
 
-// MARK: - Log pane
+// MARK: - Table
 
-/// The two sizes this screen uses. The log screen predates the shared numeric
-/// tokens; keeping them here means the app PR stays independent of the web
-/// console series, and both stay at or above the 12pt floor.
-// LogTypeScale, LogRecordBody, LogDetailCard and LogRowView are internal
-// rather than private so the offscreen drawing tests (LogsDrawingTests) can
-// render the shapes the screen actually draws, not a copy of them.
-enum LogTypeScale {
-    /// Time, level and module columns.
-    static let meta: CGFloat = 12
-    /// The message itself; the app's body size.
-    static let body: CGFloat = 13
-    /// A record's box — the detail card's body and the empty pane's fragment:
-    /// tall enough for a dozen lines, scrolled past that instead of growing
-    /// with the record.
-    static let recordBodyHeight: CGFloat = 200
-    /// The detail card's occurrence list: the same idea, one line per time.
-    static let occurrencesHeight: CGFloat = 120
-    /// Height the row list keeps when a record's card is open above it.
-    static let listMinHeight: CGFloat = 200
+private enum LogColumn {
+    static let time: CGFloat = 92
+    static let level: CGFloat = 72
+    static let module: CGFloat = 150
+    static let rowHeight: CGFloat = 28
 }
 
-private struct LogPane: View {
+private struct LogTable: View {
     @Bindable var vm: LogsScreenVM
+
+    @Environment(AppServices.self) private var services
+    @Environment(\.omlxTheme) private var theme
+    @State private var position = ScrollPosition(idType: Int.self)
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if let row = vm.selectedRow {
+                LogDetailCard(row: row, onOpen: { services.requestedSection = $0 },
+                              onClose: { vm.selectedRowID = nil })
+            }
+
+            VStack(spacing: 0) {
+                LogColumnHeader()
+                Divider().overlay(theme.groupBorder)
+                if vm.rows.isEmpty {
+                    if !vm.isLoading {
+                        Text(vm.emptyMessage)
+                            .font(.omlxText(13))
+                            .foregroundStyle(theme.textTertiary)
+                            .padding(.vertical, 36)
+                    }
+                    Spacer(minLength: 0)
+                } else {
+                    rowList
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
+            .background(theme.codeBg)
+            .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
+                    .strokeBorder(theme.groupBorder, lineWidth: 0.5)
+            )
+        }
+    }
+
+    private var rowList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(vm.rows) { row in
+                    LogRowView(row: row, isSelected: row.id == vm.selectedRowID) {
+                        vm.toggleSelection(row)
+                    }
+                    Divider().overlay(theme.groupBorder)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        // The position tracks the top row, so a refresh that drops lines off
+        // the front keeps the reader's place while auto-scroll is off.
+        .scrollPosition($position, anchor: .top)
+        .onAppear { scrollToEdge() }
+        .onChange(of: vm.rows.last?.id) { _, _ in
+            if vm.autoScroll { position.scrollTo(edge: .bottom) }
+        }
+        .onChange(of: vm.minLevel) { _, _ in scrollToEdge() }
+    }
+
+    private func scrollToEdge() {
+        position.scrollTo(edge: vm.autoScroll ? .bottom : .top)
+    }
+}
+
+private struct LogColumnHeader: View {
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(String(localized: "logs.col.time", defaultValue: "Time",
+                        comment: "Logs table column header: when the line was written"))
+                .frame(width: LogColumn.time, alignment: .leading)
+            Text(String(localized: "logs.col.level", defaultValue: "Level",
+                        comment: "Logs table column header: log level"))
+                .frame(width: LogColumn.level, alignment: .leading)
+            Text(String(localized: "logs.col.module", defaultValue: "Module",
+                        comment: "Logs table column header: the logger name"))
+                .frame(width: LogColumn.module, alignment: .leading)
+            Text(String(localized: "logs.col.message", defaultValue: "Message",
+                        comment: "Logs table column header: the log message"))
+            Spacer(minLength: 0)
+        }
+        .font(.omlxText(12, weight: .semibold))
+        .foregroundStyle(theme.textTertiary)
+        .lineLimit(1)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+}
+
+private struct LogRowView: View {
+    let row: LogRow
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    @Environment(\.omlxTheme) private var theme
+
+    private var record: LogRecord { row.record }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(Self.clockTime(record.time))
+                .font(.omlxMono(12))
+                .foregroundStyle(theme.textTertiary)
+                .frame(width: LogColumn.time, alignment: .leading)
+                .help(record.level == nil
+                      ? String(localized: "logs.row.fragment.help",
+                               defaultValue: "The window starts inside this record",
+                               comment: "Tooltip on a log row whose header line is above the fetched window")
+                      : record.time)
+            LevelBadge(level: record.level)
+                .frame(width: LogColumn.level, alignment: .leading)
+            Text(record.module)
+                .font(.omlxMono(12))
+                .foregroundStyle(theme.textSecondary)
+                .truncationMode(.middle)
+                .frame(width: LogColumn.module, alignment: .leading)
+            trailing
+        }
+        .lineLimit(1)
+        .padding(.horizontal, 12)
+        .frame(height: LogColumn.rowHeight)
+        .background(isSelected ? theme.selBg : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// The message and its badges. Memory chips show only when they fit; the
+    /// detail card always has them.
+    @ViewBuilder
+    private var trailing: some View {
+        if let memory = LogParser.memoryGuard(String(record.firstLine)) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    message.frame(idealWidth: 120, maxWidth: .infinity, alignment: .leading)
+                    badges
+                    LogMemoryChips(memory: memory)
+                }
+                messageAndBadges
+            }
+        } else {
+            messageAndBadges
+        }
+    }
+
+    private var messageAndBadges: some View {
+        HStack(spacing: 8) {
+            message
+            badges
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var message: some View {
+        Text(record.firstLine)
+            .font(.omlxText(13))
+            .foregroundStyle(theme.text)
+            .truncationMode(.tail)
+    }
+
+    @ViewBuilder
+    private var badges: some View {
+        if row.times.count > 1 {
+            CountBadge(text: "×\(row.times.count)", tint: Color(nsColor: .systemOrange))
+        }
+        if record.lineCount > 1 {
+            CountBadge(text: "≡\(record.lineCount)", tint: nil)
+        }
+    }
+
+    /// `yyyy-MM-dd HH:mm:ss,SSS` -> `HH:mm:ss.SSS`; the detail card has the date.
+    private static func clockTime(_ stamp: String) -> String {
+        guard stamp.count == 23 else { return "-" }
+        return String(stamp.dropFirst(11)).replacingOccurrences(of: ",", with: ".")
+    }
+}
+
+private struct LevelBadge: View {
+    let level: LogLevel?
 
     @Environment(\.omlxTheme) private var theme
 
     var body: some View {
-        Group {
-            switch vm.viewMode {
-            case .table:
-                VStack(spacing: 8) {
-                    if let selected = vm.selectedRow {
-                        LogDetailCard(row: selected) { vm.clearSelection() }
-                    }
-                    list
-                        // A selected record must not push the list out of the
-                        // pane: the card scrolls inside its own boxes, the list
-                        // keeps its rows.
-                        .frame(minHeight: LogTypeScale.listMinHeight)
-                }
-            case .raw:
-                raw
-            }
-        }
-        .frame(minHeight: 360, idealHeight: 480, maxHeight: .infinity)
+        let color = tint
+        Text(level?.rawValue ?? "-")
+            .font(.omlxMono(12, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 
-    /// The raw view: the window as served, without the levels the filter hides.
-    @ViewBuilder
-    private var raw: some View {
-        ZStack {
-            LogTextView(
-                text: vm.rawText,
-                followTail: vm.autoScroll,
-                edgeKey: vm.minLevel.rawValue,
-                fgColor: NSColor(theme.text),
-                bgColor: NSColor(theme.codeBg)
-            )
-            if vm.rawText.isEmpty && !vm.isLoading {
-                Text(vm.emptyStateMessage)
-                    .font(.omlxText(LogTypeScale.body))
-                    .foregroundStyle(theme.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 36)
-            }
+    private var tint: Color {
+        switch level {
+        case .critical: Color(nsColor: .systemPurple)
+        case .error: Color(nsColor: .systemRed)
+        case .warning: Color(nsColor: .systemOrange)
+        case .info: Color(nsColor: .systemBlue)
+        case .debug: Color(nsColor: .systemTeal)
+        case .trace, nil: theme.textTertiary
         }
-        .frame(maxHeight: .infinity)
-        .background(theme.codeBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
-                .strokeBorder(theme.groupBorder, lineWidth: 0.5)
-        )
     }
+}
 
-    @ViewBuilder
-    private var list: some View {
-        ZStack {
-            if vm.rows.isEmpty {
-                LogEmptyPane(fragment: vm.leadingFragment, message: vm.emptyStateMessage)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(vm.rows) { row in
-                                LogRowView(row: row, isSelected: row.id == vm.selectedRowID) {
-                                    vm.select(row)
-                                }
-                                .id(row.id)
-                                Divider().overlay(theme.groupBorder)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    // Following the tail: a new row scrolls into view unless the
-                    // reader has switched it off (the button in the filter row).
-                    // The key is the window itself, not the last row's id: ids
-                    // are parse indices, so a window that keeps its record count
-                    // — any homogeneous log under a fixed `lines` — never
-                    // changes one and the list stopped scrolling after the
-                    // first render.
-                    .onChange(of: vm.logText) { _, _ in
-                        guard vm.autoScroll, let id = vm.rows.last?.id else { return }
-                        withAnimation(.easeOut(duration: 0.18)) {
-                            proxy.scrollTo(id, anchor: .bottom)
-                        }
-                    }
-                    .onAppear {
-                        guard vm.autoScroll, let id = vm.rows.last?.id else { return }
-                        proxy.scrollTo(id, anchor: .bottom)
-                    }
+private struct CountBadge: View {
+    let text: String
+    /// Nil draws the muted style.
+    let tint: Color?
+
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        Text(text)
+            .font(.omlxText(12, weight: .semibold))
+            .foregroundStyle(tint ?? theme.textTertiary)
+            .padding(.horizontal, 4)
+            .background((tint?.opacity(0.16) ?? theme.controlBg),
+                        in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .fixedSize()
+    }
+}
+
+private struct LogMemoryChips: View {
+    let memory: [LogMemoryField: String]
+
+    @Environment(\.omlxTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(LogMemoryField.allCases.filter { memory[$0] != nil }, id: \.self) { field in
+                HStack(spacing: 3) {
+                    Text(field.label).foregroundStyle(theme.textTertiary)
+                    Text("\(memory[field] ?? "") GB").fontWeight(.semibold)
                 }
+                .padding(.horizontal, 4)
+                .background(theme.controlBg, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
         }
-        .frame(maxHeight: .infinity)
-        .background(theme.codeBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
-                .strokeBorder(theme.groupBorder, lineWidth: 0.5)
-        )
+        .font(.omlxText(12))
+        .fixedSize()
+    }
+}
+
+private extension LogMemoryField {
+    var label: String {
+        switch self {
+        case .usage:
+            String(localized: "logs.memory.usage", defaultValue: "Usage",
+                   comment: "Chip label on a memory-guard log row: process memory in use")
+        case .watermark:
+            String(localized: "logs.memory.watermark", defaultValue: "Hard watermark",
+                   comment: "Chip label on a memory-guard log row: the abort threshold")
+        case .ceiling:
+            String(localized: "logs.memory.ceiling", defaultValue: "Ceiling",
+                   comment: "Chip label on a memory-guard log row: the memory ceiling")
+        case .peak:
+            String(localized: "logs.memory.peak", defaultValue: "Predicted peak",
+                   comment: "Chip label on a memory-guard log row: the predicted prefill peak")
+        }
     }
 }
 
 // MARK: - Detail card
 
-/// A record's text in its own bordered, scrolled box. The detail card and the
-/// empty pane (a window that begins inside a record) both draw one: a record
-/// can carry tens of thousands of continuation lines, so unbounded it made the
-/// pane 300,000pt tall and pushed everything else off the screen. The box is a
-/// fixed height and the record scrolls inside it.
-struct LogRecordBody: View {
-    let text: String
-
-    @Environment(\.omlxTheme) private var theme
-
-    var body: some View {
-        ScrollView {
-            Text(text)
-                .font(.omlxMono(LogTypeScale.meta))
-                .foregroundStyle(theme.text)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(maxHeight: LogTypeScale.recordBodyHeight, alignment: .top)
-        .padding(8)
-        .background(theme.inputBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.rowRadius, style: .continuous))
-    }
-}
-
-/// What the pane shows when it has no row to list. Usually the level rail hid
-/// every record, but the window can also have begun inside one: those lines
-/// have no row and no level, so they are drawn here rather than dropped, under
-/// the message that names the real reason.
-private struct LogEmptyPane: View {
-    let fragment: LogRecord?
-    let message: String
-
-    @Environment(\.omlxTheme) private var theme
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let fragment {
-                LogRecordBody(text: fragment.fullMessage)
-            }
-            Text(message)
-                .font(.omlxText(LogTypeScale.body))
-                .foregroundStyle(theme.textTertiary)
-                .frame(maxWidth: .infinity, alignment: .center)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 36)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// The record behind a row: its header, the message in full, and — for a
-/// repeated line — every time it appeared, which is what the row's ×N badge
-/// stands for. Same content as the web console's detail panel.
-struct LogDetailCard: View {
+private struct LogDetailCard: View {
     let row: LogRow
+    let onOpen: (AppSection) -> Void
     let onClose: () -> Void
 
     @Environment(\.omlxTheme) private var theme
@@ -342,84 +442,77 @@ struct LogDetailCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "text.magnifyingglass")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textSecondary)
                 Text(String(localized: "logs.detail.title",
                             defaultValue: "Entry",
                             comment: "Title of the card that shows one log record in full"))
-                    .font(.omlxText(LogTypeScale.meta, weight: .semibold))
+                    .font(.omlxText(12, weight: .semibold))
                     .foregroundStyle(theme.textSecondary)
                 Text(row.record.time)
-                    .font(.omlxMono(LogTypeScale.meta))
+                    .font(.omlxMono(12))
                     .foregroundStyle(theme.textSecondary)
-                    .monospacedDigit()
                 LevelBadge(level: row.record.level)
-                if !row.record.module.isEmpty {
-                    Text(row.record.module)
-                        .font(.omlxMono(LogTypeScale.meta))
-                        .foregroundStyle(theme.textTertiary)
-                        .lineLimit(1)
-                }
+                Text(row.record.module)
+                    .font(.omlxMono(12))
+                    .foregroundStyle(theme.textTertiary)
+                    .lineLimit(1)
                 Spacer(minLength: 8)
-                Button {
+                Button(String(localized: "logs.detail.close",
+                              defaultValue: "Close",
+                              comment: "Button that closes the log record detail card")) {
                     onClose()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text(String(localized: "logs.detail.close",
-                                    defaultValue: "Close",
-                                    comment: "Button that closes the log record detail card"))
-                            .font(.omlxText(LogTypeScale.meta))
-                    }
                 }
                 .buttonStyle(.omlx(.plain, size: .small))
                 .keyboardShortcut(.escape, modifiers: [])
             }
 
-            // The card is a fixed shape: the record scrolls inside its box.
-            LogRecordBody(text: row.record.renderedFullMessage)
-            if row.record.hiddenContinuationLines > 0 {
-                MoreLinesNote(hidden: row.record.hiddenContinuationLines)
+            LogTextView(text: row.record.message, followTail: false, edgeKey: String(row.id),
+                        fgColor: NSColor(theme.text), bgColor: NSColor(theme.inputBg))
+                // About one line of height per record line; longer records scroll inside.
+                .frame(height: min(200, 24 + 15 * CGFloat(row.record.lineCount)))
+                .clipShape(RoundedRectangle(cornerRadius: theme.rowRadius, style: .continuous))
+
+            if let memory = LogParser.memoryGuard(String(row.record.firstLine)) {
+                HStack(spacing: 8) {
+                    LogMemoryChips(memory: memory)
+                    Button(String(localized: "logs.action.raise_tier",
+                                  defaultValue: "Raise memory_guard_tier",
+                                  comment: "Button in the log detail card that opens the Performance settings")) {
+                        onOpen(.performance)
+                    }
+                    Button(String(localized: "logs.action.reduce_context",
+                                  defaultValue: "Reduce context",
+                                  comment: "Button in the log detail card that opens the Server settings with the default context window")) {
+                        onOpen(.server)
+                    }
+                }
+                .font(.omlxText(12))
+                .buttonStyle(.link)
             }
 
-            if row.isRepeated {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(String(localized: "logs.detail.occurrences",
-                                defaultValue: "Occurrences (\(row.count.formatted()))",
-                                comment: "Heading above the list of times a repeated log line appeared; the placeholder is how many times"))
-                        .font(.omlxText(LogTypeScale.meta, weight: .medium))
-                        .foregroundStyle(theme.textSecondary)
-                    // Windowed and scrolled for the same reason as the body
-                    // above: a warning can repeat tens of thousands of times.
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 3) {
-                            ForEach(row.renderedOccurrences) { occurrence in
-                                HStack(spacing: 6) {
-                                    Text(occurrence.time)
-                                        .font(.omlxMono(LogTypeScale.meta))
-                                        .foregroundStyle(theme.textTertiary)
-                                        .monospacedDigit()
-                                    if !occurrence.requestID.isEmpty {
-                                        Text(occurrence.requestID)
-                                            .font(.omlxMono(LogTypeScale.meta))
-                                            .foregroundStyle(theme.textTertiary)
-                                            .lineLimit(1)
-                                    }
-                                }
-                            }
+            if row.times.count > 1 {
+                Text(String(localized: "logs.detail.occurrences",
+                            defaultValue: "Occurrences (\(row.times.count))",
+                            comment: "Heading above the list of times a repeated log line appeared; the placeholder is how many times"))
+                    .font(.omlxText(12, weight: .medium))
+                    .foregroundStyle(theme.textSecondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(row.times.prefix(LogParser.occurrenceLimit).enumerated()),
+                                id: \.offset) { _, time in
+                            Text(time)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxHeight: LogTypeScale.occurrencesHeight, alignment: .top)
-                    if row.hiddenOccurrences > 0 {
-                        Text(String(localized: "logs.detail.occurrences_more",
-                                    defaultValue: "…and \(row.hiddenOccurrences.formatted()) more",
-                                    comment: "Line under the occurrence list when the list is capped; the placeholder is how many occurrences are not listed"))
-                            .font(.omlxMono(LogTypeScale.meta))
-                            .foregroundStyle(theme.textTertiary)
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 96)
+                .font(.omlxMono(12))
+                .foregroundStyle(theme.textTertiary)
+                if row.times.count > LogParser.occurrenceLimit {
+                    Text(String(localized: "logs.detail.occurrences_more",
+                                defaultValue: "…and \(row.times.count - LogParser.occurrenceLimit) more",
+                                comment: "Line under the occurrence list when the list is capped; the placeholder is how many occurrences are not listed"))
+                        .font(.omlxMono(12))
+                        .foregroundStyle(theme.textTertiary)
                 }
             }
         }
@@ -433,178 +526,38 @@ struct LogDetailCard: View {
     }
 }
 
-/// One line saying how much of a long record is not drawn. The full text is one
-/// Copy away, so the note points there rather than pretending the record ended.
-private struct MoreLinesNote: View {
-    let hidden: Int
+// MARK: - Raw
+
+private struct LogRawPane: View {
+    @Bindable var vm: LogsScreenVM
 
     @Environment(\.omlxTheme) private var theme
 
     var body: some View {
-        Text(String(localized: "logs.detail.lines_more",
-                    defaultValue: "…and \(hidden.formatted()) more lines",
-                    comment: "Line under a capped log record body; the placeholder is how many lines are not drawn. The screen's Copy holds the whole log."))
-            .font(.omlxMono(LogTypeScale.meta))
-            .foregroundStyle(theme.textTertiary)
-    }
-}
-
-// MARK: - Rows
-
-/// A level as a tinted badge, the way the console's tables show state: the
-/// colour carries the severity, the label spells it out.
-private struct LevelBadge: View {
-    let level: LogLevel
-    @Environment(\.omlxTheme) private var theme
-
-    var body: some View {
-        Text(level.label)
-            .font(.omlxMono(LogTypeScale.meta, weight: .semibold))
-            .foregroundStyle(LogPalette.color(level, theme: theme))
-            .padding(.horizontal, 5)
-            .padding(.vertical, 1)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(LogPalette.color(level, theme: theme).opacity(0.14))
-            )
-            .frame(width: 70, alignment: .leading)
-    }
-}
-
-/// One severity's colour, in one place: the row, the badge and the detail card
-/// all read the same mapping, so a level is painted one way wherever it lands.
-///
-/// Six levels, six marks, one meaning each. The HIG's rule is why CRITICAL is
-/// not a second red: a colour that means two things means neither, so red stays
-/// ERROR's alone and CRITICAL takes the platform's purple. TRACE is the
-/// quietest level rather than a hue, and keeps the tertiary label colour.
-enum LogPalette {
-    static func color(_ level: LogLevel, theme: OMLXTheme) -> Color {
-        switch level {
-        case .critical: theme.purpleDot
-        case .error: theme.redDot
-        case .warning: theme.amberDot
-        case .info: theme.blueDot
-        case .debug: theme.tealDot
-        case .trace, .other: theme.textTertiary
-        }
-    }
-}
-
-/// One row: time and level in fixed columns so the eye can run down them, module
-/// next, then the message — which wraps and keeps its continuation lines
-/// (tracebacks) as one block. A repeated record carries its ×N badge, and the
-/// whole row opens the detail card.
-struct LogRowView: View {
-    let row: LogRow
-    let isSelected: Bool
-    let onSelect: () -> Void
-
-    @Environment(\.omlxTheme) private var theme
-    @State private var expanded = false
-
-    private var record: LogRecord { row.record }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(Self.clockTime(record.time))
-                .font(.omlxMono(LogTypeScale.meta))
-                .foregroundStyle(theme.textTertiary)
-                .frame(width: 132, alignment: .leading)
-                .monospacedDigit()
-
-            LevelBadge(level: record.level)
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    if !record.module.isEmpty {
-                        Text(record.module)
-                            .font(.omlxMono(LogTypeScale.meta))
-                            .foregroundStyle(theme.textSecondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .frame(width: 150, alignment: .leading)
-                    }
-                    Text(record.message)
-                        .font(.omlxText(LogTypeScale.body))
-                        .foregroundStyle(theme.text)
-                        .textSelection(.enabled)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if row.isRepeated {
-                        Text("×\(row.count.formatted())")
-                            .font(.omlxText(LogTypeScale.meta, weight: .semibold))
-                            .foregroundStyle(theme.textSecondary)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 0.5)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(theme.controlBg)
-                            )
-                            .help(String(localized: "logs.row.repeat.help",
-                                         defaultValue: "This line repeats; open the row to see every occurrence",
-                                         comment: "Tooltip on the ×N badge of a repeated log line"))
-                    }
-                }
-
-                if !record.continuation.isEmpty {
-                    if expanded {
-                        // The first few lines only: the card below holds the whole
-                        // record, and a row that drew all of it filled the pane.
-                        Text(record.renderedInlineContinuation.joined(separator: "\n"))
-                            .font(.omlxMono(LogTypeScale.meta))
-                            .foregroundStyle(theme.textSecondary)
-                            .textSelection(.enabled)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        if record.hiddenInlineContinuationLines > 0 {
-                            MoreLinesNote(hidden: record.hiddenInlineContinuationLines)
-                        }
-                    } else {
-                        Button {
-                            expanded = true
-                        } label: {
-                            Text(String(localized: "logs.more_lines",
-                                        defaultValue: "≡ \(record.continuation.count.formatted()) more lines",
-                                        comment: "Button under a log record that reveals its continuation lines; the placeholder is how many lines are hidden"))
-                                .font(.omlxText(LogTypeScale.meta))
-                                .foregroundStyle(theme.textTertiary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+        ZStack {
+            LogTextView(text: vm.rawText, followTail: vm.autoScroll, edgeKey: vm.minLevel.rawValue,
+                        fgColor: NSColor(theme.text), bgColor: NSColor(theme.codeBg))
+            if vm.rawText.isEmpty && !vm.isLoading {
+                Text(vm.emptyMessage)
+                    .font(.omlxText(13))
+                    .foregroundStyle(theme.textTertiary)
+                    .padding(.vertical, 36)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .background(isSelected ? theme.selBg : Color.clear)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-    }
-
-    /// The server stamps `yyyy-MM-dd HH:mm:ss,SSS`; the column shows the clock
-    /// time alone (its fixed-width tail, with the stamp's comma as a dot) and
-    /// falls back to the raw stamp for anything else — a fragment has none.
-    private static func clockTime(_ stamp: String) -> String {
-        guard stamp.count == 23 else { return stamp }
-        return String(stamp.dropFirst(11)).replacingOccurrences(of: ",", with: ".")
+        .background(theme.codeBg)
+        .clipShape(RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: theme.cornerRadius, style: .continuous)
+                .strokeBorder(theme.groupBorder, lineWidth: 0.5)
+        )
     }
 }
 
-// MARK: - Raw text
-
-/// AppKit-backed monospaced text view in a scroll view: NSTextView lays out
-/// tens of thousands of lines without the cost SwiftUI's `Text` pays on every
-/// render, and keeps selection, Cmd+A and the Find bar. Scrolling follows the
-/// web console's raw view: with `followTail` on, new text and every change of
-/// `edgeKey` (the level filter) land at the bottom; with it off, a refresh
-/// keeps the reader's place and a filter change goes back to the top.
-struct LogTextView: NSViewRepresentable {
+/// AppKit-backed monospaced text view: NSTextView lays out tens of thousands
+/// of lines cheaply and keeps selection and the Find bar. With `followTail` a
+/// text change scrolls to the end; a change of `edgeKey` scrolls to the end
+/// with `followTail` and to the top without it.
+private struct LogTextView: NSViewRepresentable {
     let text: String
     let followTail: Bool
     let edgeKey: String
@@ -612,7 +565,7 @@ struct LogTextView: NSViewRepresentable {
     let bgColor: NSColor
 
     final class Coordinator {
-        var edgeKey: String = ""
+        var edgeKey = ""
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -637,7 +590,7 @@ struct LogTextView: NSViewRepresentable {
         textView.drawsBackground = true
         textView.backgroundColor = bgColor
         textView.textContainerInset = NSSize(width: 12, height: 10)
-        textView.font = NSFont.monospacedSystemFont(ofSize: LogTypeScale.meta, weight: .regular)
+        textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textColor = fgColor
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -650,7 +603,6 @@ struct LogTextView: NSViewRepresentable {
         }
         textView.string = text
         context.coordinator.edgeKey = edgeKey
-        // Opening the view lands at the edge, like switching to it in the console.
         if followTail {
             DispatchQueue.main.async { textView.scrollToEndOfDocument(nil) }
         }

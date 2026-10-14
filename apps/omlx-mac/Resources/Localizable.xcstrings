@@ -8622,31 +8622,163 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Lines: %@"
+            "value" : "Lines: %lld"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Строк: %@"
+            "value" : "Строк: %lld"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "行数：%@"
+            "value" : "行数：%lld"
           }
         }
       }
     },
-    "logs.detail.title" : {
-      "comment" : "Title of the card that shows one log record in full",
+    "logs.action.raise_tier" : {
+      "comment" : "Button on a memory-guard log row that opens the Performance settings",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Entry"
+            "value" : "Raise memory_guard_tier"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поднять memory_guard_tier"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "提高 memory_guard_tier"
+          }
+        }
+      }
+    },
+    "logs.action.reduce_context" : {
+      "comment" : "Button on a memory-guard log row that opens the Server settings with the default context window",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reduce context"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сократить контекст"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "缩短上下文"
+          }
+        }
+      }
+    },
+    "logs.col.level" : {
+      "comment" : "Logs table column header: log level",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Level"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Уровень"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "级别"
+          }
+        }
+      }
+    },
+    "logs.col.message" : {
+      "comment" : "Logs table column header: the log message",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Message"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сообщение"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "消息"
+          }
+        }
+      }
+    },
+    "logs.col.module" : {
+      "comment" : "Logs table column header: the logger name",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Module"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Модуль"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模块"
+          }
+        }
+      }
+    },
+    "logs.col.time" : {
+      "comment" : "Logs table column header: when the line was written",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Time"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Время"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "时间"
           }
         }
       }
@@ -8660,17 +8792,17 @@
             "state" : "translated",
             "value" : "Close"
           }
-        }
-      }
-    },
-    "logs.detail.lines_more" : {
-      "comment" : "Line under a capped log record body; the placeholder is how many lines are not drawn. The screen's Copy holds the whole log.",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
+        },
+        "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "…and %@ more lines"
+            "value" : "Закрыть"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关闭"
           }
         }
       }
@@ -8682,7 +8814,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Occurrences (%@)"
+            "value" : "Occurrences (%lld)"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Появления (%lld)"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "出现次数（%lld 次）"
           }
         }
       }
@@ -8694,7 +8838,43 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "…and %@ more"
+            "value" : "…and %lld more"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "…и ещё %lld"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "…还有 %lld 次"
+          }
+        }
+      }
+    },
+    "logs.detail.title" : {
+      "comment" : "Title of the card that shows one log record in full",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Entry"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Запись"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "记录"
           }
         }
       }
@@ -8708,29 +8888,113 @@
             "state" : "translated",
             "value" : "No lines at this level. Lower the level filter to see more."
           }
-        }
-      }
-    },
-    "logs.empty.partial" : {
-      "comment" : "Empty-state text shown when the fetched log window begins in the middle of a record whose header line is above the window",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
+        },
+        "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "This window starts inside a log entry. Refresh to see the newest lines."
+            "value" : "Строк этого уровня нет. Понизьте фильтр уровня."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该级别下没有日志行。降低级别筛选以查看更多。"
           }
         }
       }
     },
-    "logs.more_lines" : {
-      "comment" : "Button under a log record that reveals its continuation lines; the placeholder is how many lines are hidden",
+    "logs.memory.ceiling" : {
+      "comment" : "Chip label on a memory-guard log row: the memory ceiling",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "≡ %@ more lines"
+            "value" : "Ceiling"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Потолок"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上限"
+          }
+        }
+      }
+    },
+    "logs.memory.peak" : {
+      "comment" : "Chip label on a memory-guard log row: the predicted prefill peak",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Predicted peak"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прогноз пика"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "预测峰值"
+          }
+        }
+      }
+    },
+    "logs.memory.usage" : {
+      "comment" : "Chip label on a memory-guard log row: process memory in use",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Usage"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Использовано"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已用"
+          }
+        }
+      }
+    },
+    "logs.memory.watermark" : {
+      "comment" : "Chip label on a memory-guard log row: the abort threshold",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hard watermark"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Жёсткий порог"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "硬水位"
           }
         }
       }
@@ -8744,6 +9008,42 @@
             "state" : "translated",
             "value" : "Auto-scroll"
           }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Автопрокрутка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动滚动"
+          }
+        }
+      }
+    },
+    "logs.row.fragment.help" : {
+      "comment" : "Tooltip on a log row whose header line is above the fetched window",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The window starts inside this record"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Окно начинается внутри этой записи"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "窗口从这条记录中间开始"
+          }
         }
       }
     },
@@ -8754,7 +9054,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hide everything below this level"
+            "value" : "Filters this view only. It does not change the level the log file saves."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Фильтрует только отображение — не влияет на уровень записи в лог-файл"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅过滤页面显示，不影响日志文件的保存级别"
           }
         }
       }
@@ -8768,17 +9080,17 @@
             "state" : "translated",
             "value" : "Minimum level"
           }
-        }
-      }
-    },
-    "logs.row.repeat.help" : {
-      "comment" : "Tooltip on the ×N badge of a repeated log line",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
+        },
+        "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "This line repeats; open the row to see every occurrence"
+            "value" : "Мин. уровень отображения"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最低显示级别"
           }
         }
       }
@@ -8792,6 +9104,18 @@
             "state" : "translated",
             "value" : "View"
           }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вид"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "视图"
+          }
         }
       }
     },
@@ -8804,6 +9128,18 @@
             "state" : "translated",
             "value" : "Raw"
           }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Текст"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "原文"
+          }
         }
       }
     },
@@ -8815,6 +9151,18 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Table"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Таблица"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "表格"
           }
         }
       }
