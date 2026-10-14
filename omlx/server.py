@@ -168,6 +168,7 @@ from .api.responses_utils import (
     split_namespace_tool_name,
 )
 from .api.decisions import (
+    READOUT_TEMPLATE_KWARGS,
     DecisionsRequestError,
     decide,
     from_systemone,
@@ -4169,7 +4170,7 @@ async def create_decisions(
         )
     _reject_lone_surrogates(request)
 
-    # The lease keeps the model loaded from encode() to the response.
+    # The lease keeps the model loaded until the response is sent.
     lease = _LLMEngineLease()
     try:
         if _is_decision_model(request.model):
@@ -4187,6 +4188,7 @@ async def create_decisions(
                 return (
                     from_systemone(request, result["answers"]),
                     result["input_tokens"],
+                    0,
                     time.perf_counter() - start_time,
                 )
 
@@ -4196,16 +4198,36 @@ async def create_decisions(
                 engine, "supports_multimodal_fallback", False
             )
 
+            def _prepare_readout(messages):
+                try:
+                    num_prompt_tokens, prepared = _prepare_chat_prompt_for_request(
+                        engine,
+                        messages,
+                        chat_template_kwargs=READOUT_TEMPLATE_KWARGS,
+                        is_partial=True,
+                    )
+                except Exception as e:
+                    if _is_chat_template_error(e):
+                        raise HTTPException(
+                            status_code=400, detail=f"Chat template error: {e}"
+                        ) from e
+                    raise
+                validate_context_window(num_prompt_tokens, request.model)
+                return {} if prepared is None else {"_prepared_prompt": prepared}
+
             async def _decide():
                 await _raise_if_llm_lease_abort_requested(lease)
                 start_time = time.perf_counter()
                 try:
-                    result = await decide(engine, request, multimodal)
+                    result = await decide(
+                        engine, request, multimodal, prepare=_prepare_readout
+                    )
                 except DecisionsRequestError as e:
                     raise HTTPException(status_code=400, detail=str(e)) from e
                 return (
                     result["answers"],
                     result["input_tokens"],
+                    result["cached_tokens"],
                     time.perf_counter() - start_time,
                 )
 
@@ -4220,7 +4242,7 @@ async def create_decisions(
 async def _decisions_body(
     request: DecisionRequest, run, lease: _LLMEngineLease
 ) -> str:
-    answers, input_tokens, elapsed = await run
+    answers, input_tokens, cached_tokens, elapsed = await run
     resolved_model = _serving_model_id(lease, request.model)
     logger.info(
         f"Decisions: model={resolved_model}, {len(request.questions)} "
@@ -4229,7 +4251,7 @@ async def _decisions_body(
     get_server_metrics().record_request_complete(
         prompt_tokens=input_tokens,
         completion_tokens=0,
-        cached_tokens=0,
+        cached_tokens=cached_tokens,
         prefill_duration=elapsed,
         model_id=resolved_model,
         request_duration=elapsed,

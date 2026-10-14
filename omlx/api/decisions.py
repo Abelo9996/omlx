@@ -19,6 +19,7 @@ request is translated to a System One request and back.
 """
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +44,7 @@ PREDICATE_OPTIONS = [
 ]
 SCORE_SUFFIX = " Rate along the ordered levels below (lowest first)."
 ANSWER_PREFIX = "Answer:"
+READOUT_TEMPLATE_KWARGS = {"enable_thinking": False}
 # Minimum next-token probability the option letters must hold together for
 # the readout to count as an answer.
 MIN_LETTER_MASS = 0.5
@@ -154,7 +156,7 @@ def build_messages(
 
 
 def option_groups(count: int) -> list[range]:
-    """Split options into near-equal readouts of at most one letter each."""
+    """Split options into near-equal readouts that each fit in the letters."""
     if count <= len(LETTERS):
         return [range(count)]
     groups = -(-count // len(LETTERS))
@@ -166,10 +168,11 @@ def option_groups(count: int) -> list[range]:
 class _Readout:
     probs: list[float] | None
     prompt_tokens: int
+    cached_tokens: int
 
 
 async def _readout(
-    engine: Any,
+    chat: Callable,
     parts: list[dict],
     multimodal: bool,
     letter_ids: list[list[int]],
@@ -184,14 +187,12 @@ async def _readout(
     option in a group, and the readout over the winners still applies it.
     """
     capture = OptionLogitsCapture(letter_ids[: len(options)])
-    output = await engine.chat(
-        messages=build_messages(
-            parts, render_question(instructions, options), multimodal
-        ),
+    output = await chat(
+        build_messages(parts, render_question(instructions, options), multimodal),
         max_tokens=1,
         temperature=0.0,
         top_p=1.0,
-        chat_template_kwargs={"enable_thinking": False},
+        chat_template_kwargs=dict(READOUT_TEMPLATE_KWARGS),
         is_partial=True,
         logits_observer=capture,
     )
@@ -199,28 +200,29 @@ async def _readout(
         raise DecisionsRequestError(
             "the model's engine does not expose next-token logits"
         )
+    tokens = output.prompt_tokens, output.cached_tokens
     scores = np.asarray(capture.logprobs, dtype=np.float64)
     if not np.isfinite(scores).any():
-        return _Readout(None, output.prompt_tokens)
+        return _Readout(None, *tokens)
     top = scores[np.isfinite(scores)].max()
     weights = np.exp(scores - top)
     if require_answer and np.exp(top) * weights.sum() < MIN_LETTER_MASS:
-        return _Readout(None, output.prompt_tokens)
-    return _Readout((weights / weights.sum()).tolist(), output.prompt_tokens)
+        return _Readout(None, *tokens)
+    return _Readout((weights / weights.sum()).tolist(), *tokens)
 
 
 async def _answer_question(
-    engine: Any,
+    chat: Callable,
     parts: list[dict],
     multimodal: bool,
     letter_ids: list[list[int]],
     question: Any,
-) -> tuple[dict, int]:
+) -> tuple[dict, list[_Readout]]:
     instructions, options = question_options(question)
     groups = option_groups(len(options))
     readouts = [
         await _readout(
-            engine,
+            chat,
             parts,
             multimodal,
             letter_ids,
@@ -230,9 +232,8 @@ async def _answer_question(
         )
         for group in groups
     ]
-    input_tokens = sum(r.prompt_tokens for r in readouts)
     if any(r.probs is None for r in readouts):
-        return {"type": "refusal", "name": question.name}, input_tokens
+        return {"type": "refusal", "name": question.name}, readouts
     if len(readouts) == 1:
         probs = readouts[0].probs
     else:
@@ -242,13 +243,13 @@ async def _answer_question(
             for group, p in zip(groups, parts_probs, strict=True)
         ]
         final = await _readout(
-            engine, parts, multimodal, letter_ids, instructions, winners
+            chat, parts, multimodal, letter_ids, instructions, winners
         )
-        input_tokens += final.prompt_tokens
+        readouts.append(final)
         if final.probs is None:
-            return {"type": "refusal", "name": question.name}, input_tokens
+            return {"type": "refusal", "name": question.name}, readouts
         probs = compose_groups(parts_probs, final.probs)
-    return build_answer(question, probs), input_tokens
+    return build_answer(question, probs), readouts
 
 
 def build_answer(question: Any, probs: list[float]) -> dict:
@@ -283,15 +284,29 @@ def build_answer(question: Any, probs: list[float]) -> dict:
     }
 
 
-async def decide(engine: Any, request: DecisionRequest, multimodal: bool) -> dict:
-    """Answer every question with a chat model; returns answers and tokens."""
+async def decide(
+    engine: Any,
+    request: DecisionRequest,
+    multimodal: bool,
+    prepare: Callable[[list[dict]], dict] | None = None,
+) -> dict:
+    """Answer every question with a chat model; returns answers and tokens.
+
+    ``prepare`` checks the messages of each readout before it runs and
+    returns extra ``engine.chat`` kwargs.
+    """
     parts = input_parts(request)
     if not multimodal and any(p["type"] == "image_url" for p in parts):
         raise DecisionsRequestError("this model does not accept image input")
     letter_ids = letter_token_ids(engine.tokenizer)
 
+    async def chat(messages, **kwargs):
+        if prepare is not None:
+            kwargs.update(prepare(messages))
+        return await engine.chat(messages=messages, **kwargs)
+
     async def answer(question):
-        return await _answer_question(engine, parts, multimodal, letter_ids, question)
+        return await _answer_question(chat, parts, multimodal, letter_ids, question)
 
     # The first readout fills the prefix cache for the shared input.
     first = await answer(request.questions[0])
@@ -312,9 +327,11 @@ async def decide(engine: Any, request: DecisionRequest, multimodal: bool) -> dic
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
     results = [first, *rest]
+    readouts = [r for _, question_readouts in results for r in question_readouts]
     return {
         "answers": [a for a, _ in results],
-        "input_tokens": sum(t for _, t in results),
+        "input_tokens": sum(r.prompt_tokens for r in readouts),
+        "cached_tokens": sum(r.cached_tokens for r in readouts),
     }
 
 

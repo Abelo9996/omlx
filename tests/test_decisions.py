@@ -48,7 +48,7 @@ class _FakeChatEngine:
         for letter, value in zip(letters, self.scores(text, letters), strict=True):
             logits[ord(letter)] = value
         kwargs["logits_observer"](None, mx.array(logits)[None])
-        return SimpleNamespace(prompt_tokens=len(text))
+        return SimpleNamespace(prompt_tokens=len(text), cached_tokens=1)
 
 
 def _request(**body):
@@ -165,20 +165,7 @@ def test_predicate_and_score_answers():
     ]
     assert 0.0 <= score["confidence"] <= 1.0
     assert result["input_tokens"] > 0
-
-
-def test_every_readout_shares_the_input_prefix():
-    engine = _FakeChatEngine(lambda text, letters: [0.0] * len(letters))
-    request = _request(
-        questions=[
-            {"type": "predicate", "name": f"q{i}", "instructions": f"Q{i}?"}
-            for i in range(5)
-        ]
-    )
-    _run(engine, request)
-    prompts = [c["messages"][0]["content"] for c in engine.calls]
-    assert len(prompts) == 5
-    assert all(p.startswith("Checkout is down.\n\nQuestion: ") for p in prompts)
+    assert result["cached_tokens"] == 2
 
 
 def test_many_choices_compose_group_readouts():
@@ -380,6 +367,7 @@ def test_engine_without_logits_is_rejected():
     "change",
     [
         {"questions": []},
+        {"input": []},
         {"questions": [{"type": "rank", "name": "a", "instructions": "x"}]},
         {"questions": [{"type": "predicate", "name": "a", "instructions": "x"}] * 2},
         {

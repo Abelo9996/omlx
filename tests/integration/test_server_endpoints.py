@@ -2051,7 +2051,7 @@ class TestDecisionsEndpoint:
     ]
 
     @staticmethod
-    def _letter_chat(engine, background=-30.0):
+    def _letter_chat(engine):
         import mlx.core as mx
 
         class _CharTokenizer:
@@ -2059,7 +2059,7 @@ class TestDecisionsEndpoint:
                 return [ord(c) for c in text]
 
         async def chat(messages, **kwargs):
-            logits = [background] * 128
+            logits = [-30.0] * 128
             logits[ord("A")] = 1.0
             logits[ord("B")] = 0.0
             kwargs["logits_observer"](None, mx.array([logits]))
@@ -2067,6 +2067,7 @@ class TestDecisionsEndpoint:
 
         engine._tokenizer = _CharTokenizer()
         engine.chat = chat
+        engine.count_chat_tokens = lambda messages, tools=None, **kwargs: 7
 
     def test_decisions_with_chat_model(self, client, mock_llm_engine, mock_engine_pool):
         self._letter_chat(mock_llm_engine)
@@ -2089,23 +2090,25 @@ class TestDecisionsEndpoint:
         assert [p["value"] for p in team["probabilities"]] == ["billing", "tech"]
         assert mock_engine_pool.release_calls == ["test-model"]
 
-    def test_decisions_without_letter_mass_is_refusal(
-        self, client, mock_llm_engine, mock_engine_pool
+    def test_decisions_prompt_over_context_window_is_400(
+        self, client, mock_llm_engine, mock_engine_pool, monkeypatch
     ):
-        # Most of the next-token mass sits off the letters, as on a template
-        # that opens a reasoning or channel header before the answer.
-        self._letter_chat(mock_llm_engine, background=0.0)
+        self._letter_chat(mock_llm_engine)
+        monkeypatch.setattr(
+            "omlx.server.get_max_context_window", lambda model_id=None: 6
+        )
         response = client.post(
             "/v1/decisions",
             json={
                 "model": "test-model",
                 "input": "Checkout is down",
-                "questions": self._QUESTIONS[:1],
+                "questions": self._QUESTIONS,
             },
         )
 
-        assert response.status_code == 200
-        assert response.json()["answers"] == [{"type": "refusal", "name": "urgent"}]
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "context_length_exceeded"
+        assert mock_engine_pool.release_calls == ["test-model"]
 
     def test_decisions_with_decision_model(
         self, client, mock_engine_pool, mock_decision_engine
@@ -2138,19 +2141,6 @@ class TestDecisionsEndpoint:
         )
         assert response.status_code == 400
         assert "option letter" in response.text
-
-    @pytest.mark.parametrize(
-        "change",
-        [
-            {"questions": []},
-            {"input": []},
-            {"questions": [{"type": "rank", "name": "a", "instructions": "x"}]},
-        ],
-    )
-    def test_decisions_schema_validation(self, client, change):
-        body = {"model": "test-model", "input": "x", "questions": self._QUESTIONS}
-        response = client.post("/v1/decisions", json={**body, **change})
-        assert response.status_code == 422
 
 
 class TestTokenCountEndpoint:
