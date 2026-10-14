@@ -397,6 +397,16 @@ def _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind):
     if kind == "gdn":
         model = _tiny_hybrid_model()
         layer_types = ["ArraysCache", "KVCache"]
+    elif kind == "deepseek_v41":
+        from test_deepseek_v41 import load_reference_weights, tiny
+
+        from omlx.patches.deepseek_v41 import apply_patch
+        from omlx.patches.deepseek_v41.language import LanguageModel
+
+        apply_patch()
+        model = LanguageModel(tiny())
+        load_reference_weights(model)
+        layer_types = ["DeepseekV41Cache"] * len(model.layers)
     else:
         model = _tiny_rotating_model()
         layer_types = ["RotatingKVCache", "KVCache"]
@@ -414,7 +424,7 @@ def _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind):
         cache_dir=tmp_path / "cache",
         max_size_bytes=16 * 1024**2,
         expected_model_name="tiny",
-        expected_num_layers=2,
+        expected_num_layers=len(layer_types),
         expected_block_size=4,
         expected_layer_cache_types=layer_types,
     )
@@ -437,6 +447,106 @@ def _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind):
     # decoding rows finish before the chunked prefill reaches its probe point.
     scheduler._decode_fairness = False
     return model, scheduler, prefix
+
+
+@pytest.mark.parametrize("kind", ["gdn", "rotating", "deepseek_v41"])
+@pytest.mark.parametrize("finish", ["cancel", "parser_stop"])
+def test_requeued_request_stores_each_output_token_once(
+    mock_tokenizer, tmp_path, kind, finish
+):
+    from omlx.request import RequestStatus
+
+    model, scheduler, prefix = _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind)
+    requests = [
+        Request(
+            request_id=str(i),
+            prompt=list(range(3 + i, 13 + i)),
+            sampling_params=SamplingParams(max_tokens=32, temperature=0),
+        )
+        for i in range(2)
+    ]
+    request = requests[0]
+    original_prompt = list(request.prompt)
+    try:
+        for row in requests:
+            scheduler.add_request(row)
+        for _ in range(100):
+            scheduler.step()
+            if min(row.num_output_tokens for row in requests) >= 3:
+                break
+        assert scheduler.request_memory_requeue() == 2
+        for _ in range(100):
+            scheduler.step()
+            if request.num_output_tokens >= 14:
+                break
+        assert request.num_output_tokens == 14
+        tokens = original_prompt + request.output_token_ids
+
+        if finish == "cancel":
+            scheduler.abort_request(request.request_id, keep_cache=True)
+            scheduler.step()
+        else:
+            request.set_finished(RequestStatus.FINISHED_STOPPED)
+            scheduler._cleanup_finished({request.request_id})
+        for future in list(scheduler._inflight_store_futures.values()):
+            future.result(timeout=30)
+        scheduler._drain_pending_async_removes()
+        assert request.request_id not in scheduler.requests
+        _assert_restored_matches_cold(
+            model, scheduler, prefix, tokens + [7, 8], len(tokens)
+        )
+    finally:
+        scheduler.shutdown()
+        scheduler.batch_generator = None
+
+
+def test_memory_requeue_preserves_thinking_budget(mock_tokenizer, tmp_path):
+    from omlx.api.thinking import ThinkingBudgetProcessor
+
+    _, scheduler, _ = _chunked_scheduler_rig(mock_tokenizer, tmp_path, "gdn")
+
+    def fixed_logits(tokens, logits):
+        result = mx.full(logits.shape, float("-inf"))
+        result[..., 7] = 0.0
+        return result
+
+    scheduler._build_sampler_and_processors = lambda params, request: (
+        lambda logits: mx.argmax(logits, axis=-1),
+        [fixed_logits, ThinkingBudgetProcessor([31], 9)],
+    )
+    requests = [
+        Request(
+            request_id=str(i),
+            prompt=list(range(3 + i, 13 + i)),
+            sampling_params=SamplingParams(max_tokens=24, temperature=0),
+        )
+        for i in range(2)
+    ]
+    streamed = {request.request_id: [] for request in requests}
+
+    def step():
+        for output in scheduler.step().outputs:
+            streamed[output.request_id].extend(output.new_token_ids)
+
+    try:
+        for request in requests:
+            scheduler.add_request(request)
+        for _ in range(100):
+            step()
+            if min(request.num_output_tokens for request in requests) >= 5:
+                break
+        assert scheduler.request_memory_requeue() == 2
+        for _ in range(200):
+            step()
+            if all(request.is_finished() for request in requests):
+                break
+        for request in requests:
+            assert request.memory_requeues == 1
+            assert streamed[request.request_id] == [7] * 8 + [31] + [7] * 15
+            assert request.output_token_ids == streamed[request.request_id]
+    finally:
+        scheduler.shutdown()
+        scheduler.batch_generator = None
 
 
 @pytest.mark.parametrize("kind", ["gdn", "rotating"])

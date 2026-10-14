@@ -9329,8 +9329,13 @@ class Scheduler:
             return None
 
         prompt_tokens = list(request.prompt_token_ids or [])
+        folded_output_tokens = _request_count(request, "requeued_output_tokens")
         if _output_tokens_cacheable(request):
-            prompt_tokens += list(getattr(request, "output_token_ids", None) or [])
+            prompt_tokens += list(getattr(request, "output_token_ids", None) or [])[
+                folded_output_tokens:
+            ]
+        elif folded_output_tokens:
+            prompt_tokens = prompt_tokens[:-folded_output_tokens]
         boundary_override = self._get_boundary_store_override(request_id, prompt_tokens)
         if boundary_override is not None:
             (
@@ -9351,7 +9356,11 @@ class Scheduler:
             needs_member_refill = any(
                 self._has_blanked_cachelist_members(layer) for layer in boundary_cache
             )
-            if needs_placeholder_fill or needs_member_refill:
+            if (
+                needs_placeholder_fill
+                or needs_member_refill
+                or _request_count(request, "memory_requeues")
+            ):
                 live_payload = self._extract_live_request_cache_for_store(
                     request_id,
                     uid,
@@ -11504,17 +11513,20 @@ class Scheduler:
             after / 1024**3,
         )
 
-    def _do_abort_request(self, request_id: str) -> bool:
+    def _do_abort_request(
+        self, request_id: str, *, allow_cache_store: bool = True
+    ) -> bool:
         """
         Actually abort a request. Must be called from the step() context.
 
         Args:
             request_id: The request ID to abort
+            allow_cache_store: False during reset, after the store-worker barrier.
 
         Returns:
             True if request was found and aborted, False otherwise
         """
-        keep_cache = request_id in self._abort_keep_cache_ids
+        keep_cache = allow_cache_store and request_id in self._abort_keep_cache_ids
         self._abort_keep_cache_ids.discard(request_id)
         request = self.requests.get(request_id)
         if request is None:
@@ -15244,10 +15256,12 @@ class Scheduler:
 
         # Drain any pending deferred aborts
         self._pending_abort_ids.clear()
+        # Reset clears the cache and must not start stores after the barrier.
+        self._abort_keep_cache_ids.clear()
 
         # Abort all requests directly (reset is synchronous)
         for request_id in list(self.requests.keys()):
-            self._do_abort_request(request_id)
+            self._do_abort_request(request_id, allow_cache_store=False)
 
         self.waiting.clear()
         self.prefilling.clear()
