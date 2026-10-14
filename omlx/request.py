@@ -88,6 +88,10 @@ class SamplingParams:
     # reasoning separately; /v1/completions returns it inline.
     stop_skips_reasoning: bool = False
 
+    # Logits processor that reads the logits without changing them (used by
+    # /v1/decisions). Typed as Any like compiled_grammar.
+    logits_observer: Any = None
+
     def __post_init__(self):
         if self.stop is None:
             self.stop = []

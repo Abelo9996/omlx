@@ -7804,6 +7804,9 @@ class Scheduler:
             except ImportError:
                 logger.warning("xgrammar not installed; skipping grammar constraint")
 
+        if sampling_params.logits_observer is not None:
+            logits_processors.append(sampling_params.logits_observer)
+
         return sampler, logits_processors
 
     def _get_model_vocab_size(self) -> int | None:

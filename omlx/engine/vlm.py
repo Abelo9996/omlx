@@ -4822,6 +4822,7 @@ class VLMBatchedEngine(BaseEngine):
             compiled_grammar=kwargs.get("compiled_grammar", None),
             seed=kwargs.get("seed", None),
             stop_skips_reasoning=kwargs.get("stop_skips_reasoning", False),
+            logits_observer=kwargs.get("logits_observer"),
         )
 
         # SpecPrefill: forward per-request overrides to the engine, mirroring
@@ -4937,6 +4938,7 @@ class VLMBatchedEngine(BaseEngine):
             compiled_grammar=kwargs.get("compiled_grammar", None),
             seed=kwargs.get("seed", None),
             stop_skips_reasoning=kwargs.get("stop_skips_reasoning", False),
+            logits_observer=kwargs.get("logits_observer"),
         )
 
         # SpecPrefill: pass per-request overrides
