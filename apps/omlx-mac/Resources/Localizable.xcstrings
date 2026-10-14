@@ -8855,6 +8855,24 @@
         }
       }
     },
+    "logs.detail.resize" : {
+      "comment" : "Accessibility label of the handle that resizes the log detail card",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Resize log entry"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "로그 항목 크기 조절"
+          }
+        }
+      }
+    },
     "logs.detail.title" : {
       "comment" : "Title of the card that shows one log record in full",
       "extractionState" : "manual",
