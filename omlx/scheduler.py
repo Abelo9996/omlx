@@ -11697,17 +11697,28 @@ class Scheduler:
             and not self._model_has_unreconstructible_cache()
         )
 
+    def _convert_dropped_prefill_cache(self, prompt_cache: list[Any]) -> None:
+        """Give a partial prefill cache the TurboQuant layout of stored blocks.
+
+        Converts in place, the same way a finished prefill is converted, so
+        only use it on a cache that is dropped after the store.
+        """
+        if self._turboquant_kv_bits is not None and self._turboquant_eligible(
+            prompt_cache
+        ):
+            self._apply_turboquant_kv_convert(prompt_cache)
+
     def _prepare_abort_prefill_store(
         self, request: "Request", prompt_cache: list[Any]
     ) -> tuple[list[int], list[Any], Any, Any] | None:
         """Extract a cancelled prefill's progress for an off-thread store."""
-        # Prefill KV is still dense; TurboQuant blocks use another layout.
-        if self._turboquant_kv_bits is not None or self._store_cache_executor is None:
+        if self._store_cache_executor is None:
             return None
         request_id = request.request_id
         tokens = list(request.prompt_token_ids[: _cache_base_sizes(prompt_cache)])
         try:
             _safe_sync_stream(self._stream)
+            self._convert_dropped_prefill_cache(prompt_cache)
             return self._prepare_live_cache_store(request_id, prompt_cache, tokens)
         except Exception as e:
             logger.debug("Cancelled prefill store skipped for %s: %s", request_id, e)
@@ -14728,11 +14739,10 @@ class Scheduler:
         request_id = request.request_id
         state = self._prefill_states.get(request_id)
         if state is not None:
-            # Prefill KV is still dense; TurboQuant blocks use another layout.
-            if self._turboquant_kv_bits is not None:
-                return 0
             raw_cache = state.cache
             tokens = list(request.prompt_token_ids[: _cache_base_sizes(raw_cache)])
+            # The requeue drops this prefill state after the store.
+            self._convert_dropped_prefill_cache(raw_cache)
         else:
             uid = self.request_id_to_uid[request_id]
             result = self.batch_generator.extract_cache([uid])

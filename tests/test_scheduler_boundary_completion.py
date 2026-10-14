@@ -16,6 +16,7 @@ from omlx.cache.boundary_snapshot_store import BoundarySnapshotSSDStore
 from omlx.cache.paged_cache import PagedCacheManager
 from omlx.cache.paged_ssd_cache import PagedSSDCacheManager
 from omlx.cache.prefix_cache import BlockAwarePrefixCache
+from omlx.patches.turboquant_attention import apply_turboquant_attention_patch
 from omlx.request import Request, SamplingParams
 from omlx.scheduler import Scheduler, SchedulerConfig, _cache_base_sizes
 
@@ -311,7 +312,14 @@ def _assert_restored_matches_cold(model, scheduler, prefix, tokens, expected_cac
     assert restored is not None
     assert remaining == tokens[expected_cached:]
     with mx.stream(scheduler._stream):
-        cold = model(mx.array([tokens]), cache=model.make_cache())[:, -1]
+        cache = model.make_cache()
+        if scheduler._turboquant_kv_bits is None:
+            cold = model(mx.array([tokens]), cache=cache)[:, -1]
+        else:
+            # TurboQuant blocks hold the quantized prefix.
+            model(mx.array([tokens[:expected_cached]]), cache=cache)
+            scheduler._apply_turboquant_kv_convert(cache)
+            cold = model(mx.array([remaining]), cache=cache)[:, -1]
         warm = model(mx.array([remaining]), cache=restored)[:, -1]
         mx.eval(cold, warm)
     assert mx.allclose(warm, cold, atol=1e-4)
@@ -684,12 +692,24 @@ def test_client_cancel_keeps_computed_prefix(mock_tokenizer, tmp_path, kind):
         scheduler.shutdown()
 
 
-@pytest.mark.parametrize("kind", ["gdn", "rotating"])
-def test_client_cancel_keeps_external_prefill_progress(mock_tokenizer, tmp_path, kind):
+@pytest.mark.parametrize(
+    "kind,turboquant", [("gdn", False), ("rotating", False), ("gdn", True)]
+)
+def test_client_cancel_keeps_external_prefill_progress(
+    mock_tokenizer, tmp_path, kind, turboquant
+):
     """A cancel that lands inside the external prefill loop stores the blocks
-    that loop finished, so a resend restores them."""
+    that loop finished, so a resend restores them. Under TurboQuant they are
+    stored in the quantized decode layout."""
     model, scheduler, prefix = _chunked_scheduler_rig(mock_tokenizer, tmp_path, kind)
     scheduler.config.chunked_prefill = False
+    if turboquant:
+        apply_turboquant_attention_patch()
+        scheduler._turboquant_kv_bits = 4.0
+        assert scheduler.refresh_ssd_layer_signature() == [
+            "ArraysCache",
+            "TurboQuantKVCache",
+        ]
     prompt = [5 + i % 9 for i in range(30)]
     scheduler.add_request(
         Request(
