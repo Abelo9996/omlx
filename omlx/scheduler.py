@@ -4117,6 +4117,9 @@ class Scheduler:
         n_tokens = len(tokens)
         if n_tokens <= 1:
             # Nothing to prefill, return cache + tokens as-is.
+            Scheduler._dflash_prepare_request(
+                self, request, len(request.prompt_token_ids) - n_tokens
+            )
             cache = existing_cache or make_prompt_cache(self.model)
             # TurboQuant: a TQ cache here makes _merge_caches() build a
             # BatchTurboQuantKVCache (via the monkey-patched merge), so the
@@ -4401,12 +4404,14 @@ class Scheduler:
                     )
                     prefetch(input_arr[:, n_to_process : n_to_process + next_n], input_arr[:, :n_to_process])
                 prefill_model = getattr(self.model, "_omlx_prefill", self.model)
+                chunk_start = base_size + processed_tokens
                 capture_from = self._dflash_prefill_capture(
                     request,
                     prefill_model,
-                    base_size + processed_tokens,
+                    chunk_start,
                     n_to_process,
                     model_kwargs,
+                    first_chunk=processed_tokens == 0,
                 )
                 prefill_out = prefill_model(
                     input_arr[:, :n_to_process],
@@ -4414,7 +4419,9 @@ class Scheduler:
                     **model_kwargs,
                 )
                 if capture_from is not None:
-                    self._dflash_seed_prefill(request, prefill_out, capture_from)
+                    self._dflash_seed_prefill(
+                        request, prefill_out, capture_from, chunk_start + capture_from
+                    )
                 mx.eval([c.state for c in prompt_cache])
                 input_arr = input_arr[:, n_to_process:]
                 if embeds_array is not None:
@@ -5526,6 +5533,7 @@ class Scheduler:
         start: int,
         n_tokens: int,
         model_kwargs: dict,
+        first_chunk: bool = False,
     ) -> Optional[int]:
         """Request drafter layer captures for the chunk's tail inside the window.
 
@@ -5541,21 +5549,38 @@ class Scheduler:
         if drafter is None or prefill_owner is not self.model:
             return None
         keep_from = len(request.prompt_token_ids) - drafter.window
+        if first_chunk:
+            Scheduler._dflash_prepare_request(self, request, start)
         end = start + n_tokens
         if end <= keep_from:
             return None
         model_kwargs["capture_layer_ids"] = list(drafter.target_layer_ids)
         return max(0, keep_from - start)
 
+    def _dflash_prepare_request(self, request: "Request", cached: int) -> None:
+        """Let the drafter restore context for the cached prompt tokens.
+
+        Cached tokens skip prefill; a finished request may have kept the
+        drafter context for them. Tokens alone cannot tell media apart, so
+        media requests keep no context.
+        """
+        drafter = _block_drafter_for(self.model)
+        if drafter is None or getattr(request, "vlm_extra_keys_for_cache", None):
+            return
+        if cached > max(len(request.prompt_token_ids) - drafter.window, 0):
+            drafter.prepare_request(
+                request.request_id, request.prompt_token_ids, cached
+            )
+
     def _dflash_seed_prefill(
-        self, request: "Request", output: Any, keep_from: int
+        self, request: "Request", output: Any, keep_from: int, position: int
     ) -> None:
         drafter = _block_drafter_for(self.model)
         hidden = getattr(output, "hidden_states", None)
         if drafter is None or not hidden:
             return
         drafter.seed_request(
-            request.request_id, [layer[:, keep_from:] for layer in hidden]
+            request.request_id, [layer[:, keep_from:] for layer in hidden], position
         )
 
     def _dflash_bind_uid(self, request_id: str, uid: int) -> None:
@@ -6697,16 +6722,26 @@ class Scheduler:
         chunk_kwargs = {}
         if self._supports_skip_lm_head():
             chunk_kwargs["skip_lm_head"] = True
+        # Prompt position of the chunk: without boundary snapshots base_size
+        # stays 0 even when a prefix is cached.
+        chunk_start = state.tokens_processed + (
+            state.base_size
+            if state.boundary_enabled
+            else max(int(getattr(state.request, "cached_tokens", 0) or 0), 0)
+        )
         capture_from = self._dflash_prefill_capture(
             state.request,
             prefill_model,
-            state.base_size + state.tokens_processed,
+            chunk_start,
             n,
             chunk_kwargs,
+            first_chunk=state.tokens_processed == 0,
         )
         prefill_out = prefill_model(chunk, cache=state.cache, **chunk_kwargs)
         if capture_from is not None:
-            self._dflash_seed_prefill(state.request, prefill_out, capture_from)
+            self._dflash_seed_prefill(
+                state.request, prefill_out, capture_from, chunk_start + capture_from
+            )
         mx.eval([c.state for c in state.cache])
 
     def _forward_packed_prefill(self, plans: list[_PrefillChunkPlan]) -> None:
@@ -8119,6 +8154,10 @@ class Scheduler:
         # Only create once; per-request samplers are passed at insert time.
         if self.batch_generator is None:
             self.batch_generator = self._create_batch_generator(sampling_params)
+            # A new generator numbers rows from 0 again.
+            drafter = _block_drafter_for(self.model)
+            if drafter is not None:
+                drafter.reset_rows()
 
         # Track latest params for debugging/metrics.
         self._current_sampler_params = (
@@ -13456,10 +13495,21 @@ class Scheduler:
 
         for request_id in finished_ids:
             _mtp_priming.release_request(self.model, request_id)
+            request = self.running.get(request_id)
             finished_drafter = _block_drafter_for(self.model)
             if finished_drafter is not None:
-                finished_drafter.release_request(request_id)
-            request = self.running.get(request_id)
+                # The token list keeps the drafter context for prefix hits.
+                keep = request is not None and not getattr(
+                    request, "vlm_extra_keys_for_cache", None
+                )
+                finished_drafter.release_request(
+                    request_id,
+                    (
+                        list(request.prompt_token_ids) + list(request.output_token_ids)
+                        if keep
+                        else None
+                    ),
+                )
 
             # Store cache for future reuse (G2-async): submit to background
             # executor so the post-finish 28GB+ memcpy doesn't block response
@@ -14011,6 +14061,9 @@ class Scheduler:
 
     def _reset_request_for_reprefill(self, request: Request) -> None:
         """Reset request-owned decode state so it can be prefilled again."""
+        drafter = _block_drafter_for(self.model)
+        if drafter is not None:
+            drafter.release_request(request.request_id)
         request.status = RequestStatus.WAITING
         request.batch_uid = None
         request.prompt_cache = None
