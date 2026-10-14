@@ -777,6 +777,7 @@ class GlobalSettingsRequest(BaseModel):
     # Auth settings
     api_key: str | None = None
     skip_api_key_verification: bool | None = None
+    allow_unauthenticated_inference: bool | None = None
 
     @field_validator("idle_timeout_seconds", mode="before")
     @classmethod
@@ -4609,6 +4610,9 @@ def _global_settings_response(global_settings):
             "api_key_set": bool(global_settings.auth.api_key),
             "api_key": global_settings.auth.api_key or "",
             "skip_api_key_verification": global_settings.auth.skip_api_key_verification,
+            "allow_unauthenticated_inference": (
+                global_settings.auth.allow_unauthenticated_inference
+            ),
             "sub_keys": [sk.to_dict() for sk in global_settings.auth.sub_keys],
         },
         "claude_code": {
@@ -5741,6 +5745,17 @@ async def update_global_settings(
             request.skip_api_key_verification
         )
         runtime_applied.append("skip_api_key_verification")
+
+    if request.allow_unauthenticated_inference is not None:
+        if (
+            request.allow_unauthenticated_inference
+            and not global_settings.auth.allow_unauthenticated_inference
+        ):
+            logger.warning("Unauthenticated inference enabled via admin settings")
+        global_settings.auth.allow_unauthenticated_inference = (
+            request.allow_unauthenticated_inference
+        )
+        runtime_applied.append("allow_unauthenticated_inference")
 
     if pending_embedding_batch_size is not None:
         previous_embedding_batch_size = global_settings.scheduler.embedding_batch_size

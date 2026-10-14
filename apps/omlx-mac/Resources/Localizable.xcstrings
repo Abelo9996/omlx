@@ -17324,19 +17324,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disable API Key Verification"
+            "value" : "Disable All Authentication"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Отключить проверку API-ключа"
+            "value" : "Отключить всю аутентификацию"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "禁用 API 密钥验证"
+            "value" : "禁用所有身份验证"
           }
         }
       }
@@ -17361,6 +17361,126 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "允许未经身份验证的 /v1 和管理员请求。仅用于开发。"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference" : {
+      "comment" : "Row label for the toggle that allows keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow Inference Without API Key"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить инференс без API-ключа"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许无 API 密钥推理"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_button" : {
+      "comment" : "Button that accepts the keyless inference warning",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "I Understand"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Я понимаю"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "我已了解"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_message" : {
+      "comment" : "Warning shown before enabling keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anyone who can reach this server will be able to use inference APIs, MCP tools, and web search without an API key.\n\nBy turning this on, you acknowledge that the server will be exposed to attacks from the network, that you understand you are removing this security protection, and that you have put appropriate security measures in place."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Любой, кто может подключиться к этому серверу, сможет использовать API инференса, инструменты MCP и веб-поиск без API-ключа.\n\nВключая этот параметр, вы признаёте, что сервер станет уязвим для атак из сети, понимаете, что снимаете эту защиту, и подтверждаете, что приняли надлежащие меры безопасности."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "任何能访问此服务器的人都将可以无需 API 密钥使用推理 API、MCP 工具和网页搜索。\n\n开启此设置即表示您已知晓服务器将容易受到来自网络的攻击，理解您正在解除此安全保护，并确认已采取适当的安全措施。"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.confirm_title" : {
+      "comment" : "Title of the warning shown before enabling keyless inference",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Allow inference without an API key?"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить инференс без API-ключа?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许无 API 密钥推理？"
+          }
+        }
+      }
+    },
+    "security.auth.keyless_inference.sub" : {
+      "comment" : "Sublabel for the keyless inference toggle",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Keyless access to inference, MCP tools, and web search. Admin still requires authentication."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доступ к инференсу, инструментам MCP и веб-поиску без ключа. Администрирование по-прежнему требует аутентификации."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无需密钥即可使用推理、MCP 工具和网页搜索。管理功能仍需要身份验证。"
           }
         }
       }
