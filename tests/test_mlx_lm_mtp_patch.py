@@ -3732,6 +3732,37 @@ def _tiny_qwen35_text():
     return model
 
 
+def test_qwen35_dflash_preparation_preserves_recurrent_rollback(monkeypatch):
+    from omlx.engine.batched import BatchedEngine
+    from omlx.patches.mlx_lm_mtp import drafter_target
+
+    model = _tiny_qwen35_text()
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._model = model
+    monkeypatch.setattr(
+        drafter_target,
+        "apply",
+        lambda model: pytest.fail("Qwen3.5 must retain its recurrent rollback"),
+    )
+    assert engine.prepare_dflash_target() is model
+
+    reference = make_prompt_cache(model)
+    cache = make_prompt_cache(model)
+    model(mx.array([[1, 2, 3, 4, 5]]), cache=reference)
+    model(mx.array([[1, 2, 3]]), cache=cache)
+    model(
+        mx.array([[4, 5, 6]]),
+        cache=cache,
+        return_hidden=True,
+        n_confirmed=1,
+        capture_layer_ids=[1],
+    )
+    assert model.rollback_speculative_cache(cache, None, 1, 3) == 1
+    expected = model(mx.array([[7]]), cache=reference)
+    actual = model(mx.array([[7]]), cache=cache)
+    assert mx.allclose(actual, expected, atol=1e-5, rtol=1e-5).item()
+
+
 @pytest.mark.parametrize("family", ["qwen3", "qwen3_5"])
 def test_text_targets_return_drafter_layer_captures(family, apply_drafter_target):
     """mlx-lm text targets return requested layer outputs in request order,

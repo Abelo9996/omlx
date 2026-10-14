@@ -772,6 +772,7 @@ def _patch_text_model(q35: Any) -> None:
     cls.mtp_forward = mtp_forward
     cls.make_mtp_cache = make_mtp_cache
     cls.mtp_partial_rollback = mtp_partial_rollback
+    cls.rollback_speculative_cache = rollback_speculative_cache
     cls.sanitize = sanitize
     cls.quant_predicate = property(quant_predicate)
 

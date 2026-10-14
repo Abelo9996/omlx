@@ -587,7 +587,8 @@ class DFlashDrafter:
                 int(context.shape[1]) + (0 if prior is None else int(prior.shape[1]))
             )
             bases.append(row.fed + skip)
-        width = max(int(seg.shape[1]) for seg in segments)
+        # Metal projections need a nonempty shape even when the window keeps no context.
+        width = max(1, max(int(seg.shape[1]) for seg in segments))
         padded = mx.concatenate(
             [
                 (
@@ -653,6 +654,8 @@ class DFlashDrafter:
         # predraft must leave the cohort's rings untouched.
         pos = mx.stop_gradient(cohort.pos)
         for index, (b, n, slots_b) in enumerate(zip(bases, lengths, write_slots)):
+            if not n:
+                continue
             pos[index, slots_b] = mx.arange(b, b + n, dtype=mx.int32)
         # Attend the newest ``slots`` committed positions; block keys always.
         # Unwritten slots hold position -1 until the ring fills.
@@ -692,10 +695,10 @@ class DFlashDrafter:
                 variants.project_qkv(attn, x, h_ctx)
             )
             ctx_keys = attn.k_norm(
-                ctx_keys.reshape(batch, width, attn.n_kv_heads, -1)
+                ctx_keys.reshape(batch, width, attn.n_kv_heads, attn.head_dim)
             ).transpose(0, 2, 1, 3)
             ctx_values = ctx_values.reshape(
-                batch, width, attn.n_kv_heads, -1
+                batch, width, attn.n_kv_heads, attn.head_dim
             ).transpose(0, 2, 1, 3)
             if self.value_scale is not None:
                 ctx_values = ctx_values * self.value_scale
@@ -704,6 +707,8 @@ class DFlashDrafter:
             ring_keys = mx.stop_gradient(cohort.keys[layer_index])
             ring_values = mx.stop_gradient(cohort.values[layer_index])
             for index, (n, slots_b) in enumerate(zip(lengths, write_slots)):
+                if not n:
+                    continue
                 ring_keys[index, :, slots_b, :] = ctx_keys[index, :, :n, :]
                 ring_values[index, :, slots_b, :] = ctx_values[index, :, :n, :]
             new_keys.append(ring_keys)

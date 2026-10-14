@@ -229,7 +229,8 @@ def _run_cycles(drafter, plan, cycle_offset=0):
 
 
 @DRAFTER_FAMILIES
-def test_batched_forward_matches_rows_drafted_alone(make_drafter):
+@pytest.mark.parametrize("window", [1, WINDOW])
+def test_batched_forward_matches_rows_drafted_alone(make_drafter, window):
     """Padding, masks, vector RoPE offsets and ring writes must not leak across rows."""
     plan = [
         {0: (5, 3), 1: (1, 9)},
@@ -241,6 +242,7 @@ def test_batched_forward_matches_rows_drafted_alone(make_drafter):
     expected = [{} for _ in plan]
     for uid in (0, 1, 2):
         alone = make_drafter()
+        alone._window_size = window
         solo_plan = [{uid: rows[uid]} if uid in rows else {} for rows in plan]
         for cycle, rows in enumerate(solo_plan):
             if rows:
@@ -249,6 +251,7 @@ def test_batched_forward_matches_rows_drafted_alone(make_drafter):
                 )
 
     batched = make_drafter()
+    batched._window_size = window
     got = _run_cycles(batched, plan)
     assert got == expected
     # The ring saw every context token, including the ones that fell out of
