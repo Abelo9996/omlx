@@ -5702,7 +5702,7 @@ def _cache_rows(cache):
     return None
 
 
-@pytest.mark.parametrize("family", ["qwen_vlm", "qwen4"])
+@pytest.mark.parametrize("family", ["qwen_vlm", "qwen4", "glm5"])
 def test_shared_verify_boundary_emit_uses_private_row_cache(monkeypatch, family):
     previous = mlx_lm_mtp.is_mtp_active()
     previous_depth = mlx_lm_mtp.get_mtp_depth()
@@ -5741,6 +5741,11 @@ def test_shared_verify_boundary_emit_uses_private_row_cache(monkeypatch, family)
 
         monkeypatch.setattr(bg, "_materialize_mtp_boundary_emit", materialize)
         monkeypatch.setattr(bg, "_call_backbone", backbone)
+        monkeypatch.setattr(
+            fused_batch,
+            "copy",
+            SimpleNamespace(deepcopy=lambda cache: pytest.fail("batch cache copied")),
+        )
         actual, _ = generate(model, prompts, limits)
         assert actual == expected
         assert any(rows > 1 for rows in materialized)
