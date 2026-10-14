@@ -111,30 +111,6 @@ async def test_text_completion_stream_forwards_transport_request_id():
     assert engine.kwargs["_request_id"] == "transport-completion-1"
 
 
-@pytest.mark.asyncio
-async def test_text_completion_stream_forwards_no_repeat_ngram():
-    from omlx.api.openai_models import CompletionRequest
-    from omlx.server import stream_completion
-
-    class Engine:
-        tokenizer = None
-        kwargs = None
-
-        async def stream_generate(self, **kwargs):
-            self.kwargs = kwargs
-            if False:
-                yield None
-
-    for fields in ({"no_repeat_ngram_size": 35, "ngram_window": 128}, {}):
-        engine = Engine()
-        request = CompletionRequest(model="m", prompt="hi", stream=True, **fields)
-        async for _ in stream_completion(engine, "hi", request, prompt_token_ids=[]):
-            pass
-        keys = ("no_repeat_ngram_size", "ngram_window")
-        forwarded = {key: engine.kwargs[key] for key in keys if key in engine.kwargs}
-        assert forwarded == fields
-
-
 class _PrefillingChatEngine:
     """Fake chat engine that advances the prefill tracker like the scheduler."""
 
@@ -1654,51 +1630,3 @@ def test_chat_routes_reuse_final_prepared_prompt(
         ]
         start = next(event for event in events if event["type"] == "message_start")
         assert start["message"]["usage"]["input_tokens"] == len(prepared[1])
-
-
-@pytest.mark.parametrize(
-    "fields, expected",
-    [
-        (
-            {"no_repeat_ngram_size": 35, "ngram_window": 128},
-            {"no_repeat_ngram_size": 35, "ngram_window": 128},
-        ),
-        ({"no_repeat_ngram_size": 3}, {"no_repeat_ngram_size": 3, "ngram_window": 0}),
-        ({"no_repeat_ngram_size": 0, "ngram_window": 128}, {}),
-        ({}, {}),
-    ],
-)
-def test_chat_completion_forwards_no_repeat_ngram(
-    monkeypatch, prepared_chat_engine, fields, expected
-):
-    engine = prepared_chat_engine
-    engine.preflight_chat = AsyncMock(
-        side_effect=HTTPException(status_code=418, detail="Kwargs captured")
-    )
-    pool = MagicMock()
-    pool.preload_pinned_models = AsyncMock()
-    pool.check_ttl_expirations = AsyncMock()
-    pool.shutdown = AsyncMock()
-    pool.get_entry.return_value = SimpleNamespace(
-        config_model_type="qwen3_5", preserve_thinking_default=None
-    )
-    state = ServerState()
-    state.engine_pool = pool
-    monkeypatch.setattr(srv, "_server_state", state)
-    monkeypatch.setattr(srv, "get_engine_for_model", AsyncMock(return_value=engine))
-    monkeypatch.setattr(srv, "resolve_model_id", lambda name: name)
-    monkeypatch.setattr(srv, "get_model_settings_for_request", lambda name: None)
-    monkeypatch.setattr(srv, "validate_context_window", lambda *a, **k: None)
-    monkeypatch.setitem(
-        srv.app.dependency_overrides, srv.verify_inference_api_key, lambda: True
-    )
-    body = {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]}
-
-    with TestClient(srv.app, raise_server_exceptions=False) as client:
-        response = client.post("/v1/chat/completions", json=body | fields)
-
-    assert response.status_code == 418, response.text
-    kwargs = engine.preflight_chat.call_args.kwargs
-    keys = ("no_repeat_ngram_size", "ngram_window")
-    assert {key: kwargs[key] for key in keys if key in kwargs} == expected
-

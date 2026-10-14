@@ -166,12 +166,10 @@ def apply_xtc(
 def make_no_repeat_ngram_processor(
     ngram_size: int, window: int = 0
 ) -> Callable[[mx.array, mx.array], mx.array]:
-    """Ban every token that would repeat an n-gram already in ``tokens``.
+    """Ban tokens that would repeat an n-gram already in ``tokens``.
 
-    Without a window this is transformers' ``no_repeat_ngram_size``. With one,
-    only n-grams inside the last ``window`` tokens count, as in Unlimited-OCR's
-    ``SlidingWindowNoRepeatNgramProcessor``. Lazy ops only, so the decode step
-    does not wait on the host.
+    A nonzero ``window`` searches only the last ``window`` tokens.
+    Lazy ops only, so the decode step does not wait on the host.
     """
 
     def no_repeat_ngram_processor(tokens: mx.array, logits: mx.array) -> mx.array:

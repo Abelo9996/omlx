@@ -2001,7 +2001,6 @@ def _resolve_thinking_budget(request, model_id: str | None) -> int | None:
 
 
 def _no_repeat_ngram_kwargs(request) -> dict[str, int]:
-    """Engine kwargs for the n-gram ban a request asked for, if any."""
     size = getattr(request, "no_repeat_ngram_size", None)
     if not size:
         return {}

@@ -326,7 +326,6 @@ class StreamOptions(BaseModel):
 
 
 def _check_ngram_window(size: int | None, window: int | None) -> None:
-    """A window shorter than the n-gram could never hold one."""
     if size and window and window < size:
         raise ValueError("ngram_window must be 0 or at least no_repeat_ngram_size")
 
@@ -341,8 +340,6 @@ class ChatCompletionRequest(BaseModel):
     top_k: int | None = None
     repetition_penalty: float | None = None
     repetition_context_size: Optional[int] = Field(default=None, gt=0)
-    # transformers' no_repeat_ngram_size (0 = off), optionally only over the
-    # last ngram_window tokens (0 = all of them).
     no_repeat_ngram_size: int | None = Field(default=None, ge=0)
     ngram_window: int | None = Field(default=None, ge=0)
     max_tokens: Optional[int] = Field(

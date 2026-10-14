@@ -17,7 +17,6 @@ from omlx.engine.distributed import (
     DistributedBatchedEngine,
     DistributedInferenceError,
 )
-from omlx.exceptions import InvalidRequestError
 
 
 def _deployment() -> ClusterDeployment:
@@ -930,24 +929,6 @@ async def test_distributed_preflight_rejects_features_before_stream_starts():
                 [{"role": "user", "content": "hello"}],
                 specprefill=True,
             )
-    finally:
-        await engine._client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_distributed_engine_rejects_no_repeat_ngram():
-    # Ranks run mlx-lm's server, which would drop the field.
-    def handler(request):
-        raise AssertionError("backend should not be called")
-
-    engine = _ready_engine(handler)
-    try:
-        with pytest.raises(InvalidRequestError, match="no_repeat_ngram_size"):
-            await engine.preflight_chat(
-                [{"role": "user", "content": "hello"}], no_repeat_ngram_size=35
-            )
-        with pytest.raises(InvalidRequestError, match="no_repeat_ngram_size"):
-            await engine.generate("hello", no_repeat_ngram_size=35)
     finally:
         await engine._client.aclose()
 

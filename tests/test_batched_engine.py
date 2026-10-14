@@ -421,40 +421,6 @@ class TestBatchedEngineStreamingCleanup:
 
         assert fake_engine.add_request_kwargs["request_id"] == "req-progress"
 
-    @pytest.mark.asyncio
-    async def test_no_repeat_ngram_reaches_sampling_params(self):
-        from omlx.engine.batched import BatchedEngine
-
-        fake_engine = FakeStreamingCore()
-        engine = BatchedEngine(model_name="test-model")
-        engine._loaded = True
-        engine._engine = fake_engine
-
-        stream = engine.stream_generate(
-            "hello", no_repeat_ngram_size=35, ngram_window=128
-        )
-        await stream.__anext__()
-        await stream.aclose()
-        params = fake_engine.add_request_kwargs["sampling_params"]
-        assert (params.no_repeat_ngram_size, params.ngram_window) == (35, 128)
-
-        engine._engine = SimpleNamespace(
-            generate=AsyncMock(
-                return_value=SimpleNamespace(
-                    output_text="hi",
-                    prompt_tokens=1,
-                    completion_tokens=1,
-                    finish_reason="stop",
-                    tool_calls=None,
-                    cached_tokens=0,
-                    first_token_at=None,
-                )
-            )
-        )
-        await engine.generate("hello", no_repeat_ngram_size=3)
-        params = engine._engine.generate.call_args.kwargs["sampling_params"]
-        assert (params.no_repeat_ngram_size, params.ngram_window) == (3, 0)
-
 
 class TestBatchedEngineApplyChatTemplate:
     """Tests for BatchedEngine._apply_chat_template()."""

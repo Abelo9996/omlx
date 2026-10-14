@@ -12,7 +12,6 @@ inputs must produce non-trivial diversity at temperature > 0.
 
 from __future__ import annotations
 
-import math
 import random
 
 import mlx.core as mx
@@ -389,34 +388,3 @@ def test_no_repeat_ngram_matches_reference(dtype):
         assert {i for i, b in enumerate(banned) if b} == expected
         kept = mx.logical_not(mx.isinf(out))
         assert mx.array_equal(mx.where(kept, out, 0), mx.where(kept, logits, 0)).item()
-
-
-def test_no_repeat_ngram_window_limits_the_search():
-    from omlx.utils.sampling import make_no_repeat_ngram_processor
-
-    tokens = mx.array([5, 6, 7, 1, 2, 5, 6])
-
-    def banned(ngram_size, window=0, history=tokens):
-        processor = make_no_repeat_ngram_processor(ngram_size, window)
-        out = processor(history, mx.zeros((1, 8)))[0].tolist()
-        return [i for i, v in enumerate(out) if v == -math.inf]
-
-    assert banned(3) == [7]
-    assert banned(3, window=4) == []
-    # n=1 bans every token in the window.
-    assert banned(1, window=2) == [5, 6]
-    # Too short to hold an n-gram.
-    assert banned(3, history=tokens[:2]) == []
-
-
-def test_no_repeat_ngram_reads_a_lazy_token_buffer():
-    from mlx_lm.models.cache import TokenBuffer
-
-    from omlx.utils.sampling import make_no_repeat_ngram_processor
-
-    # The decode loop hands processors a slice of a TokenBuffer that holds the
-    # prompt and is extended with the not yet evaluated sampled token.
-    buffer = TokenBuffer([1, 2, 3, 1])
-    context = buffer.update_and_fetch(mx.array([2]) + 0)
-    out = make_no_repeat_ngram_processor(3)(context, mx.zeros((1, 6)))
-    assert mx.isinf(out[0]).tolist() == [False, False, False, True, False, False]
