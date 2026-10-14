@@ -35,6 +35,7 @@ from omlx.patches.mlx_lm_mtp import (
 )
 from omlx.patches.mlx_lm_mtp.batch_policy import BatchPolicy
 from omlx.patches.mlx_vlm_mtp import qwen35_verify_linear
+from omlx.patches.vlm_batch_kv_capacity import apply_batch_kv_capacity_patch
 from omlx.speculative import dflash as dd
 from omlx.utils.model_loading import (
     _has_mtp_heads,
@@ -4022,6 +4023,8 @@ def test_second_row_uses_stochastic_acceptance(monkeypatch):
 
 
 def test_failed_rollback_recovers_committed_tokens(monkeypatch):
+    # Reconcile reads capacity-managed caches; the scheduler patches at import.
+    apply_batch_kv_capacity_patch()
     model = CountingModel()
     # Force rejection without changing target logits by making every draft wrong.
     monkeypatch.setattr(
