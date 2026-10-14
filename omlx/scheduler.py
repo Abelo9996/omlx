@@ -2959,6 +2959,7 @@ class Scheduler:
                 drained = True
         self._pending_async_removes = pending
         if drained:
+            self._note_memory_admission_progress()
             # The completion-time deferred clear may have already fired while
             # the async store worker still owned extracted KV buffers. Anchor
             # another ordinary deferred clear to the point where those final
@@ -5653,6 +5654,13 @@ class Scheduler:
         self._clear_memory_admission_blocker(request_id)
         self._clear_store_cache_admission_blocker(request_id)
 
+    def _note_memory_admission_progress(self, now: float | None = None) -> None:
+        """Restart the memory admission timeout after completed work."""
+        if self._memory_admission_blocked_request_id is not None:
+            self._memory_admission_blocked_since = (
+                time.monotonic() if now is None else now
+            )
+
     def _memory_admission_stall_output(self, reason: str) -> RequestOutput | None:
         """Fail one head-of-line request after persistent memory admission stall."""
         if not self.waiting:
@@ -5694,7 +5702,8 @@ class Scheduler:
             tail=["reduce context length", "lower hot_cache_max_size"],
         )
         message = (
-            "Request could not be admitted because memory pressure persisted "
+            "Request could not be admitted because no request or cache cleanup "
+            "progress was observed "
             f"for {stalled_for:.1f}s ({reason}). {advice}."
         )
         logger.warning("Memory admission stalled for %s: %s", request_id, message)
@@ -6821,6 +6830,7 @@ class Scheduler:
         state = plan.state
         self._maybe_record_fixed_state_bytes(state.cache)
         state.tokens_processed += plan.tokens
+        self._note_memory_admission_progress()
 
         # Boundary snapshot
         if state.boundary_enabled:
@@ -13361,6 +13371,7 @@ class Scheduler:
                 continue
 
             request.last_activity_at = step_now
+            self._note_memory_admission_progress(step_now)
             completion_tokens_before = request.num_output_tokens
 
             # Release VLM embeddings after first decode token (prefill is done)

@@ -6134,23 +6134,36 @@ class TestStoreCacheAdmissionBackpressure:
         assert scheduler.running == {}
         scheduler._ensure_batch_generator.assert_not_called()
 
-    def test_memory_guard_fails_persistent_admission_stall(
-        self, mock_model, mock_tokenizer
+    @pytest.mark.parametrize("admission_paused", [False, True])
+    def test_memory_guard_times_out_only_after_decode_stalls(
+        self, mock_model, mock_tokenizer, admission_paused
     ):
-        """A persistent memory-gated head-of-line wait should fail cleanly."""
+        """Decode progress keeps a queued request alive until progress stops."""
         scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
         request = self._make_request("req-stalled")
         self._queue_request(scheduler, request)
         running = self._make_request("req-running")
         scheduler.running[running.request_id] = running
         scheduler.requests[running.request_id] = running
+        scheduler.uid_to_request_id[1] = running.request_id
+        scheduler._admission_paused = admission_paused
         scheduler._prefill_memory_guard = True
         scheduler._memory_limit_bytes = 100
         scheduler._current_usage_bytes = MagicMock(return_value=101)
         scheduler._memory_admission_blocked_request_id = request.request_id
         scheduler._memory_admission_blocked_since = 0.0
 
+        with patch("omlx.scheduler.time.monotonic", return_value=30.0):
+            scheduler._process_batch_responses(
+                [SimpleNamespace(uid=1, token=42, finish_reason=None)]
+            )
         with patch("omlx.scheduler.time.monotonic", return_value=61.0):
+            scheduled, rejected = scheduler._schedule_waiting()
+        assert scheduled == []
+        assert rejected == []
+        assert list(scheduler.waiting) == [request]
+
+        with patch("omlx.scheduler.time.monotonic", return_value=91.0):
             scheduled, rejected = scheduler._schedule_waiting()
 
         assert scheduled == []
@@ -6370,10 +6383,24 @@ class TestStoreCacheAdmissionBackpressure:
         scheduler._pending_async_removes.append(
             (2, done_request.request_id, done_future)
         )
+        self._queue_request(scheduler, self._make_request("req-waiting"))
+        with patch("omlx.scheduler.time.monotonic", return_value=0.0):
+            assert (
+                scheduler._memory_admission_stall_output("store_cache_backpressure")
+                is None
+            )
 
-        with patch("omlx.scheduler._safe_sync_stream"):
+        with (
+            patch("omlx.scheduler._safe_sync_stream"),
+            patch("omlx.scheduler.time.monotonic", return_value=30.0),
+        ):
             drained = scheduler._drain_pending_async_removes()
 
+        with patch("omlx.scheduler.time.monotonic", return_value=61.0):
+            assert (
+                scheduler._memory_admission_stall_output("store_cache_backpressure")
+                is None
+            )
         assert drained is True
         assert list(scheduler._pending_async_removes) == [
             (1, slow_request.request_id, slow_future)
