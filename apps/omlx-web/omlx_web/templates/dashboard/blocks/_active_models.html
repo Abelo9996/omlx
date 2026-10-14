@@ -57,7 +57,7 @@
                         <div class="flex items-center gap-1 min-w-0">
                             <div class="text-sm font-medium text-neutral-800 min-w-0 break-words leading-snug" x-text="m.id"></div>
                             <button x-data="{ copied: false }"
-                                    @click.stop="copyToClipboard(m.id); copied = true; setTimeout(() => copied = false, 2000)"
+                                    @click.stop="copyToClipboard(apiModelName(m.id)); copied = true; setTimeout(() => copied = false, 2000)"
                                     class="p-1 rounded-md transition-all flex-shrink-0"
                                     :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                     :title="window.t('status.active_models.copy_model_name_tooltip')">
@@ -119,7 +119,7 @@
                         <!-- Model name -->
                         <span class="text-sm font-medium text-neutral-800" x-text="m.id"></span>
                         <button x-data="{ copied: false }"
-                                @click.stop="copyToClipboard(m.id); copied = true; setTimeout(() => copied = false, 2000)"
+                                @click.stop="copyToClipboard(apiModelName(m.id)); copied = true; setTimeout(() => copied = false, 2000)"
                                 class="p-1 rounded-md transition-all flex-shrink-0"
                                 :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                 :title="window.t('status.active_models.copy_model_name_tooltip')">

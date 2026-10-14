@@ -115,7 +115,7 @@
                                                           x-text="managerModelInfo(model.name)?.settings?.model_alias"></span>
                                                 </template>
                                                 <button x-data="{ copied: false }"
-                                                        @click.stop="copyToClipboard(managerModelInfo(model.name)?.settings?.model_alias || model.name); copied = true; setTimeout(() => copied = false, 2000)"
+                                                        @click.stop="copyToClipboard(apiModelName(model.name)); copied = true; setTimeout(() => copied = false, 2000)"
                                                         class="p-1 rounded-md transition-all flex-shrink-0"
                                                         :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                                         :title="window.t('models.manager.copy_model_name_tooltip')">
@@ -803,7 +803,7 @@
                                                     <div class="flex items-center gap-2 flex-wrap">
                                                         <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.repo_id"></span>
                                                         <button x-show="task.status === 'completed'" x-cloak x-data="{ copied: false }"
-                                                                @click.stop="copyToClipboard(queueModelName(task.repo_id)); copied = true; setTimeout(() => copied = false, 2000)"
+                                                                @click.stop="copyToClipboard(apiModelName(task.repo_id.split('/').pop())); copied = true; setTimeout(() => copied = false, 2000)"
                                                                 class="p-1 rounded-md transition-all flex-shrink-0"
                                                                 :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                                                 :title="window.t('models.queue.copy_model_name_tooltip')">
@@ -1257,7 +1257,7 @@
                                                                 <div class="flex items-center gap-2 flex-wrap">
                                                                     <span class="text-sm font-medium text-neutral-900 truncate" x-text="task.repo_id"></span>
                                                                     <button x-show="task.status === 'completed'" x-cloak x-data="{ copied: false }"
-                                                                            @click.stop="copyToClipboard(queueModelName(task.repo_id)); copied = true; setTimeout(() => copied = false, 2000)"
+                                                                            @click.stop="copyToClipboard(apiModelName(task.repo_id.split('/').pop())); copied = true; setTimeout(() => copied = false, 2000)"
                                                                             class="p-1 rounded-md transition-all flex-shrink-0"
                                                                             :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                                                             :title="window.t('models.queue.copy_model_name_tooltip')">

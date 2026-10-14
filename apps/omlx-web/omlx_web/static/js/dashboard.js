@@ -4673,17 +4673,9 @@
                 }
             },
 
-            // Canonical id a queue row should copy, matching the model
-            // manager: the alias or folder id the API keys on, not the
-            // HuggingFace repo id. Falls back to the folder name (the last
-            // repo segment) when the model is not in the loaded list yet.
-            queueModelName(repoId) {
-                if (!repoId) return '';
-                const model = this.models.find(
-                    (m) => m.id === repoId || m.display_name === repoId
-                );
-                if (model) return model.settings?.model_alias || model.id;
-                return repoId.includes('/') ? repoId.split('/').pop() : repoId;
+            // Name clients send for a model: its alias when set, as /v1/models lists it.
+            apiModelName(id) {
+                return this.managerModelInfo(id)?.settings?.model_alias || id;
             },
 
             _copyFallback(text) {
