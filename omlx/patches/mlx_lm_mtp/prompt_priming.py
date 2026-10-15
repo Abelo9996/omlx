@@ -142,8 +142,7 @@ class _MtpBoundaryCandidate:
 
     boundary_tokens: int
     pending_hidden: Any
-    # Detached head state at C-1, taken at capture time for heads whose
-    # caches cannot be rewound to C-1 later (pooled caches).
+    # Head copy at C-1, kept only for pooled heads.
     mtp_cache: list[Any] | None = None
 
 
@@ -341,7 +340,6 @@ def _pooled(entry: Any) -> bool:
 
 
 def _token_offset(entry: Any) -> int | None:
-    """Token position of a cache entry (pooled rows * ratio + remainder)."""
     if _pooled(entry):
         return entry._pool_len * entry.ratio + entry.remainder
     return _read_offset(entry)
@@ -777,9 +775,8 @@ def _capture_boundary_candidate(
 
         head = None
         if any(_pooled(e) for e in _flat_cache_entries(ctx.mtp_cache)):
-            # Pooled rows cannot be rewound once the head folds past C-1
-            # (activation adds at least the seam pair), so detach the head
-            # here or keep the previous candidate.
+            # A pooled head cannot rewind to C-1 after the seam, so copy it
+            # now or keep the previous candidate.
             head = _cache_at_offset(ctx.mtp_cache, boundary - 1)
             if head is None:
                 return
