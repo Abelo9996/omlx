@@ -330,11 +330,25 @@ def _coerce_param_value(val: str, key: str, props: dict, func_name: str) -> Any:
             decoded = json.loads(val)
         except (json.JSONDecodeError, ValueError, *_DEEP_NEST_ERRORS):
             return val
+        if not isinstance(raw_type, list) and isinstance(spec, dict):
+            # oneOf/anyOf declare the alternatives when `type` is absent.
+            alts = [
+                alt
+                for group in (spec.get("oneOf"), spec.get("anyOf"))
+                if isinstance(group, list)
+                for alt in group
+            ]
+            # A $ref/enum/const alternative has no type to bound the value.
+            if alts and all(
+                isinstance(alt, dict) and isinstance(alt.get("type"), str)
+                for alt in alts
+            ):
+                raw_type = [alt["type"] for alt in alts]
         if isinstance(raw_type, list):
             # Plain 123 remains a string for ["string", "null"].
             matches = _matches_union_type(decoded, raw_type)
             return val if matches is False else decoded
-        # Undeclared params and oneOf/anyOf retain best-effort JSON parsing.
+        # Undeclared params and untyped unions keep best-effort JSON parsing.
         return decoded
     if val.strip().lower() == "null":
         return None
