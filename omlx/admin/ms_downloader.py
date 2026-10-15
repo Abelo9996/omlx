@@ -230,9 +230,8 @@ async def _fetch_model_detail_size(model_id: str) -> int:
     """Fetch a model's storage size via the detail endpoint.
 
     Used as a fallback when list_models didn't populate StorageSize.
-    Prefers ModelInfos.safetensor.model_size (weights only) and falls
-    back to the repository StorageSize (weights + tokenizer + readme).
-    Returns 0 on any error.
+    ModelInfos.safetensor.model_size is an element count, not bytes, so
+    only the repository StorageSize is used. Returns 0 on any error.
     """
     if not model_id:
         return 0
@@ -246,9 +245,7 @@ async def _fetch_model_detail_size(model_id: str) -> int:
         if resp.status_code != 200:
             return 0
         data = resp.json().get("Data") or {}
-        model_infos = data.get("ModelInfos") or {}
-        st = model_infos.get("safetensor") or {}
-        size = st.get("model_size") or data.get("StorageSize") or 0
+        size = data.get("StorageSize") or 0
         return int(size) if isinstance(size, (int, float, str)) else 0
     except (TypeError, ValueError):
         return 0

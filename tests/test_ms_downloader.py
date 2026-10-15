@@ -926,17 +926,17 @@ class TestFetchModelConfig:
 
 class TestFetchModelDetailSize:
     @pytest.mark.asyncio
-    async def test_prefers_safetensor_model_size(self):
+    async def test_ignores_safetensor_element_count(self):
         resp = MagicMock()
         resp.status_code = 200
         resp.json.return_value = {
             "Data": {
-                "ModelInfos": {"safetensor": {"model_size": 193153024}},
-                "StorageSize": 712593982,
+                "ModelInfos": {"safetensor": {"model_size": 4665462000}},
+                "StorageSize": 16081491610,
             }
         }
         with patch("omlx.admin.ms_downloader.requests.get", return_value=resp):
-            assert await _fetch_model_detail_size("owner/m") == 193153024
+            assert await _fetch_model_detail_size("owner/m") == 16081491610
 
     @pytest.mark.asyncio
     async def test_falls_back_to_storage_size(self):
