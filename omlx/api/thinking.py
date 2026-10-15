@@ -331,12 +331,14 @@ class ThinkingParser:
             self._content_emitted = True
         return (thinking_delta, content_delta)
 
-    def finish(self, *, truncated: bool = False) -> Tuple[str, str]:
+    def finish(
+        self, *, truncated: bool = False, has_tool_calls: bool = False
+    ) -> Tuple[str, str]:
         """Flush any remaining buffered content.
 
         Should be called when the stream is complete to emit any
         buffered characters that were waiting for potential tag completion.
-        Unless truncated, recover an unclosed thinking block as content when no answer was emitted.
+        Unless truncated or ended by tool calls, recover an unclosed thinking block as content when no answer was emitted.
 
         Returns:
             Tuple of (thinking_text, content_text) from remaining buffer
@@ -352,8 +354,10 @@ class ThinkingParser:
         # already streamed live cannot be retracted, so the client sees
         # the same text twice — once in the thinking panel, once as the
         # answer. UX trade-off documented in the chat template plan.
+        # A tool-call turn is not empty, so its reasoning stays in thinking.
         if (
             not truncated
+            and not has_tool_calls
             and self._in_thinking
             and not self._close_seen
             and not self._content_emitted

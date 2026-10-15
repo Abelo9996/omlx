@@ -6369,7 +6369,8 @@ async def stream_chat_completion(
     # Flush remaining buffered content from thinking/tool-call parsers
     if stream_content:
         thinking_delta, content_delta = thinking_parser.finish(
-            truncated=last_output is not None and last_output.finish_reason == "length"
+            truncated=last_output is not None and last_output.finish_reason == "length",
+            has_tool_calls=bool(last_output and last_output.tool_calls),
         )
         if thinking_delta:
             if thinking_filter:
@@ -6971,7 +6972,8 @@ async def stream_anthropic_messages(
 
     # Flush remaining buffered content from thinking parser
     thinking_delta, content_delta = thinking_parser.finish(
-        truncated=last_output is not None and last_output.finish_reason == "length"
+        truncated=last_output is not None and last_output.finish_reason == "length",
+        has_tool_calls=bool(last_output and last_output.tool_calls),
     )
     if thinking_delta:
         if thinking_filter:
@@ -8841,7 +8843,8 @@ async def stream_responses_api(
     # Flush remaining content from parsers
     if stream_content:
         thinking_delta, content_delta = thinking_parser.finish(
-            truncated=last_output is not None and last_output.finish_reason == "length"
+            truncated=last_output is not None and last_output.finish_reason == "length",
+            has_tool_calls=bool(last_output and last_output.tool_calls),
         )
         if thinking_delta:
             if thinking_filter:
