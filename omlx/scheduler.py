@@ -13559,6 +13559,9 @@ class Scheduler:
                 finished_ids.add(request_id)
 
                 if parser_session is not None:
+                    notify = getattr(parser_session, "notify_finish_reason", None)
+                    if callable(notify):
+                        notify(response.finish_reason)
                     final_result = parser_session.finalize()
                     if stop_prefix_chars is not None:
                         final_result.stream_text = ""
