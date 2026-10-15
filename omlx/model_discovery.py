@@ -69,7 +69,7 @@ VLM_MODEL_TYPES = {
     "glm_ocr",
     "minimax_m3_vl",
     "minicpmv",
-    "minicpmv4_7",  # OpenBMB MiniCPM-V 4.7 (1B + 35B-A3B), mlx-vlm >= v0.7.8
+    "minicpmv4_7",
     "phi4_siglip",
     "phi4mm",
     "youtu_vl",

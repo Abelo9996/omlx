@@ -17,8 +17,6 @@ _SUPPORTED_TYPES = frozenset(
         "olmoe",
         "glm_moe_dsa",
         "glm5_next",
-        # MiniCPM-V 4.7 (1B + 35B-A3B): VLM whose text backbone is qwen3_5_moe;
-        # experts live under language_model.model.layers.*.mlp.switch_mlp.
         "minicpmv4_7",
     }
 )

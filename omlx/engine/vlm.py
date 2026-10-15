@@ -827,41 +827,28 @@ def _strip_vision_config_if_orphaned(model_dir: Path):
 
 
 def _index_declares_sidecar_shard(model_dir: Path, sidecar: Path) -> bool:
-    """True when ``model.safetensors.index.json`` already lists the sidecar.
-
-    mlx-vlm resolves index-declared shards by path, so a sidecar kept under a
-    subdirectory is already pulled in by the native loader. The config-driven
-    injection below would then add the same tensors twice and trip the
-    duplicate-weight guard, so this path must short-circuit instead.
-    """
+    """True when ``model.safetensors.index.json`` lists the resolved sidecar."""
     index = model_dir / "model.safetensors.index.json"
     try:
-        weight_map = json.loads(index.read_text()).get("weight_map", {})
+        shards = set(json.loads(index.read_text())["weight_map"].values())
     except Exception:
         return False
-    try:
-        relative = sidecar.resolve().relative_to(model_dir.resolve()).as_posix()
-    except ValueError:
-        return False
-    return relative in set(weight_map.values())
+    return sidecar.relative_to(model_dir.resolve()).as_posix() in shards
 
 
 @contextlib.contextmanager
 def _load_optiq_vision_sidecar_on_load(model_dir: Path):
     """Include a config-declared OptiQ sidecar in mlx-vlm strict loading.
 
-    Pinned mlx-vlm only globs ``*.safetensors`` in the model root, while
-    current OptiQ VLM checkpoints keep their unquantized multimodal weights
-    under ``optiq/``. Root-level legacy sidecars remain a no-op because the
-    native glob already loads them. Index-aware mlx-vlm resolves subdirectory
-    shards directly, so a sidecar already listed in the index needs no
-    injection either.
+    mlx-vlm loads index-listed shards, or globs the model root without an index.
+    Inject only a subdirectory sidecar that the index does not list.
     """
     sidecar = _resolve_optiq_vision_sidecar(model_dir)
-    if sidecar is None or sidecar.parent == model_dir.resolve():
-        yield
-        return
-    if _index_declares_sidecar_shard(model_dir, sidecar):
+    if (
+        sidecar is None
+        or sidecar.parent == model_dir.resolve()
+        or _index_declares_sidecar_shard(model_dir, sidecar)
+    ):
         yield
         return
 
