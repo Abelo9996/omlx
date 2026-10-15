@@ -8097,17 +8097,8 @@ class Scheduler:
         escaped = re.escape(think_end_str)
         # Match patterns like: \n</think>\n\n or </think> in template strings
         pattern = re.compile(r"(\\n|\\r|[\n\r])*" + escaped + r"((?:\\n|\\r|[\n\r])*)")
-        # The first occurrence in the template is often not the one the model
-        # was trained on. Qwen3/3.6, Step-3.5 and GLM-4.6V templates mention
-        # the bare tag first while parsing prior turns (``'</think>' in
-        # content``, ``content.split('</think>')``) and only later render the
-        # generation-side form (``'\n</think>\n\n'``). Taking the first match
-        # forced a bare ``</think>`` after mid-sentence reasoning, which Qwen
-        # does not treat as a close: it keeps reasoning into the answer and
-        # later emits its own properly wrapped close (#1864). Prefer the first
-        # occurrence that carries any surrounding newline; templates whose
-        # close really is bare (DeepSeek V3.2, GLM-5, MiniMax M2.5) have no
-        # such occurrence and fall back to the first match as before.
+        # Templates can mention the bare tag first while parsing history.
+        # Prefer the first wrapped occurrence, which is the rendered close.
         matches = list(pattern.finditer(template_text))
         if not matches:
             return None, None
