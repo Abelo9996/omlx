@@ -10,6 +10,7 @@ from safetensors.numpy import save_file
 
 from omlx.engine.vlm import (
     _has_audio_weights,
+    _index_declares_sidecar_shard,
     _load_optiq_vision_sidecar_on_load,
     _resolve_optiq_vision_sidecar,
 )
@@ -185,6 +186,86 @@ class TestLoadOptiqVisionSidecar:
             raise RuntimeError("boom")
 
         assert nn.Module.load_weights is original
+
+
+class TestIndexDeclaredSidecar:
+    def test_skips_injection_when_index_lists_the_sidecar(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        model_dir = _build_model_dir(
+            tmp_path,
+            sidecar_keys=[
+                "vision_tower.blocks.0.attn.qkv.weight",
+                "embed_vision.embedding_projection.weight",
+            ],
+        )
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "vision_tower.blocks.0.attn.qkv.weight": (
+                            "optiq/optiq_vision.safetensors"
+                        ),
+                        "embed_vision.embedding_projection.weight": (
+                            "optiq/optiq_vision.safetensors"
+                        ),
+                        "language_model.model.embed_tokens.weight": (
+                            "model-00001-of-00002.safetensors"
+                        ),
+                    }
+                }
+            )
+        )
+        captured, original = _capture_load_weights(monkeypatch)
+        root_weights = [("language_model.model.embed_tokens.weight", object())]
+
+        with _load_optiq_vision_sidecar_on_load(model_dir):
+            nn.Module.load_weights(object(), root_weights)
+
+        assert nn.Module.load_weights is original
+        assert captured["items"] == root_weights
+
+    def test_index_check_is_false_without_index(self, tmp_path: Path):
+        model_dir = _build_model_dir(
+            tmp_path,
+            sidecar_keys=["vision_tower.weight"],
+        )
+
+        assert (
+            _index_declares_sidecar_shard(
+                model_dir,
+                model_dir / "optiq/optiq_vision.safetensors",
+            )
+            is False
+        )
+
+    def test_index_check_is_false_when_index_omits_the_sidecar(
+        self,
+        tmp_path: Path,
+    ):
+        model_dir = _build_model_dir(
+            tmp_path,
+            sidecar_keys=["vision_tower.weight"],
+        )
+        (model_dir / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "language_model.weight": "model-00001-of-00001.safetensors"
+                    }
+                }
+            )
+        )
+
+        assert (
+            _index_declares_sidecar_shard(
+                model_dir,
+                model_dir / "optiq/optiq_vision.safetensors",
+            )
+            is False
+        )
 
 
 def test_audio_weights_are_detected_in_optiq_sidecar(tmp_path: Path):
