@@ -4563,7 +4563,7 @@ def _extract_chat_messages(
             else None
         ),
     )
-    is_vlm = isinstance(engine, VLMBatchedEngine)
+    is_vlm = _engine_accepts_images(engine)
     extractor = getattr(engine, "message_extractor", None)
     if extractor is not None:
         extractor_kwargs = {}
@@ -4604,6 +4604,17 @@ def _extract_chat_messages(
         messages=messages,
         is_partial=is_partial,
         native_reasoning=native_reasoning,
+    )
+
+
+def _engine_accepts_images(engine: BaseEngine) -> bool:
+    """Whether image content parts should reach ``engine``.
+
+    In-process VLMs read them, and an external engine can declare it (Splash
+    serving a checkpoint with a vision tower). Other engines get text only.
+    """
+    return isinstance(engine, VLMBatchedEngine) or bool(
+        getattr(engine, "accepts_image_input", False)
     )
 
 
@@ -7348,7 +7359,7 @@ async def create_anthropic_message(
 
         # Convert Anthropic format to internal format
         # Harmony models need special handling to preserve tool format
-        is_vlm = isinstance(engine, VLMBatchedEngine)
+        is_vlm = _engine_accepts_images(engine)
         native_reasoning = uses_native_reasoning_content(
             resolved_model,
             config_model_type=(
@@ -8041,7 +8052,7 @@ async def create_response(
         # Images in function_call_output lists survive only for engines that
         # can extract them; text engines get a placeholder instead so base64
         # payloads never reach the prompt (#2989).
-        preserve_tool_images = isinstance(engine, VLMBatchedEngine)
+        preserve_tool_images = _engine_accepts_images(engine)
 
         current_input_messages = convert_responses_input_to_messages(
             request.input,
