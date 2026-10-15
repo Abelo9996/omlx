@@ -27,8 +27,6 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from huggingface_hub import HfApi, hf_hub_download, snapshot_download
-
-# Private-module import, like abort_xet_session below.
 from huggingface_hub._local_folder import read_download_metadata
 from huggingface_hub.utils import (
     GatedRepoError,
@@ -37,8 +35,8 @@ from huggingface_hub.utils import (
 )
 from huggingface_hub.utils import tqdm as _hf_tqdm
 
-# Private-module import; the pyproject floor (huggingface-hub>=1.19.0)
-# guarantees it exists. Re-verify the symbol when bumping the hub version.
+# Private-module imports (also read_download_metadata above); the pyproject floor
+# (huggingface-hub>=1.19.0) guarantees them. Re-verify both when bumping the hub.
 from huggingface_hub.utils._xet import abort_xet_session
 
 logger = logging.getLogger(__name__)
@@ -466,16 +464,11 @@ _BLOB_SIZE_CACHE_MAX = 512
 _blob_size_cache: dict[str, tuple[int, float]] = {}
 
 
-def _stale_local_files(
-    local_dir: Path, dry_result
-) -> dict[str, tuple[int, int]]:
-    """Existing local files snapshot_download will replace: path -> (inode, size).
+def _stale_local_files(local_dir: Path, dry_result) -> dict[str, tuple[int, int]]:
+    """Map local files snapshot_download will refetch to (inode, size).
 
-    Hub deletes an outdated file right before refetching it, so its bytes are
-    on disk when polling starts but are not progress. The dry run reports such
-    a file as cached (``will_download=False``); what tells it apart is the
-    metadata the dry run leaves behind, which carries the target commit only
-    for files hub keeps.
+    The dry run reports outdated files as cached; only kept files get the
+    target commit in their metadata.
     """
     stale: dict[str, tuple[int, int]] = {}
     for info in dry_result:
@@ -494,12 +487,7 @@ def _stale_local_files(
 
 
 def _stale_bytes(stale: dict[str, tuple[int, int]], files: dict) -> int:
-    """Bytes of outdated files in one directory scan, forgetting replaced ones.
-
-    ``files`` is that scan, so a file hub deletes mid-poll is counted exactly
-    as the scan saw it. A path whose inode changed holds the refetched file,
-    which is progress.
-    """
+    """Sum outdated bytes in one scan; forget files deleted or replaced (new inode)."""
     total = 0
     for path, (inode, size) in list(stale.items()):
         if path not in files:
@@ -1559,9 +1547,7 @@ class HFDownloader(_QueuePersistenceMixin):
 
                 wire_counter = _WireCounter()
                 self._progress_tasks[task_id] = asyncio.create_task(
-                    self._poll_progress(
-                        task_id, target_dir, wire_counter, stale
-                    )
+                    self._poll_progress(task_id, target_dir, wire_counter, stale)
                 )
 
                 payload = asyncio.get_running_loop().run_in_executor(
@@ -1609,9 +1595,7 @@ class HFDownloader(_QueuePersistenceMixin):
                     # The HTTP worker refetches the payload, so xet's wire
                     # bytes do not carry over.
                     self._progress_tasks[task_id] = asyncio.create_task(
-                        self._poll_progress(
-                            task_id, target_dir, _WireCounter(), stale
-                        )
+                        self._poll_progress(task_id, target_dir, _WireCounter(), stale)
                     )
                     try:
                         await self._run_http_fallback(task_id, dl_kwargs)
@@ -1790,11 +1774,8 @@ class HFDownloader(_QueuePersistenceMixin):
         network long before they reach disk: it feeds progress, speed, and
         stall liveness.
 
-        ``stale`` maps outdated files hub will delete and refetch to their
-        inode and size. Their bytes are left out of the disk reading: counted in the
-        baseline, the directory would shrink below it once hub deletes them,
-        so disk growth would read zero and every payload byte would count
-        twice, once on the wire and again on disk.
+        ``stale`` files are left out of the disk reading. Hub deletes them
+        before refetching, which would otherwise hide disk growth.
         """
         wire = wire or _WireCounter()
         # Own copy: _stale_bytes forgets replaced files as they go.
@@ -1826,9 +1807,7 @@ class HFDownloader(_QueuePersistenceMixin):
 
                 activity = self._get_download_activity(target_dir)
                 wire_now = wire.value
-                logical = activity.logical_size - _stale_bytes(
-                    stale, activity.files
-                )
+                logical = activity.logical_size - _stale_bytes(stale, activity.files)
 
                 # Add wire bytes the disk has not caught up with yet.
                 disk_growth = max(0, logical - base_logical)
