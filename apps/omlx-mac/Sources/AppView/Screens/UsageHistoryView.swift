@@ -89,7 +89,7 @@ struct UsageHistoryView: View {
                         Row(label: row.modelId ?? "", sublabel: detail(row)) {
                             VStack(alignment: .trailing, spacing: 3) {
                                 Text(String(localized: "status.usage.row.tokens",
-                                            defaultValue: "\(CountFormat.compact(row.totalTokens)) Tokens",
+                                            defaultValue: "\(CountFormat.compact(row.totalTokens)) tokens",
                                             comment: "Per-model total token count; placeholder is a compact number"))
                                 Text(String(localized: "status.usage.row.requests_speed",
                                             defaultValue: "\(row.requests) requests · \(speed(row.generationTps)) tok/s",
