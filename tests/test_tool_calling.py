@@ -5663,7 +5663,14 @@ def test_qwen_untyped_parameter_conversion_boundaries(spec, raw, expected):
     assert json.loads(calls[0].function.arguments)["v"] == expected
 
 
-@pytest.mark.parametrize("spec", [{}, {"type": ["string", "null"]}])
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {},
+        {"type": ["string", "null"]},
+        {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+    ],
+)
 def test_qwen_parameter_is_not_decoded_twice(monkeypatch, spec):
     from mlx_lm.tool_parsers import qwen3_coder
 
@@ -5720,15 +5727,19 @@ def test_xml_union_parameter_preserves_declared_value_type(
     assert validate_json_schema(arguments, schema)[0]
 
 
+@pytest.mark.parametrize("parser_module", _QWEN_PARSER_MODULES)
 @pytest.mark.parametrize(
     "spec, raw, expected",
     [
         ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "123", "123"),
         ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "true", "true"),
         ({"anyOf": [{"type": "string"}, {"type": "null"}]}, '{"a": 1}', '{"a": 1}'),
+        ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "[1, 2]", "[1, 2]"),
+        ({"oneOf": [{"type": "string"}, {"type": "null"}]}, '{"a": 1}', '{"a": 1}'),
         ({"anyOf": [{"type": "string"}, {"type": "null"}]}, '"123"', "123"),
         ({"anyOf": [{"type": "string"}, {"type": "null"}]}, "null", None),
         ({"anyOf": [{"type": "string"}]}, "123", "123"),
+        ({"anyOf": [{"type": "string"}]}, "null", "null"),
         ({"oneOf": [{"type": "string"}, {"type": "object"}]}, '{"a": 1}', {"a": 1}),
         (
             {"anyOf": [{"type": "array"}, {"type": "null"}]},
@@ -5738,13 +5749,15 @@ def test_xml_union_parameter_preserves_declared_value_type(
         ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, "7", 7),
     ],
 )
-def test_xml_union_keyword_parameter_keeps_declared_alternatives(spec, raw, expected):
+def test_xml_union_keyword_parameter_keeps_declared_alternatives(
+    parser_module, spec, raw, expected
+):
     """The oneOf/anyOf alternatives bound what an XML value may decode to."""
     schema = {"type": "object", "properties": {"v": spec}, "required": ["v"]}
     tools = [{"function": {"name": "f", "parameters": schema}}]
     _, calls = parse_tool_calls(
         f"<tool_call><function=f><parameter=v>{raw}</parameter></function></tool_call>",
-        TestNakedQwenFollowup.tokenizer(),
+        _qwen_parser_tokenizer(parser_module),
         tools,
     )
     assert calls and len(calls) == 1
