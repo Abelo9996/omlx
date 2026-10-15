@@ -5041,7 +5041,12 @@ async def create_chat_completion(
             # Separate thinking from content
             raw_text = clean_special_tokens(output.text) if output.text else ""
             thinking_content, regular_content = extract_thinking(
-                raw_text, truncated=output.finish_reason == "length"
+                raw_text,
+                truncated=output.finish_reason == "length",
+                start_in_thinking=(
+                    output.finish_reason == "length"
+                    and _chat_prompt_opens_thinking(engine, messages, chat_kwargs)
+                ),
             )
             cleaned_thinking = sanitize_tool_call_markup(
                 thinking_content, engine.tokenizer
@@ -5925,6 +5930,27 @@ def _render_chat_prompt_for_thinking_detection(
     return str(prompt), None
 
 
+def _chat_prompt_opens_thinking(
+    engine: BaseEngine,
+    messages: list,
+    kwargs: dict,
+) -> bool:
+    tokenizer = getattr(engine, "tokenizer", None)
+    if tokenizer is None:
+        return False
+    try:
+        prompt, prompt_token_ids = _render_chat_prompt_for_thinking_detection(
+            engine, messages, kwargs
+        )
+        opened, _ = prompt_opens_thinking(
+            tokenizer, prompt, prompt_token_ids=prompt_token_ids
+        )
+    except Exception as exc:
+        logger.debug("Could not detect chat prompt thinking state: %s", exc)
+        return False
+    return opened
+
+
 class _ToolCallGenerationError(HTTPException):
     """Keep generation failure codes through JSON keepalive responses."""
 
@@ -6112,9 +6138,6 @@ async def stream_chat_completion(
     first_visible_time = None
     last_output = None
     accumulated_text = ""
-    # Reasoning deltas leave through several branches (live parser deltas, the
-    # parser/filter flush, withheld-envelope recovery), so the reasoning text
-    # the client receives is accumulated where each delta is emitted.
     accumulated_reasoning = ""
     has_tools = bool(kwargs.get("tools"))
     start_in_thinking = False
@@ -7604,7 +7627,12 @@ async def create_anthropic_message(
             # Separate thinking from content
             raw_text = clean_special_tokens(output.text) if output.text else ""
             thinking_content, regular_content = extract_thinking(
-                raw_text, truncated=output.finish_reason == "length"
+                raw_text,
+                truncated=output.finish_reason == "length",
+                start_in_thinking=(
+                    output.finish_reason == "length"
+                    and _chat_prompt_opens_thinking(engine, messages, chat_kwargs)
+                ),
             )
             cleaned_thinking = sanitize_tool_call_markup(
                 thinking_content, engine.tokenizer
@@ -8370,7 +8398,12 @@ async def create_response(
             # Process output text
             raw_text = clean_special_tokens(output.text) if output.text else ""
             thinking_content, regular_content = extract_thinking(
-                raw_text, truncated=output.finish_reason == "length"
+                raw_text,
+                truncated=output.finish_reason == "length",
+                start_in_thinking=(
+                    output.finish_reason == "length"
+                    and _chat_prompt_opens_thinking(engine, messages, chat_kwargs)
+                ),
             )
 
             # Parse tool calls
