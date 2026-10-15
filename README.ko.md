@@ -65,8 +65,9 @@ brew update && brew upgrade omlx
 # 백그라운드 서비스로 실행 (크래시 시 자동 재시작)
 omlx start
 
-# 선택사항: MCP (Model Context Protocol) 지원
+# 선택사항: MCP (Model Context Protocol) 지원, 설치 후 재시작해야 적용
 /opt/homebrew/opt/omlx/libexec/bin/pip install mcp
+omlx restart
 ```
 
 ### 소스에서 설치
@@ -76,7 +77,7 @@ git clone https://github.com/jundot/omlx.git
 cd omlx
 make install                # 웹 UI와 네이티브 커스텀 커널까지 editable 설치
 # 전체 Xcode가 없다면 make install-no-kernels 로 커널 없이 설치
-make mcp                    # 선택: MCP (Model Context Protocol) 지원 추가
+make mcp                    # 선택: MCP 지원 추가, `omlx serve` 재시작 후 적용
 ```
 
 macOS 15.0+ (Sequoia), Python 3.11–3.13, Apple Silicon (M1/M2/M3/M4/M5)이 필요합니다.
