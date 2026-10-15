@@ -597,6 +597,19 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         XCTAssertNotEqual(vm.summary(for: .acceleration), summary)
     }
 
+    func testLightningMtpAndDflashLockEachOther() {
+        let vm = ModelSettingsScreenVM()
+        vm.model = makeModel(id: "qwen", configModelType: "qwen3_5")
+        vm.mtpEnabled = true
+        XCTAssertNotNil(vm.dflashConflictReason)
+        XCTAssertNil(vm.mtpConflictReason)
+
+        vm.mtpEnabled = false
+        vm.dflashEnabled = true
+        XCTAssertNotNil(vm.mtpConflictReason)
+        XCTAssertNil(vm.dflashConflictReason)
+    }
+
     func testMoeExpertOffloadLocksSpeculativeDecodersUnlessMtpHeadStaysResident() {
         let vm = ModelSettingsScreenVM()
         var model = makeModel(id: "moe", configModelType: "qwen3_moe")

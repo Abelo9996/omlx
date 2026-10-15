@@ -1273,6 +1273,11 @@ final class ModelSettingsScreenVM {
                           defaultValue: "Disable MoE Expert Offload before enabling DFlash.",
                           comment: "Tooltip / sublabel shown when DFlash can't be enabled because MoE expert offload is on")
         }
+        if mtpEnabled {
+            return String(localized: "settings.dflash.conflict.mtp",
+                          defaultValue: "Disable Lightning MTP before enabling DFlash.",
+                          comment: "Tooltip / sublabel shown when DFlash can't be enabled because Lightning MTP is on")
+        }
         if vlmMtpEnabled { return Self.vlmMtpOwnsSpeculativePathReason }
         return nil
     }
