@@ -10553,6 +10553,30 @@
         }
       }
     },
+    "models.delete.confirm_message_hf_cache" : {
+      "comment" : "Body text inside the delete-model confirmation dialog when the model lives in the shared Hugging Face cache",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This model is in the shared Hugging Face cache. Other apps that use the cache will need to download it again."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Эта модель находится в общем кэше Hugging Face. Другим приложениям, использующим этот кэш, придётся загрузить её заново."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此模型位于共享的 Hugging Face 缓存中。使用该缓存的其他应用需要重新下载。"
+          }
+        }
+      }
+    },
     "models.delete.confirm_title" : {
       "comment" : "Confirmation dialog title shown before deleting a model from disk",
       "extractionState" : "manual",
@@ -10621,6 +10645,54 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "未发现模型"
+          }
+        }
+      }
+    },
+    "models.library.hf_cache.badge" : {
+      "comment" : "Badge on a library model found in the shared Hugging Face cache",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HF cache"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Кэш HF"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "HF 缓存"
+          }
+        }
+      }
+    },
+    "models.library.hf_cache.help" : {
+      "comment" : "Tooltip on the HF cache badge in the model library",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Found in the Hugging Face cache. Other apps that use this cache will need to download it again after you delete it."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Найдено в кэше Hugging Face. После удаления другим приложениям, использующим этот кэш, придётся загрузить модель заново."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "位于 Hugging Face 缓存中。删除后，使用该缓存的其他应用需要重新下载。"
           }
         }
       }

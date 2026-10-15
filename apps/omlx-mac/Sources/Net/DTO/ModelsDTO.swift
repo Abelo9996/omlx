@@ -76,6 +76,8 @@ struct ModelDTO: Codable, Equatable, Sendable, Identifiable {
     var moeOffloadAllowsMtp: Bool? = nil
     /// True when this Mac can run the Qwen INT8 activation prefill kernels.
     var qwen35OqA8Supported: Bool? = nil
+    /// "hf_cache" for models found in the shared Hugging Face Hub cache.
+    var sourceType: String? = nil
     /// True for builtin virtual entries (e.g. the MarkItDown document
     /// converter) that have no real load/unload lifecycle.
     let virtual: Bool?
@@ -91,6 +93,8 @@ extension ModelDTO {
         }
         return actualSizeFormatted ?? estimatedSizeFormatted ?? ""
     }
+
+    var isInHFCache: Bool { sourceType == "hf_cache" }
 }
 
 /// One entry of `external_engines` in GET /admin/api/models.

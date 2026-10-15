@@ -114,6 +114,11 @@
                                                     <span class="badge bg-neutral-100 text-neutral-500 border-neutral-200 truncate max-w-[120px]"
                                                           x-text="managerModelInfo(model.name)?.settings?.model_alias"></span>
                                                 </template>
+                                                <template x-if="model.source_type === 'hf_cache'">
+                                                    <span class="badge bg-neutral-100 text-neutral-500 border-neutral-200 flex-shrink-0 whitespace-nowrap"
+                                                          :title="window.t('models.manager.hf_cache_tooltip')"
+                                                          x-text="window.t('models.manager.hf_cache_badge')"></span>
+                                                </template>
                                                 <button x-data="{ copied: false }"
                                                         @click.stop="copyToClipboard(apiModelName(model.name)); copied = true; setTimeout(() => copied = false, 2000)"
                                                         class="p-1 rounded-md transition-all flex-shrink-0"
@@ -152,7 +157,8 @@
                                                 </template>
                                                 <template x-if="hfDeleteConfirm === model.name">
                                                     <div class="flex items-center gap-1.5">
-                                                        <span class="text-xs text-red-600 hidden sm:inline">{{ t('models.manager.delete_confirm') }}</span>
+                                                        <span class="text-xs text-red-600 hidden sm:inline"
+                                                              x-text="model.source_type === 'hf_cache' ? window.t('models.manager.delete_confirm_hf_cache') : window.t('models.manager.delete_confirm')"></span>
                                                         <button @click="deleteHFModel(model.name)"
                                                                 class="px-2 py-1 text-xs font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg transition-all">
                                                             {{ t('models.manager.delete_yes') }}
