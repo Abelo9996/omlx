@@ -258,17 +258,6 @@ class BatchedEngine(BaseEngine):
         except AttributeError:
             return False
 
-    @property
-    def prefix_cache_needs_snapshots(self) -> bool:
-        """True when a cached prefix restores only at a stored state snapshot.
-
-        False until the scheduler inspects the model cache on a first request.
-        """
-        try:
-            return bool(self._engine.engine.scheduler._boundary_snapshot_required)
-        except AttributeError:
-            return False
-
     def _preprocess_messages(
         self, messages: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:

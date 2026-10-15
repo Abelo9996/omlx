@@ -169,17 +169,6 @@ def test_predicate_and_score_answers():
     assert result["cached_tokens"] == 2
 
 
-def test_readouts_skip_the_cache_store_on_snapshot_models():
-    engine = _FakeChatEngine(lambda text, letters: [0.0, -1.0])
-    request = _request(
-        questions=[{"type": "predicate", "name": "p", "instructions": "Is it?"}]
-    )
-    _run(engine, request)
-    engine.prefix_cache_needs_snapshots = True
-    _run(engine, request)
-    assert [call["skip_cache_store"] for call in engine.calls] == [False, True]
-
-
 def test_many_choices_compose_group_readouts():
     count = 30
     target = np.linspace(0.0, 3.0, count)
@@ -571,3 +560,40 @@ def test_systemone_answers_skip_the_refusal_check():
     masked = _FakeChatEngine(lambda text, letters: [-np.inf] * len(letters))
     with pytest.raises(decisions.DecisionsRequestError):
         run(masked)
+
+
+@pytest.mark.parametrize("kind", ["choice", "score"])
+def test_systemone_large_questions_compose_multiple_rounds(kind):
+    count = 677
+    target = np.linspace(0.0, 3.0, count)
+    values = [f"v{i}" for i in range(count)]
+    criteria = dict.fromkeys(values) if kind == "choice" else values
+    request = _systemone(pick={"type": kind, "criteria": criteria})
+
+    def scores(text, letters):
+        indices = re.findall(r"^[A-Z]\. v(\d+)$", text, flags=re.M)
+        return [target[int(i)] for i in indices]
+
+    engine = _FakeChatEngine(scores, background=0.0)
+    result = asyncio.run(
+        decisions.decide(
+            engine, decisions.decisions_request(request), False, require_answer=False
+        )
+    )
+    answer = decisions.systemone_answers(request, result["answers"])["pick"]
+    expected = np.exp(target - target.max())
+    expected /= expected.sum()
+
+    assert list(answer["probabilities"].values()) == pytest.approx(expected, abs=1e-4)
+    if kind == "choice":
+        assert list(answer["probabilities"]) == values
+        assert answer["choice"] == values[-1]
+    else:
+        assert list(answer["legend"].values()) == values
+        assert answer["score"] == pytest.approx(
+            np.dot(np.arange(count), expected), abs=1e-4
+        )
+    assert result["cached_tokens"] == len(engine.calls)
+    assert result["input_tokens"] == sum(
+        len(call["messages"][0]["content"]) for call in engine.calls
+    )

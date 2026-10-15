@@ -222,15 +222,16 @@ async def _readout(
     return _Readout((weights / weights.sum()).tolist(), *tokens)
 
 
-async def _answer_question(
+async def _readout_options(
     chat: Callable,
     parts: list[dict],
     multimodal: bool,
     letter_ids: list[list[int]],
-    question: Any,
+    instructions: str,
+    options: list[tuple[str, str]],
     require_answer: bool = True,
-) -> tuple[dict, list[_Readout]]:
-    instructions, options = question_options(question)
+) -> tuple[list[float] | None, list[_Readout]]:
+    """Compose group probabilities until the winners fit in one readout."""
     groups = option_groups(len(options))
     readouts = [
         await _readout(
@@ -245,7 +246,7 @@ async def _answer_question(
         for group in groups
     ]
     if any(r.probs is None for r in readouts):
-        return {"type": "refusal", "name": question.name}, readouts
+        return None, readouts
     if len(readouts) == 1:
         probs = readouts[0].probs
     else:
@@ -254,14 +255,34 @@ async def _answer_question(
             options[group[int(np.argmax(p))]]
             for group, p in zip(groups, parts_probs, strict=True)
         ]
-        final = await _readout(
+        final_probs, final_readouts = await _readout_options(
             chat, parts, multimodal, letter_ids, instructions, winners, require_answer
         )
-        readouts.append(final)
-        if final.probs is None:
-            return {"type": "refusal", "name": question.name}, readouts
-        probs = compose_groups(parts_probs, final.probs)
-    return build_answer(question, probs), readouts
+        readouts.extend(final_readouts)
+        if final_probs is None:
+            return None, readouts
+        probs = compose_groups(parts_probs, final_probs)
+    return probs, readouts
+
+
+async def _answer_question(
+    chat: Callable,
+    parts: list[dict],
+    multimodal: bool,
+    letter_ids: list[list[int]],
+    question: Any,
+    require_answer: bool = True,
+) -> tuple[dict, list[_Readout]]:
+    instructions, options = question_options(question)
+    probs, readouts = await _readout_options(
+        chat, parts, multimodal, letter_ids, instructions, options, require_answer
+    )
+    answer = (
+        {"type": "refusal", "name": question.name}
+        if probs is None
+        else build_answer(question, probs)
+    )
+    return answer, readouts
 
 
 def build_answer(question: Any, probs: list[float]) -> dict:
@@ -317,12 +338,7 @@ async def decide(
     async def chat(messages, **kwargs):
         if prepare is not None:
             kwargs.update(prepare(messages))
-        # A readout ends with its own question, so a model that restores a
-        # prefix only at a stored snapshot reuses its store only on a repeat.
-        skip_store = bool(getattr(engine, "prefix_cache_needs_snapshots", False))
-        return await engine.chat(
-            messages=messages, skip_cache_store=skip_store, **kwargs
-        )
+        return await engine.chat(messages=messages, **kwargs)
 
     async def answer(question):
         return await _answer_question(
