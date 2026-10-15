@@ -577,7 +577,13 @@ class STTEngine(BaseNonStreamingEngine):
             # whisper variants) often omit preprocessor_config.json, which
             # mlx-audio / HuggingFace AutoFeatureExtractor reports with an
             # opaque OSError. Re-raise with an actionable message instead.
-            raise _wrap_stt_load_error(model_name, exc) from exc
+            wrapped = _wrap_stt_load_error(model_name, exc)
+            if wrapped is exc:
+                # Nothing to add: re-raise as is. ``raise exc from exc`` would
+                # make the exception its own __cause__, a cycle that callers
+                # walking the cause chain never leave.
+                raise
+            raise wrapped from exc
 
         # #800: Whisper models in mlx-audio load silently without a
         # HuggingFace processor when preprocessor_config.json is missing
