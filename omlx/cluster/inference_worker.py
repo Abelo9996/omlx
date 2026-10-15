@@ -45,7 +45,10 @@ from .planner import PipelineAssignment
 from .prefill_guard import build_guard
 from .progressive_loading import install_progressive_loader
 from .rdma.stage_transport import install_stage_links
-from .runtime_optimizations import install_runtime_optimizations
+from .runtime_optimizations import (
+    install_runtime_optimizations,
+    wait_for_pipeline_peers_on_host,
+)
 from .telemetry import install_server_telemetry
 
 _EVENT_PREFIX = "OMLX_CLUSTER_EVENT:"
@@ -1429,6 +1432,8 @@ def run_worker(args: argparse.Namespace) -> int:
                     batchable=provider.is_batchable,
                     pipeline_parallel=tensor_parallel_size == 1,
                 ) as optimizations,
+                # Last: the optimizations validate the stock forward's source.
+                wait_for_pipeline_peers_on_host(provider.model),
             ):
                 marker.update(
                     "ready",
