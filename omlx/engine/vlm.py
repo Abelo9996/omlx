@@ -984,12 +984,9 @@ def _gemma4_global_kv_from_per_layer_config(config: dict) -> dict[str, int]:
 
 @contextlib.contextmanager
 def _preserve_gemma4_unified_image_processor_on_load(model_dir: Path):
-    """Keep the image processor configured by Gemma4UnifiedProcessor.
+    """Keep the gemma4_unified image processor built from processor_config.json.
 
-    mlx-vlm's load() replaces it with a bare ImageProcessor() instance, losing
-    processor_config.json settings such as max_soft_tokens. Returning None
-    from the secondary loader preserves the from_pretrained processor.
-    Scope the workaround to this checkpoint and the serialized model load.
+    mlx-vlm's load() replaces it with a default one, dropping max_soft_tokens.
     """
     if _read_config_model_type(str(model_dir)) != "gemma4_unified":
         yield
@@ -998,14 +995,7 @@ def _preserve_gemma4_unified_image_processor_on_load(model_dir: Path):
     import mlx_vlm.utils as _vu
 
     original = _vu.load_image_processor
-    resolved_dir = model_dir.resolve()
-
-    def _configured_processor_only(model_path, **kwargs):
-        if Path(model_path).resolve() == resolved_dir:
-            return None
-        return original(model_path, **kwargs)
-
-    _vu.load_image_processor = _configured_processor_only
+    _vu.load_image_processor = lambda *args, **kwargs: None
     try:
         yield
     finally:
