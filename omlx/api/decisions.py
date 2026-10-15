@@ -317,7 +317,12 @@ async def decide(
     async def chat(messages, **kwargs):
         if prepare is not None:
             kwargs.update(prepare(messages))
-        return await engine.chat(messages=messages, **kwargs)
+        # A readout ends with its own question, so a model that restores a
+        # prefix only at a stored snapshot reuses its store only on a repeat.
+        skip_store = bool(getattr(engine, "prefix_cache_needs_snapshots", False))
+        return await engine.chat(
+            messages=messages, skip_cache_store=skip_store, **kwargs
+        )
 
     async def answer(question):
         return await _answer_question(

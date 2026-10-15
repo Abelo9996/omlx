@@ -2006,6 +2006,17 @@ class VLMBatchedEngine(BaseEngine):
         except AttributeError:
             return False
 
+    @property
+    def prefix_cache_needs_snapshots(self) -> bool:
+        """True when a cached prefix restores only at a stored state snapshot.
+
+        False until the scheduler inspects the model cache on a first request.
+        """
+        try:
+            return bool(self._engine.engine.scheduler._boundary_snapshot_required)
+        except AttributeError:
+            return False
+
     def _detect_diffusion_family(self) -> str | None:
         """Route canvas diffusion models to the serial generation lane."""
         from mlx_vlm.generate.diffusion import is_diffusion_model
@@ -4857,6 +4868,7 @@ class VLMBatchedEngine(BaseEngine):
             vlm_cache_key_start=vlm_cache_key_start,
             vlm_cache_key_ranges=vlm_cache_key_ranges,
             tools=tools,
+            skip_cache_store=bool(kwargs.get("skip_cache_store", False)),
             preserve_reasoning=bool(kwargs.get("preserve_reasoning", False)),
             **specprefill_kwargs,
         )

@@ -169,6 +169,17 @@ def test_predicate_and_score_answers():
     assert result["cached_tokens"] == 2
 
 
+def test_readouts_skip_the_cache_store_on_snapshot_models():
+    engine = _FakeChatEngine(lambda text, letters: [0.0, -1.0])
+    request = _request(
+        questions=[{"type": "predicate", "name": "p", "instructions": "Is it?"}]
+    )
+    _run(engine, request)
+    engine.prefix_cache_needs_snapshots = True
+    _run(engine, request)
+    assert [call["skip_cache_store"] for call in engine.calls] == [False, True]
+
+
 def test_many_choices_compose_group_readouts():
     count = 30
     target = np.linspace(0.0, 3.0, count)
