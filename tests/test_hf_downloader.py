@@ -382,7 +382,7 @@ class TestHFDownloader:
             await _wait_for_downloads(downloader)
 
             assert task.status == DownloadStatus.FAILED
-            assert "gated" in task.error.lower()
+            assert "valid HF token" in task.error
 
             await downloader.shutdown()
 
