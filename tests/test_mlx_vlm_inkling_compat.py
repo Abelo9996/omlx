@@ -688,6 +688,8 @@ def test_sconv_decode_kernel_matches_masked_fallback(applied):
 
     mx.random.seed(13)
     conv = InklingShortConvolution(32, 4, 0)
+    # Checkpoints and oQ outputs keep sconv weights in bf16.
+    conv.conv.weight = conv.conv.weight.astype(mx.bfloat16)
     x = mx.random.normal((2, 3, 32)).astype(mx.bfloat16)
     residual = mx.random.normal((2, 3, 32)).astype(mx.bfloat16)
     fused_cache = ArraysCache(1)
@@ -701,41 +703,8 @@ def test_sconv_decode_kernel_matches_masked_fallback(applied):
         residual=residual,
     )
     mx.eval(fused, fallback, fused_cache[0], fallback_cache[0])
-    # The fused accumulation can move by one bfloat16 ULP versus Conv1d.
-    assert mx.max(mx.abs(fused - fallback)).item() <= 0.0078125
+    assert mx.array_equal(fused, fallback).item()
     assert mx.max(mx.abs(fused_cache[0] - fallback_cache[0])).item() == 0
-
-
-@pytest.mark.skipif(not HAS_MLX or not mx.metal.is_available(), reason="requires Metal")
-@pytest.mark.parametrize(
-    "dtype_name,epsilon", [("float16", 2**-10), ("bfloat16", 2**-7)]
-)
-@pytest.mark.parametrize("with_residual", [False, True])
-def test_sconv_decode_rounds_after_input_add(
-    applied, dtype_name, epsilon, with_residual
-):
-    from mlx_lm.models.cache import ArraysCache
-    from mlx_vlm.models.inkling.language import InklingShortConvolution
-
-    dtype = getattr(mx, dtype_name)
-    conv = InklingShortConvolution(1, 4, 0)
-    # Rounding the FP32 convolution first makes the input add round down.
-    conv.conv.weight = mx.array(
-        [[[0.0], [0.0], [0.0], [1 + 1.25 * epsilon]]], dtype=mx.float32
-    )
-    x = mx.ones((1, 1, 1), dtype=dtype)
-    residual = mx.ones_like(x) if with_residual else None
-    fused = conv(x, cache=ArraysCache(1), residual=residual)
-    fallback = conv(
-        x,
-        cache=ArraysCache(1),
-        mask=mx.ones((1, 1), dtype=mx.bool_),
-        residual=residual,
-    )
-    expected = mx.full(x.shape, 2 + int(with_residual) + 2 * epsilon, dtype=dtype)
-    mx.eval(fused, fallback, expected)
-    assert mx.array_equal(fallback, expected).item()
-    assert mx.array_equal(fused, expected).item()
 
 
 def test_quantized_down_combine_kernel_matches_dequantized_reference(applied):

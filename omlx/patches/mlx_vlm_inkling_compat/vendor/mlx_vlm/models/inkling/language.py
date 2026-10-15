@@ -224,7 +224,8 @@ _SCONV_SRC = r"""
             float wk = (k == 0) ? w0 : (k == 1) ? w1 : (k == 2) ? w2 : w3;
             acc += wk * v;
         }
-        T inner = (T)(acc + (float)x[(b * L + i) * C + c]);
+        float conv_r = (float)((T)acc);
+        T inner = (T)(conv_r + (float)x[(b * L + i) * C + c]);
         if (HAS_RES) {
             out[(b * L + i) * C + c] =
                 (T)((float)inner + (float)res[(b * L + i) * C + c]);
