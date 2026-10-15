@@ -3022,6 +3022,14 @@
                     || ['qwen3_5', 'qwen3_6', 'qwen3_8'].some(prefix => type.startsWith(prefix));
             },
 
+            // The kernels need native INT8 tensor ops (M5-series or newer).
+            // A saved "on" keeps the toggle so it can be turned off.
+            showsQwenOqA8(model) {
+                return this.isQwenOqA8Model(model)
+                    && (model?.qwen35_oq_a8_supported === true
+                        || model?.settings?.qwen35_oq_a8_enabled === true);
+            },
+
             validateQwenOqA8Settings() {
                 if (!this.modelSettings.qwen35_oq_a8_enabled) return null;
                 // Both wrap the same MLP call, so the combination silently

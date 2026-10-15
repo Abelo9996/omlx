@@ -2264,6 +2264,10 @@ def _model_options(model_info: dict, settings) -> dict:
         "ane_prefill_mlp_fractions": [1 / 3, 0.5] if ane_backend == "k2" else [],
         "ane_prefill_shared_fractions": [0, 1 / 3, 1] if ane_backend == "k2" else [],
         "embedding_audio_supported": model_type == "embedding_gemma2",
+        # Lets the settings UIs hide the toggle the save would reject.
+        "qwen35_oq_a8_supported": (
+            _oq_a8_model_supported(model_type) and _oq_a8_kernels_available()
+        ),
     }
 
 
