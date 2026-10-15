@@ -1475,13 +1475,7 @@ class TestSTTProcessorErrors:
         asyncio.run(engine.start())
         asyncio.run(engine.stop())
 
-
     def test_unrelated_load_error_is_reraised_without_self_cause(self, monkeypatch):
-        """A load error the wrapper leaves alone must not become its own cause.
-
-        ``raise exc from exc`` makes ``exc.__cause__ is exc``; the engine pool
-        walks that chain on the event loop and would never leave it.
-        """
         import asyncio
         import sys
         import types

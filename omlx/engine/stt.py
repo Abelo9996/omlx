@@ -579,10 +579,7 @@ class STTEngine(BaseNonStreamingEngine):
             # opaque OSError. Re-raise with an actionable message instead.
             wrapped = _wrap_stt_load_error(model_name, exc)
             if wrapped is exc:
-                # Nothing to add: re-raise as is. ``raise exc from exc`` would
-                # make the exception its own __cause__, a cycle that callers
-                # walking the cause chain never leave.
-                raise
+                raise  # ``raise exc from exc`` would make exc its own __cause__.
             raise wrapped from exc
 
         # #800: Whisper models in mlx-audio load silently without a

@@ -16,6 +16,7 @@ from omlx.engine_pool import (
     EngineEntry,
     EnginePool,
     VLMBatchedEngine,
+    _is_metal_out_of_memory,
     _qwen35_cpu_share_estimated_bytes,
 )
 from omlx.exceptions import (
@@ -5527,25 +5528,16 @@ async def test_local_cluster_removal_preserves_busy_guard_and_scope(busy):
 class TestIsMetalOutOfMemory:
     """``_is_metal_out_of_memory`` walks the cause chain of a failed load."""
 
-    def test_self_caused_exception_terminates(self):
-        from omlx.engine_pool import _is_metal_out_of_memory
-
+    def test_cause_cycles_terminate(self):
         exc = ImportError("VoxtralProcessor requires the PyTorch library")
-        exc.__cause__ = exc  # what ``raise exc from exc`` produces
-
-        assert _is_metal_out_of_memory(exc) is False
-
-    def test_cycle_between_two_exceptions_terminates(self):
-        from omlx.engine_pool import _is_metal_out_of_memory
-
+        exc.__cause__ = exc
         a, b = RuntimeError("a"), RuntimeError("b")
         a.__cause__, b.__cause__ = b, a
 
+        assert _is_metal_out_of_memory(exc) is False
         assert _is_metal_out_of_memory(a) is False
 
     def test_out_of_memory_found_down_the_chain(self):
-        from omlx.engine_pool import _is_metal_out_of_memory
-
         oom = RuntimeError("[METAL] Command buffer execution failed: Insufficient Memory")
         outer = RuntimeError("load failed")
         outer.__cause__ = oom
