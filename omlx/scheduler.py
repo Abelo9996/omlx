@@ -13153,9 +13153,9 @@ class Scheduler:
                     self._cleanup_prefill_abort_request(request, temp_uid=temp_uid)
                     continue
                 except _PrefillEvictionNeeded as e:
+                    # The paused request keeps its prefix blocks (#2180).
                     self.uid_to_request_id.pop(temp_uid, None)
                     self.request_id_to_uid.pop(request.request_id, None)
-                    self._release_paged_cache_for_request(request.request_id)
                     get_prefill_tracker().remove(request.request_id)
                     self._pause_for_prefill_eviction(request, e.request)
                     break
@@ -13719,8 +13719,8 @@ class Scheduler:
         """Drop a request's paged-cache footprint on rejection paths.
 
         ``add_request`` routes through ``block_aware_cache.fetch_cache``
-        which records the request in ``_request_tables`` and increments
-        ref counts on every prefix-matched paged-cache block. The normal
+        which records a block table in the paged cache manager and
+        increments ref counts on every prefix-matched block. The normal
         completion path releases that state in ``_cleanup_finished``;
         the prefill-rejection paths in ``_advance_chunked_prefills`` /
         ``_schedule_waiting`` must do the same or rejected requests

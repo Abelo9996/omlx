@@ -3120,6 +3120,12 @@ class BlockAwarePrefixCache(CacheManager):
         if entry:
             self.paged_cache.delete_block_table(request_id)
             logger.debug(f"Released cache for {request_id}")
+            return
+        # fetch_cache records a hit only in the paged manager.
+        # Return its references and keep the blocks cached for a retry.
+        table = self.paged_cache.detach_block_table(request_id)
+        if table is not None:
+            self.paged_cache.release_for_eviction(table.block_ids)
 
     def clear_request_entry(self, request_id: str) -> None:
         """
