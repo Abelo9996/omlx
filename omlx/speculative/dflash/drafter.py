@@ -319,10 +319,8 @@ class DFlashDrafter:
             return
         context = history[0] if len(history) == 1 else mx.concatenate(history, axis=1)
         if int(context.shape[1]) > self.ring_slots:
-            # A tail view keeps the discarded history's buffer alive.
             context = mx.contiguous(context[:, -self.ring_slots :])
-        # Realize per-row copies too: otherwise an idle snapshot can pin the
-        # whole drafting batch until its next prefix hit.
+        # A lazy view would keep the full history or batch buffer alive.
         mx.async_eval(context)
         self._kept[request_id] = _KeptContext(
             tokens=list(tokens[:end]),
