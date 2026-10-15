@@ -116,15 +116,17 @@ def test_start_tags_close_before_the_next_element():
 
 SWITCH = re.compile(r"<button\b[^>]*\bw-11 h-6\b[^>]*>", re.DOTALL)
 DTYPE = re.compile(r"<button\b[^>]*\boqDtype\b[^>]*>", re.DOTALL)
-MODELS = ROOT / "omlx_web/templates/dashboard/_models.html"
 
 
-def test_quantize_controls_expose_their_state():
-    # The quantize panel paints the dtype and the switches in colour only, so a
+def test_toggle_controls_expose_their_state():
+    # Switches and the dtype buttons paint their state in colour only, so a
     # screen reader hears "button" whatever their state.
-    source = MODELS.read_text(encoding="utf-8")
-    unexposed = [tag for tag in SWITCH.findall(source) if "aria-checked" not in tag]
-    unexposed += [tag for tag in DTYPE.findall(source) if "aria-pressed" not in tag]
-    assert not unexposed, "state is not exposed for:\n" + "\n".join(
-        " ".join(tag.split()) for tag in unexposed
-    )
+    unexposed = []
+    for page in PAGES:
+        source = page.read_text(encoding="utf-8")
+        tags = [tag for tag in SWITCH.findall(source) if "aria-checked" not in tag]
+        tags += [tag for tag in DTYPE.findall(source) if "aria-pressed" not in tag]
+        unexposed += [
+            f"{page.relative_to(ROOT)} {' '.join(tag.split())}" for tag in tags
+        ]
+    assert not unexposed, "state is not exposed for:\n" + "\n".join(unexposed)
