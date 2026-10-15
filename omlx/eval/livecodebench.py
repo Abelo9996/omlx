@@ -76,9 +76,7 @@ def _set_resource_limits():
         pass
 
 
-# Functional problems are graded call-based: one JSON-encoded argument per
-# input line, return value against the expected JSON output. The starter-code
-# signature is annotated with `List`, so the typing names must be importable.
+# Starter signatures use typing names such as `List`.
 _FUNCTIONAL_PREAMBLE = "from typing import *\nimport json\n"
 
 
@@ -92,15 +90,13 @@ def _functional_script(code: str, item: dict) -> str:
     cases = json.dumps(list(zip(item["inputs"][:3], item["outputs"][:3])))
     return (
         f"{_FUNCTIONAL_PREAMBLE}\n{code}\n\n"
-        "if __name__ == '__main__':\n"
-        "    _solution = Solution()\n"
-        f"    for _i, (_raw, _expected) in enumerate({cases}):\n"
-        "        _args = [json.loads(_line) for _line in _raw.split('\\n')]\n"
-        f"        _got = _solution.{_entry_point(item['starter_code'])}(*_args)\n"
-        "        if isinstance(_got, tuple):\n"
-        "            _got = list(_got)\n"
-        "        assert _got == json.loads(_expected), "
-        "f'case {_i}: expected {_expected}, got {_got!r}'\n"
+        "_solution = Solution()\n"
+        f"for _raw, _expected in {cases}:\n"
+        "    _args = [json.loads(_line) for _line in _raw.split('\\n')]\n"
+        f"    _got = _solution.{_entry_point(item['starter_code'])}(*_args)\n"
+        "    if isinstance(_got, tuple):\n"
+        "        _got = list(_got)\n"
+        "    assert _got == json.loads(_expected)\n"
     )
 
 
@@ -179,13 +175,6 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
             if not inputs or not outputs:
                 continue
 
-            # Every public test case of a bundled question shares one type.
-            testtype = (
-                "functional"
-                if all(tc.get("testtype") == "functional" for tc in test_cases)
-                else "stdin"
-            )
-
             normalized.append({
                 "id": item.get("question_id", str(i)),
                 "title": item.get("question_title", f"Problem {i}"),
@@ -194,7 +183,7 @@ class LiveCodeBenchBenchmark(BaseBenchmark):
                 "outputs": outputs,
                 "difficulty": item.get("difficulty", ""),
                 "starter_code": item.get("starter_code", ""),
-                "testtype": testtype,
+                "testtype": test_cases[0].get("testtype", "stdin"),
             })
 
         logger.info(f"LiveCodeBench: loaded {len(normalized)} problems")
