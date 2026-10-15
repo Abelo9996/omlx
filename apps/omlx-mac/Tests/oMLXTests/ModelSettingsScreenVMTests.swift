@@ -597,6 +597,30 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         XCTAssertNotEqual(vm.summary(for: .acceleration), summary)
     }
 
+    func testRejectedAutoSaveRestoresTheStoredValues() async {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RejectingSettingsURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let client = OMLXClient(host: "127.0.0.1", port: 18160, session: session)
+        let vm = ModelSettingsScreenVM()
+        vm.autoSaveDelay = .zero
+        await vm.load(modelID: "m", client: client)
+        XCTAssertNil(vm.lastError)
+        XCTAssertTrue(vm.mtpEnabled)
+
+        let dflash = vm.bindProfile(Binding(
+            get: { vm.dflashEnabled },
+            set: { vm.dflashEnabled = $0 }
+        ))
+        dflash.wrappedValue = true
+        await vm.waitForAutoSave()
+
+        XCTAssertFalse(vm.dflashEnabled)
+        XCTAssertFalse(vm.profileDirty)
+        XCTAssertTrue(vm.lastError?.contains("cannot both be enabled") == true)
+    }
+
     func testLightningMtpAndDflashLockEachOther() {
         let vm = ModelSettingsScreenVM()
         vm.model = makeModel(id: "qwen", configModelType: "qwen3_5")
@@ -822,4 +846,47 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         model.anePrefillSharedFractions = [0, 1.0 / 3.0, 1]
         return model
     }
+}
+
+/// Serves one model with Lightning MTP on and rejects every settings write
+/// the way the server rejects an MTP + DFlash pair.
+private final class RejectingSettingsURLProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let path = request.url?.path ?? ""
+            var status = 200
+            let body: Data
+            switch path {
+            case "/admin/api/models":
+                body = Data(#"{"models":[{"id":"m","loaded":false,"is_loading":false,"estimated_size":0,"config_model_type":"qwen3_5","settings":{"mtp_enabled":true}}]}"#.utf8)
+            case "/admin/api/models/m/profiles":
+                body = Data(#"{"profiles":[]}"#.utf8)
+            case "/admin/api/profile-templates":
+                body = Data(#"{"templates":[]}"#.utf8)
+            case "/admin/api/global-settings":
+                body = try Data(contentsOf: URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("Fixtures/global-settings.json"))
+            case "/admin/api/models/m/settings":
+                status = 400
+                body = Data(#"{"detail":"MTP and DFlash cannot both be enabled; choose one speculative-decoding path."}"#.utf8)
+            default:
+                status = 404
+                body = Data()
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: status,
+                                           httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: body)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }

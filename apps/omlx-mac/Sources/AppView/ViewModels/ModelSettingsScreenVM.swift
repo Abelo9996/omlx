@@ -1013,11 +1013,14 @@ final class ModelSettingsScreenVM {
         case .vlmMtpDraftBlockSize:    patch.vlmMtpDraftBlockSize = Int(vlmMtpDraftBlockSize)
         }
         if thinkingForced { patch.enableThinking = .some(nil) }
+        let targetModelID = modelID
         do {
-            _ = try await client.updateModelSettings(id: modelID, patch: patch)
+            _ = try await client.updateModelSettings(id: targetModelID, patch: patch)
             self.lastError = nil
         } catch {
-            self.lastError = error.omlxDescription
+            // Keep pending profile edits; their auto-save reloads afterwards.
+            await reportFailedSave(error, modelID: targetModelID, client: client,
+                                   preservingEdits: true)
         }
     }
 
@@ -1925,8 +1928,21 @@ final class ModelSettingsScreenVM {
             profileDirty = currentSettingsDict() != saved
             await load(modelID: targetModelID, client: client, preservingEdits: true)
         } catch {
-            lastError = error.omlxDescription
+            await reportFailedSave(error, modelID: targetModelID, client: client,
+                                   preservingEdits: false)
         }
+    }
+
+    /// The server validates the whole write before storing any of it, so a
+    /// rejected save leaves the stored values unchanged. Reload them so the
+    /// controls do not keep showing the rejected values.
+    private func reportFailedSave(_ error: Error, modelID targetModelID: String,
+                                  client: OMLXClient, preservingEdits: Bool) async {
+        let message = error.omlxDescription
+        if modelID == targetModelID, case .http? = error as? OMLXClientError {
+            await load(modelID: targetModelID, client: client, preservingEdits: preservingEdits)
+        }
+        lastError = message
     }
 
     /// PUT body for `saveWorkingToModel`. A profile omits empty fields,
