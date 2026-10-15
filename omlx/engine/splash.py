@@ -111,11 +111,6 @@ _REQUIRED_MODEL_FILES = ("config.json", "tokenizer.json", "tokenizer_config.json
 _DRAFT_LOAD_RATIO = 1 / 3
 # Scratch Splash plans beside the weights: prefill, decode and lane states.
 _RUNTIME_RESERVE_BYTES = 3 * 1024**3
-# Vision scratch for one image at Splash's default --max-image-pixels; the
-# vision tower's weights are already in the checkpoint's safetensors. Measured
-# with Splash 1.3.1 on Qwen3.8-27B: under the same --max-memory, loading the
-# vision tower planned 28,672 fewer context tokens (896 int8 KV pages, 0.89 GiB).
-_VISION_RESERVE_BYTES = int(0.9 * 1024**3)
 # Content parts Splash takes beside text: images (it also reads PDFs, which
 # oMLX's request models do not carry).
 _SPLASH_MEDIA_TYPES = frozenset({"image_url", "input_image", "image"})
@@ -413,20 +408,18 @@ def splash_memory_estimate(
 ) -> int:
     """Memory for Splash to hold ``max_context`` tokens of context.
 
-    The weights, the draft as Splash loads it, scratch (plus vision scratch
-    for a checkpoint with a vision tower), and KV pages for ``max_context``
-    tokens. Splash's context limit is its whole KV pool, and
+    The weights, the draft as Splash loads it, scratch, and KV pages for
+    ``max_context`` tokens. The weights include the vision tower Splash loads
+    for image input. Splash's context limit is its whole KV pool, and
     concurrent requests that outgrow the pool wait for pages, so one window
     is enough. Splash spends a larger budget on its prefix cache.
     """
     path = Path(model_path)
-    config = _read_config(path) or {}
-    text = config.get("text_config") or {}
+    text = (_read_config(path) or {}).get("text_config") or {}
     context = min(max_context or SPLASH_MAX_CONTEXT, SPLASH_MAX_CONTEXT)
     kv = _kv_bytes_per_token(text, kv_format) * context
     draft = int(_safetensors_bytes(draft_path) * _DRAFT_LOAD_RATIO)
-    vision = _VISION_RESERVE_BYTES if splash_has_vision(config) else 0
-    return _safetensors_bytes(path) + draft + _RUNTIME_RESERVE_BYTES + vision + kv
+    return _safetensors_bytes(path) + draft + _RUNTIME_RESERVE_BYTES + kv
 
 
 # -- model staging -------------------------------------------------------------

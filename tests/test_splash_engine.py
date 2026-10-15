@@ -30,7 +30,11 @@ from omlx.admin.benchmark import (
     run_benchmark,
 )
 from omlx.admin.external_api import StreamStats
-from omlx.api.openai_models import ResponseFormat, ResponseFormatJsonSchema
+from omlx.api.openai_models import (
+    ChatCompletionRequest,
+    ResponseFormat,
+    ResponseFormatJsonSchema,
+)
 from omlx.api.responses_utils import ResponseStore
 from omlx.engine import splash as splash_mod
 from omlx.engine.base import GenerationOutput
@@ -1519,8 +1523,6 @@ class TestVision:
         assert srv._engine_accepts_images(engine)
 
     def test_chat_request_keeps_image_parts_for_splash(self, tmp_path, monkeypatch):
-        from omlx.api.openai_models import ChatCompletionRequest
-
         monkeypatch.setattr(
             srv, "get_engine_pool", lambda: SimpleNamespace(get_entry=lambda _: None)
         )
@@ -1589,20 +1591,6 @@ class TestVision:
         }
 
         assert engine.count_chat_tokens([message]) == len("hello")
-
-    def test_memory_estimate_reserves_vision_scratch(self, tmp_path):
-        text_only = _write_model(tmp_path / "text")
-        vision = _write_model(tmp_path / "vision")
-        config = json.loads((vision / "config.json").read_text())
-        (vision / "config.json").write_text(
-            json.dumps({**config, "vision_config": VISION_CONFIG})
-        )
-        draft = _write_draft(tmp_path / "draft")
-
-        delta = splash_memory_estimate(
-            vision, draft, 65536, "int8"
-        ) - splash_memory_estimate(text_only, draft, 65536, "int8")
-        assert delta == splash_mod._VISION_RESERVE_BYTES
 
     async def test_responses_input_image_reaches_splash_as_image_url(self, tmp_path):
         seen = {}

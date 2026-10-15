@@ -65,5 +65,5 @@ The admin benchmark runs on Splash models through Splash's chat API, with thinki
 ## Limits
 
 - Splash serves chat requests only. `/v1/completions` returns HTTP 400.
-- Image input works for checkpoints with a vision tower (`vision_config` in `config.json`): oMLX passes image parts through to Splash, in chat completions, the Responses API and the Anthropic Messages API, and reserves vision scratch in the memory budget. Checkpoints without one start with `--language-only`. Video and audio parts are refused with HTTP 400.
+- Image input works for checkpoints with a vision tower (`vision_config` in `config.json`): oMLX passes image parts through to Splash, in chat completions, the Responses API and the Anthropic Messages API. Checkpoints without one start with `--language-only`. Splash does not read video or audio input.
 - The other acceleration settings (MTP, DFlash, TurboQuant, ANE prefill, and so on) configure oMLX's MLX engines and do not apply while Splash serves the model.
