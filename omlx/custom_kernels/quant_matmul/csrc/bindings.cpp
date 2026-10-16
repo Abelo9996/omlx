@@ -118,15 +118,6 @@ NB_MODULE(_ext, m) {
       "variant"_a = 0,
       "stream"_a = nb::none());
   m.def(
-      "mxfp4_gather_qmm_expert",
-      &omlx::quant_matmul::mxfp4_gather_qmm_expert,
-      "x"_a,
-      "weight"_a,
-      "scales"_a,
-      "indices"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
       "is_nax_available",
       &omlx::quant_matmul::is_nax_available);
   m.def(

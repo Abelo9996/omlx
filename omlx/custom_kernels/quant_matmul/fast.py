@@ -615,27 +615,6 @@ def mxfp4_gather_qmm_pair_concat_blocks(
     )
 
 
-def mxfp4_gather_qmm_expert(
-    x: mx.array,
-    weight: mx.array,
-    scales: mx.array,
-    indices: mx.array,
-    variant: int = 0,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is not None and hasattr(_ext, "mxfp4_gather_qmm_expert"):
-        return _ext.mxfp4_gather_qmm_expert(
-            x,
-            weight,
-            scales,
-            indices,
-            variant,
-            **_native_stream_kwargs(stream),
-        )
-    raise RuntimeError("mxfp4_gather_qmm_expert native kernel is unavailable")
-
-
 def affine_gather_qmm_blocks(
     x: mx.array,
     weight: mx.array,

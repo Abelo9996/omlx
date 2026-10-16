@@ -66,12 +66,4 @@ mx::array affine_gather_qmm_pair_concat_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array mxfp4_gather_qmm_expert(
-    const mx::array& x,
-    const mx::array& weight,
-    const mx::array& scales,
-    const mx::array& indices,
-    int variant = 0,
-    mx::StreamOrDevice s = {});
-
 } // namespace omlx::quant_matmul
