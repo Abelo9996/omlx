@@ -488,7 +488,9 @@ def test_muse_spark_nvfp4_experts_match_dequantized_weights(spark_applied):
 
     mx.random.seed(0)
     dense = Model(ModelArgs(**_spark_text_kwargs()))
-    quant = Model(ModelArgs(**_spark_text_kwargs()))
+    quant = Model(
+        ModelArgs(**_spark_text_kwargs(), quantization_config=_spark_modelopt_config())
+    )
 
     nvfp4, dequantized = _spark_nvfp4_experts(4, 32, 32)
     prefix = f"model.language_model.layers.{_SPARK_NVFP4_LAYER}.mlp.experts."
@@ -866,13 +868,15 @@ def test_muse_spark_vlm_loads_upstream_layout(spark_applied, tmp_path):
     assert mx.array_equal(expected, actual).item()
 
 
-def test_muse_spark_oq_writes_upstream_layout(spark_applied, tmp_path):
+def _spark_oq_source(path, nvfp4=False):
+    """A small HF-named Muse Spark checkpoint for oQ.
+
+    With ``nvfp4`` the experts of layer 1 are ModelOpt NVFP4, as in the
+    release. Returns those NVFP4 tensors.
+    """
     import json
+    import struct
 
-    import mlx.nn as nn
-    from mlx_lm.utils import load_model
-
-    from omlx.oq import quantize_oq_streaming
     from omlx.patches.muse_spark.muse_spark_model import Model, ModelArgs
 
     text = _spark_text_kwargs(
@@ -886,11 +890,44 @@ def test_muse_spark_oq_writes_upstream_layout(spark_applied, tmp_path):
     mx.random.seed(0)
     model = Model(ModelArgs.from_dict(config))
     _spark_randomize(model)
-    src = tmp_path / "src"
-    src.mkdir()
     weights = {k: v.astype(mx.bfloat16) for k, v in _spark_hf_weights(model).items()}
-    mx.save_safetensors(str(src / "model.safetensors"), weights)
-    (src / "config.json").write_text(json.dumps(config))
+    experts = {}
+    if nvfp4:
+        config["quantization_config"] = _spark_modelopt_config()
+        prefix = f"model.language_model.layers.{_SPARK_NVFP4_LAYER}.mlp.experts."
+        for name in ("gate_up_proj", "down_proj"):
+            weights.pop(prefix + name)
+        nvfp4_tensors = _spark_nvfp4_experts(4, 64, 64)[0]
+        experts = {prefix + k: v for k, v in nvfp4_tensors.items()}
+        weights.update(experts)
+    path.mkdir()
+    file = path / "model.safetensors"
+    mx.save_safetensors(str(file), weights)
+    if experts:
+        # ModelOpt stores the block scales as F8_E4M3, which MLX cannot write.
+        raw = file.read_bytes()
+        size = struct.unpack("<Q", raw[:8])[0]
+        header = json.loads(raw[8 : 8 + size])
+        for key in experts:
+            if key.endswith("_weight_scale"):
+                header[key]["dtype"] = "F8_E4M3"
+        packed = json.dumps(header).encode()
+        packed += b" " * (-len(packed) % 8)
+        file.write_bytes(struct.pack("<Q", len(packed)) + packed + raw[8 + size :])
+    (path / "config.json").write_text(json.dumps(config))
+    return experts
+
+
+def test_muse_spark_oq_writes_upstream_layout(spark_applied, tmp_path):
+    import json
+
+    import mlx.nn as nn
+    from mlx_lm.utils import load_model
+
+    from omlx.oq import quantize_oq_streaming
+
+    src = tmp_path / "src"
+    _spark_oq_source(src)
 
     out = tmp_path / "oq"
     quantize_oq_streaming(
@@ -912,6 +949,34 @@ def test_muse_spark_oq_writes_upstream_layout(spark_applied, tmp_path):
         bits = {p.bits for p in (attn.q_proj, attn.k_proj, attn.v_proj, attn.gate_proj)}
         assert len(bits) == 1
     assert isinstance(loaded.lm_head, nn.Linear)
+    logits = loaded(mx.array([[1, 5, 9, 2, 33]]))
+    assert bool(mx.isfinite(logits).all().item())
+
+
+def test_muse_spark_oq_passes_nvfp4_experts_through(spark_applied, tmp_path):
+    from mlx_lm.utils import load_model
+
+    from omlx.oq import quantize_oq_streaming
+    from omlx.patches.muse_spark.muse_spark_model import sanitize_experts
+
+    src = tmp_path / "src"
+    experts = _spark_oq_source(src, nvfp4=True)
+    out = tmp_path / "oq"
+    quantize_oq_streaming(
+        str(src), str(out), 4, sensitivity_map_override={0: 1.0, 1: 0.5}
+    )
+
+    # Without a vision tower the output loads on the mlx-lm path, which does
+    # not see the per-module map under the upstream names.
+    loaded, _ = load_model(out)
+    switch = loaded.model.layers[_SPARK_NVFP4_LAYER].mlp.switch_mlp
+    expected = sanitize_experts(experts)
+    prefix = f"model.language_model.layers.{_SPARK_NVFP4_LAYER}.mlp.switch_mlp."
+    for name in ("gate_proj", "up_proj", "down_proj"):
+        proj = getattr(switch, name)
+        assert proj.mode == "nvfp4"
+        for param in ("weight", "scales", "global_scale"):
+            assert mx.array_equal(proj[param], expected[f"{prefix}{name}.{param}"])
     logits = loaded(mx.array([[1, 5, 9, 2, 33]]))
     assert bool(mx.isfinite(logits).all().item())
 

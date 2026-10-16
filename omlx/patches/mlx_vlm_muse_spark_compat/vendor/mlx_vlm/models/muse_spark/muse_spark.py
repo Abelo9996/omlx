@@ -6,6 +6,7 @@ import mlx.nn as nn
 from omlx.patches.muse_spark.muse_spark_model import (
     cast_predicate,
     install_global_scales,
+    is_modelopt_export,
     sanitize_experts,
     use_upstream_values,
 )
@@ -132,7 +133,9 @@ class Model(nn.Module):
             use_upstream_values(self)
         else:
             sanitized = sanitize_experts(sanitized)
-        install_global_scales(self, sanitized)
+        install_global_scales(
+            self, sanitized, is_modelopt_export(self.config.quantization_config)
+        )
         return sanitized
 
     def quantization_path_aliases(self, path):

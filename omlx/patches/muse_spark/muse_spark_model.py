@@ -145,10 +145,14 @@ class ModelArgs(BaseModelArgs):
             self.mlp_layer_types = ["sparse"] * self.num_hidden_layers
 
 
+def is_modelopt_export(quantization_config: dict | None) -> bool:
+    return (quantization_config or {}).get("quant_method") == "modelopt"
+
+
 def modelopt_nvfp4_expert_layers(args: ModelArgs) -> list[int]:
     """Return the layers whose routed experts a ModelOpt export packed as NVFP4."""
     config = args.quantization_config or {}
-    if config.get("quant_method") != "modelopt":
+    if not is_modelopt_export(config):
         return []
     if config.get("quant_algo") != "NVFP4":
         raise ValueError(
@@ -392,7 +396,15 @@ class ScaledSwitchLinear(SwitchLinear):
     NVFP4 units and still need the tensor scale.
     """
 
-    def to_quantized(self, group_size: int = 64, bits: int = 4, mode: str = "affine"):
+    def to_quantized(
+        self,
+        group_size: int = 64,
+        bits: int = 4,
+        mode: str = "affine",
+        global_scale: bool = False,
+    ):
+        # The upstream layout marks scaled experts with global_scale in the
+        # quantization map; the scale itself is already this layer's.
         ql = super().to_quantized(group_size, bits, mode)
         if "global_scale" in self:
             ql.global_scale = self.global_scale
@@ -400,10 +412,9 @@ class ScaledSwitchLinear(SwitchLinear):
 
 
 class NVFP4SwitchLinear(QuantizedSwitchLinear):
-    """NVFP4 experts that ``sanitize`` already turned into their final layer.
+    """NVFP4 experts of a ModelOpt export, already in their final layer.
 
-    oQ outputs also list these experts in their quantization map, so the
-    loader asks to quantize them again.
+    ``to_quantized`` returns the layer itself, since it is quantized already.
     """
 
     def to_quantized(self, *args, **kwargs):
@@ -639,13 +650,13 @@ def sanitize_experts(weights: dict) -> dict:
     return out
 
 
-def install_global_scales(model: nn.Module, weights: dict):
+def install_global_scales(model: nn.Module, weights: dict, modelopt: bool):
     """Give ``global_scale`` to the switch projections that have one in ``weights``.
 
-    Packed NVFP4 experts (scales without affine biases) become nvfp4 layers
-    here: a ModelOpt export has no MLX quantization config for them. The
-    loader quantizes the other layers, and ``ScaledSwitchLinear`` keeps the
-    scale through that.
+    A ModelOpt export has no MLX quantization config for its packed NVFP4
+    experts (scales without affine biases), so with ``modelopt`` they become
+    nvfp4 layers here. Otherwise the loader quantizes every layer by config,
+    and ``ScaledSwitchLinear`` keeps the scale through that.
     """
     if not isinstance(model, nn.Module):
         # oQ runs sanitize on a stand-in object only to map the names.
@@ -659,7 +670,8 @@ def install_global_scales(model: nn.Module, weights: dict):
         path = key[: -len(".global_scale")]
         proj = modules[path]
         if (
-            isinstance(proj, SwitchLinear)
+            modelopt
+            and isinstance(proj, SwitchLinear)
             and f"{path}.scales" in weights
             and f"{path}.biases" not in weights
         ):
@@ -771,7 +783,9 @@ class Model(nn.Module):
             use_upstream_values(self)
         else:
             out = sanitize_experts(out)
-        install_global_scales(self, out)
+        install_global_scales(
+            self, out, is_modelopt_export(self.args.quantization_config)
+        )
         return out
 
     def shard(self, group: mx.distributed.Group | None = None):
