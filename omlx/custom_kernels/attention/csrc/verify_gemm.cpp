@@ -1,4 +1,5 @@
-#include "dspark_gemm.h"
+#include "verify_gemm.h"
+#include "omlx/binary_dir.h"
 
 #include <algorithm>
 #include <dlfcn.h>
@@ -11,23 +12,12 @@
 #include "mlx/backend/metal/utils.h"
 #include "mlx/ops.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
 namespace {
 
 using namespace mlx::core;
 using namespace mlx::steel;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to locate DSpark kernel binary.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 int next_power_of_two(int value) {
   int result = 1;
@@ -37,9 +27,9 @@ int next_power_of_two(int value) {
   return result;
 }
 
-class DSparkRowwiseGemmPrimitive : public Primitive {
+class RowwiseGemmPrimitive : public Primitive {
  public:
-  DSparkRowwiseGemmPrimitive(Stream stream, bool transpose_rhs)
+  RowwiseGemmPrimitive(Stream stream, bool transpose_rhs)
       : Primitive(stream), transpose_rhs_(transpose_rhs) {}
 
   void eval_cpu(
@@ -73,7 +63,7 @@ class DSparkRowwiseGemmPrimitive : public Primitive {
     const int ldb = transpose_rhs_ ? K : N;
 
     output.set_data(allocator::malloc(output.nbytes()));
-    auto library = device.get_library("omlx_glm_kernels", current_binary_dir());
+    auto library = device.get_library("omlx_attention_kernels", binary_dir());
 
     // Match the split-K choice made by an independent MLX M=1 matmul. The
     // row dimension is encoded only in grid.z, so every verify row retains
@@ -218,11 +208,11 @@ class DSparkRowwiseGemmPrimitive : public Primitive {
         MTL::Size(grid_n, grid_m, rows), MTL::Size(32, wn, wm));
   }
 
-  DEFINE_NAME(OMLXDSparkRowwiseGemm)
+  DEFINE_NAME(OMLXRowwiseGemm)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     return transpose_rhs_ ==
-        static_cast<const DSparkRowwiseGemmPrimitive&>(other).transpose_rhs_;
+        static_cast<const RowwiseGemmPrimitive&>(other).transpose_rhs_;
   }
   auto state() const {
     return std::make_tuple(nullptr, transpose_rhs_);
@@ -232,9 +222,9 @@ class DSparkRowwiseGemmPrimitive : public Primitive {
   bool transpose_rhs_;
 };
 
-class DSparkRingGemmPrimitive : public Primitive {
+class RingGemmPrimitive : public Primitive {
  public:
-  DSparkRingGemmPrimitive(Stream stream, bool transpose_rhs)
+  RingGemmPrimitive(Stream stream, bool transpose_rhs)
       : Primitive(stream), transpose_rhs_(transpose_rhs) {}
 
   void eval_cpu(
@@ -262,7 +252,7 @@ class DSparkRingGemmPrimitive : public Primitive {
     const int source_ld = source.shape(1);
 
     output.set_data(allocator::malloc(output.nbytes()));
-    auto library = device.get_library("omlx_glm_kernels", current_binary_dir());
+    auto library = device.get_library("omlx_attention_kernels", binary_dir());
     auto& encoder = metal::get_command_encoder(stream);
 
     if (transpose_rhs_) {
@@ -374,11 +364,11 @@ class DSparkRingGemmPrimitive : public Primitive {
         MTL::Size(tiles_n, tiles_m, rows), MTL::Size(32, wn, wm));
   }
 
-  DEFINE_NAME(OMLXDSparkRingGemm)
+  DEFINE_NAME(OMLXRingGemm)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     return transpose_rhs_ ==
-        static_cast<const DSparkRingGemmPrimitive&>(other).transpose_rhs_;
+        static_cast<const RingGemmPrimitive&>(other).transpose_rhs_;
   }
   auto state() const {
     return std::make_tuple(nullptr, transpose_rhs_);
@@ -390,7 +380,7 @@ class DSparkRingGemmPrimitive : public Primitive {
 
 } // namespace
 
-mx::array dspark_rowwise_gemm(
+mx::array rowwise_gemm(
     const mx::array& lhs,
     const mx::array& rhs,
     bool transpose_rhs,
@@ -417,11 +407,11 @@ mx::array dspark_rowwise_gemm(
   return array(
       std::move(shape),
       lhs.dtype(),
-      std::make_shared<DSparkRowwiseGemmPrimitive>(stream, transpose_rhs),
+      std::make_shared<RowwiseGemmPrimitive>(stream, transpose_rhs),
       std::vector<array>{lhs, rhs});
 }
 
-mx::array dspark_ring_gemm(
+mx::array ring_gemm(
     const mx::array& lhs,
     const mx::array& source,
     const mx::array& indices,
@@ -450,8 +440,8 @@ mx::array dspark_ring_gemm(
   return array(
       std::move(shape),
       lhs.dtype(),
-      std::make_shared<DSparkRingGemmPrimitive>(stream, transpose_rhs),
+      std::make_shared<RingGemmPrimitive>(stream, transpose_rhs),
       std::vector<array>{lhs, source, indices});
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

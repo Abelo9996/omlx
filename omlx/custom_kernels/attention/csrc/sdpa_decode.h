@@ -9,7 +9,7 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::decode_fast_kernels {
+namespace omlx::attention {
 
 // True when the decode SDPA kernels apply: Metal stream, 4-D fp32/fp16/bf16
 // q/k/v, query length <= 8, supported head dims, GQA fan-out within limits.
@@ -32,4 +32,4 @@ mx::array sdpa_decode(
     const std::optional<mx::array>& sinks = std::nullopt,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::decode_fast_kernels
+} // namespace omlx::attention

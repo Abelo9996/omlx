@@ -1,8 +1,8 @@
-// NAX (neural accelerator) variants of the Qwen3.5/3.6 affine qmm_t kernels.
+// NAX (neural accelerator) variants of the affine qmm_t kernels.
 //
-// Same buffer ABI as qwen35_qmm.metal, but the inner loop runs on the M5
+// Same buffer ABI as affine_qmm.metal, but the inner loop runs on the M5
 // tensor units through MLX's qmm_t_nax_tgp_impl (quantized_nax.h). This file
-// is compiled into a separate metallib (omlx_qwen35_prefill_kernels_nax) with
+// is compiled into a separate metallib (omlx_quant_matmul_kernels_nax) with
 // -mmacosx-version-min=26.2 so the classic metallib keeps its deployment
 // target; the C++ op only loads it when the runtime reports NAX support.
 
@@ -71,7 +71,7 @@
       wm,                                                                     \
       wn)
 
-// Tile variants mirror qwen_q_affine_nax_variant() in qwen35_prefill.cpp.
+// Tile variants mirror affine_qmm_nax_variant() in affine_qmm.cpp.
 // Variant 0 matches the tile MLX ships for affine_qmm_t_nax (64/64/64, 2x2);
 // the rest are the tuning surface for the M5 sweep. BK is capped at the
 // group size (64): QuantizedBlockLoader requires group_size >= columns.

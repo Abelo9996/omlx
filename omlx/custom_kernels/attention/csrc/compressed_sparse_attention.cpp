@@ -1,4 +1,5 @@
-#include "deepseek_v4_sparse_attention.h"
+#include "compressed_sparse_attention.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <filesystem>
@@ -6,28 +7,17 @@
 
 #include "mlx/backend/common/utils.h"
 #include "mlx/backend/metal/device.h"
-#include "mlx/backend/metal/kernels/steel/attn/params.h"
+#include "attn_params.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
 namespace {
 
 using namespace mlx::core;
 using namespace mlx::steel;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_glm_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 inline int64_t bcast_stride(const array& a, int axis) {
   return a.shape(axis) == 1 ? 0 : a.strides(axis);
@@ -37,9 +27,9 @@ bool last_dim_contiguous(const array& arr) {
   return arr.strides(-1) == 1;
 }
 
-class DeepseekV4SparseAttentionPrimitive : public Primitive {
+class CompressedSparseAttentionPrimitive : public Primitive {
  public:
-  DeepseekV4SparseAttentionPrimitive(
+  CompressedSparseAttentionPrimitive(
       Stream stream,
       float scale,
       int q_offset,
@@ -103,7 +93,7 @@ class DeepseekV4SparseAttentionPrimitive : public Primitive {
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
     throw std::runtime_error(
-        "DeepseekV4SparseAttentionPrimitive has no CPU path.");
+        "CompressedSparseAttentionPrimitive has no CPU path.");
   }
 
   void eval_gpu(
@@ -164,7 +154,7 @@ class DeepseekV4SparseAttentionPrimitive : public Primitive {
         "_wm",
         wm);
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_attention_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -208,11 +198,11 @@ class DeepseekV4SparseAttentionPrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(OMLXDeepseekV4SparseAttention)
+  DEFINE_NAME(OMLXCompressedSparseAttention)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     const auto& rhs =
-        static_cast<const DeepseekV4SparseAttentionPrimitive&>(other);
+        static_cast<const CompressedSparseAttentionPrimitive&>(other);
     return scale_ == rhs.scale_ && q_offset_ == rhs.q_offset_ &&
         compress_ratio_ == rhs.compress_ratio_ &&
         local_window_ == rhs.local_window_;
@@ -231,7 +221,7 @@ class DeepseekV4SparseAttentionPrimitive : public Primitive {
 
 } // namespace
 
-array deepseek_v4_sparse_attention(
+array compressed_sparse_attention(
     const array& q,
     const array& local_kv,
     const array& pooled,
@@ -245,7 +235,7 @@ array deepseek_v4_sparse_attention(
   if (q.ndim() != 4 || local_kv.ndim() != 4 || pooled.ndim() != 3 ||
       topk_indices.ndim() != 4 || sinks.ndim() != 1) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.deepseek_v4_sparse_attention] incompatible "
+    msg << "[attention.compressed_sparse_attention] incompatible "
         << "ranks: " << q.shape() << ", " << local_kv.shape() << ", "
         << pooled.shape() << ", " << topk_indices.shape() << ", "
         << sinks.shape() << ".";
@@ -258,7 +248,7 @@ array deepseek_v4_sparse_attention(
       topk_indices.shape(1) != 1 || topk_indices.shape(2) != q.shape(2) ||
       sinks.shape(0) != q.shape(1)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.deepseek_v4_sparse_attention] incompatible "
+    msg << "[attention.compressed_sparse_attention] incompatible "
         << "shapes: " << q.shape() << ", " << local_kv.shape() << ", "
         << pooled.shape() << ", " << topk_indices.shape() << ", "
         << sinks.shape() << ".";
@@ -266,7 +256,7 @@ array deepseek_v4_sparse_attention(
   }
   if (topk_indices.dtype() != uint32) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.deepseek_v4_sparse_attention] topk_indices "
+    msg << "[attention.compressed_sparse_attention] topk_indices "
         << "must be uint32, got " << topk_indices.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -274,7 +264,7 @@ array deepseek_v4_sparse_attention(
   auto final_type = result_type(std::vector<array>{q, local_kv, pooled});
   if (final_type != float16 && final_type != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.deepseek_v4_sparse_attention] expected fp16 or "
+    msg << "[attention.compressed_sparse_attention] expected fp16 or "
         << "bf16 inputs, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -285,7 +275,7 @@ array deepseek_v4_sparse_attention(
   auto pooled_cast = astype(pooled, final_type, stream);
   auto sinks_cast = astype(sinks, final_type, stream);
 
-  if (DeepseekV4SparseAttentionPrimitive::unsupported(
+  if (CompressedSparseAttentionPrimitive::unsupported(
           q_cast,
           local_cast,
           pooled_cast,
@@ -296,7 +286,7 @@ array deepseek_v4_sparse_attention(
           local_window,
           stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.deepseek_v4_sparse_attention] unsupported DeepSeek V4 sparse attention shape.");
+        "[attention.compressed_sparse_attention] unsupported DeepSeek V4 sparse attention shape.");
   }
 
   Shape out_shape{q_cast.shape(0), q_cast.shape(1), q_cast.shape(2), q_cast.shape(3)};
@@ -305,9 +295,9 @@ array deepseek_v4_sparse_attention(
   return array(
       std::move(out_shape),
       final_type,
-      std::make_shared<DeepseekV4SparseAttentionPrimitive>(
+      std::make_shared<CompressedSparseAttentionPrimitive>(
           stream, scale, q_offset, compress_ratio, local_window),
       std::move(inputs));
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

@@ -3,7 +3,7 @@
 //
 // These compile into the classic metallib: neither kernel touches the M5
 // tensor units, so they must keep working on hardware that has no NAX. Only
-// the GEMM in qwen35_oq_a8_nax.metal needs the 26.2 deployment floor.
+// the GEMM in oq_a8_nax.metal needs the 26.2 deployment floor.
 
 // clang-format off
 #include <metal_stdlib>
@@ -20,7 +20,7 @@ using namespace omlx::oq_a8;
 // simdgroup owns whole affine groups, so the group sums Ra never straddle a
 // simdgroup and reduce with a single simd_sum.
 // The host launches 32 * kQuantSimdgroups threads per group; see
-// kQuantSimdgroups in qwen35_oq_a8.cpp.
+// kQuantSimdgroups in oq_a8.cpp.
 constant constexpr int kQuantSimdgroups = 8;
 
 // ACT_MODE 0: one scale per row. ACT_MODE 1: one scale per

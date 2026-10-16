@@ -16,7 +16,7 @@ struct OMLXDSATopKParams {
 } // namespace mlx
 
 #define DSATopKParams OMLXDSATopKParams
-#include "kernels/steel_dsa_indexer_score.h"
+#include "steel_dsa_indexer_score.h"
 #undef DSATopKParams
 
 #define instantiate_dsa_indexer_score(iname, itype, bm, bn, bk, wm, wn) \

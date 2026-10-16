@@ -1,4 +1,5 @@
-#include "dspark_qmv.h"
+#include "mxfp8_qmv.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <filesystem>
@@ -9,31 +10,20 @@
 #include "mlx/backend/metal/utils.h"
 #include "mlx/ops.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::quant_matmul {
 
 namespace {
 
 using namespace mlx::core;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to locate DSpark QMV kernel binary.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 struct DSparkQMVParams {
   int K;
   int N;
 };
 
-class DSparkExactMXFP8QMVPairPrimitive : public Primitive {
+class MXFP8QMVPairPrimitive : public Primitive {
  public:
-  explicit DSparkExactMXFP8QMVPairPrimitive(Stream stream) : Primitive(stream) {}
+  explicit MXFP8QMVPairPrimitive(Stream stream) : Primitive(stream) {}
 
   void eval_cpu(
       const std::vector<array>& /* inputs */,
@@ -61,7 +51,7 @@ class DSparkExactMXFP8QMVPairPrimitive : public Primitive {
     std::ostringstream name;
     name << "omlx_dspark_exact_mxfp8_qmv_pair_" << type_to_name(input)
          << "_m" << rows;
-    auto library = device.get_library("omlx_glm_kernels", current_binary_dir());
+    auto library = device.get_library("omlx_quant_matmul_kernels", binary_dir());
     auto kernel = device.get_kernel(name.str(), library);
     auto& encoder = metal::get_command_encoder(stream);
     encoder.set_compute_pipeline_state(kernel);
@@ -77,7 +67,7 @@ class DSparkExactMXFP8QMVPairPrimitive : public Primitive {
         MTL::Size(1, N / 8, 2), MTL::Size(32, 2, 1));
   }
 
-  DEFINE_NAME(OMLXDSparkExactMXFP8QMVPair)
+  DEFINE_NAME(OMLXMXFP8QMVPair)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& /* other */) const override {
     return true;
@@ -89,7 +79,7 @@ class DSparkExactMXFP8QMVPairPrimitive : public Primitive {
 
 } // namespace
 
-array dspark_exact_mxfp8_qmv_pair(
+array mxfp8_qmv_pair(
     const array& input,
     const array& weight_a,
     const array& scales_a,
@@ -124,8 +114,8 @@ array dspark_exact_mxfp8_qmv_pair(
   return array(
       std::move(shape),
       input.dtype(),
-      std::make_shared<DSparkExactMXFP8QMVPairPrimitive>(stream),
+      std::make_shared<MXFP8QMVPairPrimitive>(stream),
       std::vector<array>{input, weight_a, scales_a, weight_b, scales_b});
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::quant_matmul

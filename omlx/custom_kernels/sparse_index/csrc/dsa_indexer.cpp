@@ -1,6 +1,7 @@
 #include "dsa_indexer.h"
+#include "omlx/binary_dir.h"
 
-#include "kernels/mma_dsa_indexer_score.h"
+#include "mma_dsa_indexer_score.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -15,22 +16,11 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::sparse_index {
 
 namespace {
 
 using namespace mlx::core;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_glm_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 struct DSATopKParams {
   int rows;
@@ -205,7 +195,7 @@ class DSAIndexerScoresPrimitive : public Primitive {
         "_wlh_",
         (use_weights_lh ? 't' : 'n'));
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib, hash_name, func_consts);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -259,9 +249,9 @@ class DSAIndexerScoresPrimitive : public Primitive {
   int mask_q_offset_;
 };
 
-class Qwen4QSAIndexerScoresPrimitive : public Primitive {
+class QSAIndexerScoresPrimitive : public Primitive {
  public:
-  Qwen4QSAIndexerScoresPrimitive(
+  QSAIndexerScoresPrimitive(
       Stream stream,
       int mask_ratio,
       int mask_q_offset)
@@ -293,7 +283,7 @@ class Qwen4QSAIndexerScoresPrimitive : public Primitive {
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
     throw std::runtime_error(
-        "Qwen4QSAIndexerScoresPrimitive has no CPU path.");
+        "QSAIndexerScoresPrimitive has no CPU path.");
   }
 
   void eval_gpu(
@@ -352,7 +342,7 @@ class Qwen4QSAIndexerScoresPrimitive : public Primitive {
         "_wn",
         wn);
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto kernel = d.get_kernel(base_name, lib);
     auto& encoder = metal::get_command_encoder(s);
     encoder.set_compute_pipeline_state(kernel);
@@ -369,11 +359,11 @@ class Qwen4QSAIndexerScoresPrimitive : public Primitive {
         MTL::Size(wm * wn * 32, 1, 1));
   }
 
-  DEFINE_NAME(OMLXQwen4QSAIndexerScores)
+  DEFINE_NAME(OMLXQSAIndexerScores)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     const auto& rhs =
-        static_cast<const Qwen4QSAIndexerScoresPrimitive&>(other);
+        static_cast<const QSAIndexerScoresPrimitive&>(other);
     return mask_ratio_ == rhs.mask_ratio_ &&
         mask_q_offset_ == rhs.mask_q_offset_;
   }
@@ -481,7 +471,7 @@ class MMADSAIndexerScoresPrimitive : public Primitive {
     MTL::Size group_dims = MTL::Size(kThreads, 1, 1);
     MTL::Size grid_dims = MTL::Size(tg_x, tg_y, B);
 
-    auto lib = d.get_library("omlx_glm_mma_dsa_v25", []() {
+    auto lib = d.get_library("omlx_dsa_indexer_mma_v25", []() {
       return std::string(kMMADSAScoreKernelSource);
     });
     auto& compute_encoder = metal::get_command_encoder(s);
@@ -597,7 +587,7 @@ class DSATopKIndicesPrimitive : public Primitive {
         "_bucketed_",
         (bucketed ? 't' : 'n'));
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib, hash_name, func_consts);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -635,9 +625,9 @@ class DSATopKIndicesPrimitive : public Primitive {
   bool causal_valid_prefix_;
 };
 
-class DSparkFP32TopKIndicesPrimitive : public Primitive {
+class FP32TopKIndicesPrimitive : public Primitive {
  public:
-  explicit DSparkFP32TopKIndicesPrimitive(Stream stream) : Primitive(stream) {}
+  explicit FP32TopKIndicesPrimitive(Stream stream) : Primitive(stream) {}
 
   void eval_cpu(
       const std::vector<array>& /* inputs */,
@@ -664,7 +654,7 @@ class DSparkFP32TopKIndicesPrimitive : public Primitive {
         /* int topk = */ topk,
         /* bool causal_valid_prefix = */ false};
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto kernel =
         d.get_kernel("dspark_fp32_topk_indices_topk512_t256", lib);
     auto& encoder = metal::get_command_encoder(s);
@@ -676,7 +666,7 @@ class DSparkFP32TopKIndicesPrimitive : public Primitive {
         MTL::Size(rows, 1, 1), MTL::Size(threads, 1, 1));
   }
 
-  DEFINE_NAME(OMLXDSparkFP32TopKIndices)
+  DEFINE_NAME(OMLXFP32TopKIndices)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& /* other */) const override {
     return true;
@@ -686,9 +676,9 @@ class DSparkFP32TopKIndicesPrimitive : public Primitive {
   }
 };
 
-class Qwen4QSAFP32TopKIndicesPrimitive : public Primitive {
+class QSAFP32TopKIndicesPrimitive : public Primitive {
  public:
-  explicit Qwen4QSAFP32TopKIndicesPrimitive(Stream stream)
+  explicit QSAFP32TopKIndicesPrimitive(Stream stream)
       : Primitive(stream) {}
 
   void eval_cpu(
@@ -716,7 +706,7 @@ class Qwen4QSAFP32TopKIndicesPrimitive : public Primitive {
         /* int topk = */ topk,
         /* bool causal_valid_prefix = */ false};
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto kernel =
         d.get_kernel("qwen4_qsa_fp32_topk_indices_topk512_t256", lib);
     auto& encoder = metal::get_command_encoder(s);
@@ -728,7 +718,7 @@ class Qwen4QSAFP32TopKIndicesPrimitive : public Primitive {
         MTL::Size(rows, 1, 1), MTL::Size(threads, 1, 1));
   }
 
-  DEFINE_NAME(OMLXQwen4QSAFP32TopKIndices)
+  DEFINE_NAME(OMLXQSAFP32TopKIndices)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& /* other */) const override {
     return true;
@@ -832,7 +822,7 @@ class DSADecodeScoresPrimitive : public Primitive {
         /* int64_t k_batch_stride = */ k.shape(0) == 1 ? 0 : k.strides(0),
         /* int64_t k_row_stride = */ k.strides(2)};
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -870,13 +860,13 @@ array dsa_topk_indices_impl(
     StreamOrDevice s) {
   if (scores.ndim() != 4 || scores.shape(1) != 1) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_topk_indices] expected scores with shape "
+    msg << "[sparse_index.dsa_topk_indices] expected scores with shape "
         << "[B, 1, L, K], got " << scores.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (topk <= 0 || topk > scores.shape(-1)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_topk_indices] invalid topk " << topk
+    msg << "[sparse_index.dsa_topk_indices] invalid topk " << topk
         << " for scores with shape " << scores.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -886,7 +876,7 @@ array dsa_topk_indices_impl(
   std::vector<array> inputs = {scores_contiguous};
   if (DSATopKIndicesPrimitive::unsupported(scores_contiguous, topk, stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_topk_indices] unsupported M3 GLM shape.");
+        "[sparse_index.dsa_topk_indices] unsupported M3 GLM shape.");
   }
 
   Shape out_shape{
@@ -915,14 +905,14 @@ array dsa_indexer_scores(
   if (queries.ndim() != 4 || keys.ndim() != 4 ||
       (weights.ndim() != 3 && weights.ndim() != 4)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] expected q/k rank 4 and "
+    msg << "[sparse_index.dsa_indexer_scores] expected q/k rank 4 and "
         << "weights rank 3 or 4, got " << queries.shape() << ", "
         << keys.shape() << ", " << weights.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (keys.shape(1) != 1) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_indexer_scores] keys must have a singleton "
+        "[sparse_index.dsa_indexer_scores] keys must have a singleton "
         "indexer head axis.");
   }
   const bool weights_lh = weights.ndim() == 3;
@@ -938,7 +928,7 @@ array dsa_indexer_scores(
       queries.shape(0) != weights.shape(0) || !weights_match ||
       queries.shape(3) != keys.shape(3)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] incompatible q, k, "
+    msg << "[sparse_index.dsa_indexer_scores] incompatible q, k, "
         << "weights shapes: " << queries.shape() << ", " << keys.shape()
         << ", " << weights.shape() << ".";
     throw std::invalid_argument(msg.str());
@@ -947,33 +937,33 @@ array dsa_indexer_scores(
   auto final_type = result_type(queries, keys, weights);
   if (final_type != float16 && final_type != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] expected float16 or "
+    msg << "[sparse_index.dsa_indexer_scores] expected float16 or "
         << "bfloat16 inputs, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
   if (unused_causal_prefix_topk < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] "
+    msg << "[sparse_index.dsa_indexer_scores] "
         << "unused_causal_prefix_topk must be non-negative, got "
         << unused_causal_prefix_topk << ".";
     throw std::invalid_argument(msg.str());
   }
   if (causal_q_offset < -1) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] causal_q_offset must be "
+    msg << "[sparse_index.dsa_indexer_scores] causal_q_offset must be "
         << "-1 or non-negative, got " << causal_q_offset << ".";
     throw std::invalid_argument(msg.str());
   }
   if (mask_ratio < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] mask_ratio must be "
+    msg << "[sparse_index.dsa_indexer_scores] mask_ratio must be "
         << "non-negative (0 disables the fused pooled-causal mask), got "
         << mask_ratio << ".";
     throw std::invalid_argument(msg.str());
   }
   if (mask_ratio > 0 && mask_q_offset < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores] mask_q_offset must be "
+    msg << "[sparse_index.dsa_indexer_scores] mask_q_offset must be "
         << "non-negative when mask_ratio > 0, got " << mask_q_offset << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -986,7 +976,7 @@ array dsa_indexer_scores(
   std::vector<array> inputs = {q, k, w};
   if (DSAIndexerScoresPrimitive::unsupported(q, k, w, stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_indexer_scores] unsupported M3 GLM shape.");
+        "[sparse_index.dsa_indexer_scores] unsupported M3 GLM shape.");
   }
 
   Shape out_shape{q.shape(0), 1, q.shape(2), k.shape(2)};
@@ -1005,7 +995,7 @@ array dsa_indexer_scores(
       std::move(inputs));
 }
 
-array qwen4_qsa_indexer_scores(
+array qsa_indexer_scores(
     const array& queries,
     const array& pooled_keys,
     int mask_ratio,
@@ -1013,7 +1003,7 @@ array qwen4_qsa_indexer_scores(
     StreamOrDevice s) {
   if (queries.ndim() != 4 || pooled_keys.ndim() != 4) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.qwen4_qsa_indexer_scores] expected q/k rank "
+    msg << "[sparse_index.qsa_indexer_scores] expected q/k rank "
         << "4, got " << queries.shape() << " and " << pooled_keys.shape()
         << ".";
     throw std::invalid_argument(msg.str());
@@ -1021,12 +1011,12 @@ array qwen4_qsa_indexer_scores(
   if (queries.dtype() != pooled_keys.dtype() ||
       (queries.dtype() != float16 && queries.dtype() != bfloat16)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.qwen4_qsa_indexer_scores] q/k must have matching "
+        "[sparse_index.qsa_indexer_scores] q/k must have matching "
         "float16 or bfloat16 dtype.");
   }
   if (mask_ratio != 4 || mask_q_offset < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.qwen4_qsa_indexer_scores] requires "
+    msg << "[sparse_index.qsa_indexer_scores] requires "
         << "mask_ratio=4 and a non-negative mask_q_offset, got "
         << mask_ratio << " and " << mask_q_offset << ".";
     throw std::invalid_argument(msg.str());
@@ -1035,9 +1025,9 @@ array qwen4_qsa_indexer_scores(
   auto stream = to_stream(s);
   auto q = ensure_row_contiguous(queries, stream);
   auto k = ensure_row_contiguous(pooled_keys, stream);
-  if (Qwen4QSAIndexerScoresPrimitive::unsupported(q, k, stream)) {
+  if (QSAIndexerScoresPrimitive::unsupported(q, k, stream)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.qwen4_qsa_indexer_scores] unsupported shape "
+    msg << "[sparse_index.qsa_indexer_scores] unsupported shape "
         << "or layout; expected q [1,4,M,128] and k [1,1,N,128], got "
         << q.shape() << " and " << k.shape() << ".";
     throw std::invalid_argument(msg.str());
@@ -1047,7 +1037,7 @@ array qwen4_qsa_indexer_scores(
   return array(
       std::move(out_shape),
       float32,
-      std::make_shared<Qwen4QSAIndexerScoresPrimitive>(
+      std::make_shared<QSAIndexerScoresPrimitive>(
           stream, mask_ratio, mask_q_offset),
       std::vector<array>{q, k});
 }
@@ -1061,26 +1051,26 @@ array dsa_indexer_scores_mma(
     StreamOrDevice s) {
   if (queries.ndim() != 4 || keys.ndim() != 4 || weights.ndim() != 3) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores_mma] expected q/k rank 4 "
+    msg << "[sparse_index.dsa_indexer_scores_mma] expected q/k rank 4 "
         << "and weights rank 3 ([B, L, H]), got " << queries.shape() << ", "
         << keys.shape() << ", " << weights.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (keys.shape(1) != 1) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_indexer_scores_mma] keys must have a "
+        "[sparse_index.dsa_indexer_scores_mma] keys must have a "
         "singleton indexer head axis.");
   }
   if (mask_ratio < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores_mma] mask_ratio must be "
+    msg << "[sparse_index.dsa_indexer_scores_mma] mask_ratio must be "
         << "non-negative (0 disables the fused pooled-causal mask), got "
         << mask_ratio << ".";
     throw std::invalid_argument(msg.str());
   }
   if (mask_ratio > 0 && mask_q_offset < 0) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_indexer_scores_mma] mask_q_offset must "
+    msg << "[sparse_index.dsa_indexer_scores_mma] mask_q_offset must "
         << "be non-negative when mask_ratio > 0, got " << mask_q_offset
         << ".";
     throw std::invalid_argument(msg.str());
@@ -1097,7 +1087,7 @@ array dsa_indexer_scores_mma(
     // gate must already have routed unsupported configurations (fp16, H!=64,
     // causal, weights rank 4, GLM shapes) to dsa_indexer_scores.
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_indexer_scores_mma] unsupported shape/dtype "
+        "[sparse_index.dsa_indexer_scores_mma] unsupported shape/dtype "
         "(kernel serves bf16, H=64, D=128, weights [B, L, H] only).");
   }
 
@@ -1119,14 +1109,14 @@ array dsa_topk_indices(
   return dsa_topk_indices_impl(scores, topk, bucketed, causal_valid_prefix, s);
 }
 
-array dspark_fp32_topk_indices(
+array fp32_topk_indices(
     const array& scores,
     int topk,
     StreamOrDevice s) {
   if (scores.ndim() != 2 || scores.dtype() != float32 || topk != 512 ||
       scores.shape(1) < topk) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dspark_fp32_topk_indices] expected FP32 "
+    msg << "[sparse_index.fp32_topk_indices] expected FP32 "
         << "scores [rows, K>=512] and topk=512, got " << scores.shape()
         << ", topk=" << topk << ".";
     throw std::invalid_argument(msg.str());
@@ -1140,11 +1130,11 @@ array dspark_fp32_topk_indices(
   return array(
       std::move(out_shape),
       uint32,
-      std::make_shared<DSparkFP32TopKIndicesPrimitive>(stream),
+      std::make_shared<FP32TopKIndicesPrimitive>(stream),
       std::vector<array>{contiguous_scores});
 }
 
-array qwen4_qsa_topk_indices(
+array qsa_topk_indices(
     const array& scores,
     int topk,
     StreamOrDevice s) {
@@ -1152,7 +1142,7 @@ array qwen4_qsa_topk_indices(
       scores.shape(1) < 1 || scores.dtype() != float32 || topk != 512 ||
       scores.shape(2) < topk) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.qwen4_qsa_topk_indices] expected FP32 "
+    msg << "[sparse_index.qsa_topk_indices] expected FP32 "
         << "scores [1, M>=1, N>=512] and topk=512, got " << scores.shape()
         << ", topk=" << topk << ".";
     throw std::invalid_argument(msg.str());
@@ -1166,7 +1156,7 @@ array qwen4_qsa_topk_indices(
   return array(
       std::move(out_shape),
       uint32,
-      std::make_shared<Qwen4QSAFP32TopKIndicesPrimitive>(stream),
+      std::make_shared<QSAFP32TopKIndicesPrimitive>(stream),
       std::vector<array>{contiguous_scores});
 }
 array dsa_decode_scores(
@@ -1178,21 +1168,21 @@ array dsa_decode_scores(
   if (queries.ndim() != 4 || keys.ndim() != 4 ||
       (weights.ndim() != 2 && weights.ndim() != 3)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_decode_scores] expected q/k rank 4 and "
+    msg << "[sparse_index.dsa_decode_scores] expected q/k rank 4 and "
         << "weights rank 2 or 3, got " << queries.shape() << ", "
         << keys.shape() << ", " << weights.shape() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (queries.shape(2) != 1) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_decode_scores] decode kernel expects a single "
+        "[sparse_index.dsa_decode_scores] decode kernel expects a single "
         "query position (q shape [B,H,1,D]).");
   }
 
   auto final_type = result_type(queries, keys, weights);
   if (final_type != float16 && final_type != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.dsa_decode_scores] expected float16 or bfloat16 "
+    msg << "[sparse_index.dsa_decode_scores] expected float16 or bfloat16 "
         << "inputs, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -1213,7 +1203,7 @@ array dsa_decode_scores(
   std::vector<array> inputs = {q, k, w};
   if (DSADecodeScoresPrimitive::unsupported(q, k, w, stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.dsa_decode_scores] unsupported shape/dtype/layout.");
+        "[sparse_index.dsa_decode_scores] unsupported shape/dtype/layout.");
   }
 
   Shape out_shape{q.shape(0), 1, 1, k.shape(2)};
@@ -1224,4 +1214,4 @@ array dsa_decode_scores(
       std::move(inputs));
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::sparse_index

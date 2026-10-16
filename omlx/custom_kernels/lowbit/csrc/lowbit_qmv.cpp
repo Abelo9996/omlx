@@ -3,15 +3,16 @@
 //
 // Bonsai 1-bit / 2-bit Metal kernel dispatch.
 //
-// Metal kernel sources live in bonsai_quantized.metal (qmv_fast / qmv_wide)
-// and spec_decode.metal, compiled into omlx_bonsai_kernels.metallib by CMake.
+// Metal kernel sources live in lowbit_qmv.metal (qmv_fast / qmv_wide)
+// and spec_decode.metal, compiled into omlx_lowbit_kernels.metallib by CMake.
 // The metallib is loaded lazily on the first dispatch call and cached.
 //
 // MLX 0.32+ requires Metal dispatch to occur inside Primitive::eval_gpu.
 // All public API functions return an unevaluated array whose Primitive drives
 // the actual Metal dispatch at eval time.
 
-#include "bonsai_kernels.h"
+#include "lowbit_qmv.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <algorithm>
@@ -27,7 +28,7 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
-namespace omlx::bonsai_kernels {
+namespace omlx::lowbit {
 
 namespace {
 
@@ -38,20 +39,9 @@ using namespace mlx::core::metal;
 // Metallib loader
 // ---------------------------------------------------------------------------
 
-constexpr const char* kMetallibName = "omlx_bonsai_kernels";
+constexpr const char* kMetallibName = "omlx_lowbit_kernels";
 
-std::string binary_dir() {
-    static std::string dir = []() {
-        Dl_info info;
-        if (!dladdr(reinterpret_cast<void*>(&binary_dir), &info)) {
-            throw std::runtime_error("bonsai: unable to resolve binary dir.");
-        }
-        return std::filesystem::path(info.dli_fname).parent_path().string();
-    }();
-    return dir;
-}
-
-MTL::ComputePipelineState* get_bonsai_kernel(
+MTL::ComputePipelineState* get_lowbit_kernel(
     metal::Device& d,
     const std::string& kernel_name) {
     auto* lib = d.get_library(kMetallibName, binary_dir());
@@ -67,7 +57,7 @@ std::string type_str(Dtype dt) {
     if (dt == bfloat16) return "bfloat16_t";
     if (dt == float32)  return "float";
     std::ostringstream msg;
-    msg << "bonsai: unsupported dtype " << dt;
+    msg << "lowbit: unsupported dtype " << dt;
     throw std::invalid_argument(msg.str());
 }
 
@@ -175,7 +165,7 @@ void dispatch_qmv_fast_t5(
 
     std::string kname = qmv_fast_t5_kname(type_str(x.dtype()), group_size);
 
-    auto kernel = get_bonsai_kernel(d, kname);
+    auto kernel = get_lowbit_kernel(d, kname);
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
@@ -212,7 +202,7 @@ void dispatch_qmv_wide_t5(
     std::string kname = qmv_wide_t5_kname(
         type_str(x.dtype()), group_size, vecs_per_tg, k_lanes);
 
-    auto kernel = get_bonsai_kernel(d, kname);
+    auto kernel = get_lowbit_kernel(d, kname);
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
@@ -256,7 +246,7 @@ void dispatch_qmv_fast(
     int B = static_cast<int>(out.size()) / M / N;
     if (B != 1) {
         throw std::runtime_error(
-            "[bonsai] batched qmv dispatch is not supported (B=" +
+            "[lowbit] batched qmv dispatch is not supported (B=" +
             std::to_string(B) + ")");
     }
     bool batched = false;
@@ -271,7 +261,7 @@ void dispatch_qmv_fast(
             + "_b_"  + std::to_string(bits)
             + (batched ? "_batch_1" : "_batch_0")));
 
-    auto kernel = get_bonsai_kernel(d, kname);
+    auto kernel = get_lowbit_kernel(d, kname);
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
@@ -314,7 +304,7 @@ void dispatch_qmv_wide(
     int B = static_cast<int>(out.size()) / M / N;
     if (B != 1) {
         throw std::runtime_error(
-            "[bonsai] batched qmv dispatch is not supported (B=" +
+            "[lowbit] batched qmv dispatch is not supported (B=" +
             std::to_string(B) + ")");
     }
     bool batched = false;
@@ -330,7 +320,7 @@ void dispatch_qmv_wide(
     std::string kname = qmv_wide_kname(
         type_str(x.dtype()), group_size, bits, vecs_per_tg, k_lanes, batched, symmetric);
 
-    auto kernel = get_bonsai_kernel(d, kname);
+    auto kernel = get_lowbit_kernel(d, kname);
     auto& enc = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
@@ -356,14 +346,14 @@ void dispatch_qmv_wide(
 // Primitives
 // ---------------------------------------------------------------------------
 
-// BonsaiQmvPrimitive: wraps qmv_fast and qmv_wide dispatch.
+// LowbitQmvPrimitive: wraps qmv_fast and qmv_wide dispatch.
 //   inputs[0] = x  (row-contiguous activations)
 //   inputs[1] = w  (packed quantized weights)
 //   inputs[2] = scales
 //   inputs[3] = biases
-class BonsaiQmvPrimitive : public Primitive {
+class LowbitQmvPrimitive : public Primitive {
  public:
-    BonsaiQmvPrimitive(Stream s, int bits, bool wide, bool symmetric = false)
+    LowbitQmvPrimitive(Stream s, int bits, bool wide, bool symmetric = false)
         : Primitive(s), bits_(bits), wide_(wide), symmetric_(symmetric) {}
 
  private:
@@ -374,7 +364,7 @@ class BonsaiQmvPrimitive : public Primitive {
     void eval_cpu(
         const std::vector<array>& /* inputs */,
         std::vector<array>& /* outputs */) override {
-        throw std::runtime_error("BonsaiQmvPrimitive has no CPU path.");
+        throw std::runtime_error("LowbitQmvPrimitive has no CPU path.");
     }
 
     void eval_gpu(
@@ -408,22 +398,22 @@ class BonsaiQmvPrimitive : public Primitive {
         }
     }
 
-    DEFINE_NAME(BonsaiQmvPrimitive)
+    DEFINE_NAME(LowbitQmvPrimitive)
 };
 
-// BonsaiSpecDecodePrimitive: wraps spec_decode_verify kernel.
+// SpecDecodeVerifyPrimitive: wraps spec_decode_verify kernel.
 //   inputs[0] = draft  [B, K] int32
 //   inputs[1] = target [B, K+1] int32 (argmax token ids; caller argmaxes logits)
 //   outputs[0] = n_accepted [B] int32
 //   outputs[1] = committed  [B, K+1] int32
-class BonsaiSpecDecodePrimitive : public Primitive {
+class SpecDecodeVerifyPrimitive : public Primitive {
  public:
-    explicit BonsaiSpecDecodePrimitive(Stream s) : Primitive(s) {}
+    explicit SpecDecodeVerifyPrimitive(Stream s) : Primitive(s) {}
 
     void eval_cpu(
         const std::vector<array>& /* inputs */,
         std::vector<array>& /* outputs */) override {
-        throw std::runtime_error("BonsaiSpecDecodePrimitive has no CPU path.");
+        throw std::runtime_error("SpecDecodeVerifyPrimitive has no CPU path.");
     }
 
     void eval_gpu(
@@ -443,7 +433,7 @@ class BonsaiSpecDecodePrimitive : public Primitive {
         int B = draft.shape(0);
         int K = draft.shape(1);
 
-        auto kernel = get_bonsai_kernel(d, "spec_decode_verify");
+        auto kernel = get_lowbit_kernel(d, "spec_decode_verify");
         auto& enc = metal::get_command_encoder(s);
         enc.set_compute_pipeline_state(kernel);
 
@@ -460,16 +450,16 @@ class BonsaiSpecDecodePrimitive : public Primitive {
         enc.dispatch_threads(grid_dims, group_dims);
     }
 
-    DEFINE_NAME(BonsaiSpecDecodePrimitive)
+    DEFINE_NAME(SpecDecodeVerifyPrimitive)
 };
 
-// BonsaiT5QmvPrimitive: t5 base-3 ternary decode (Identity I-D).
+// T5QmvPrimitive: t5 base-3 ternary decode (Identity I-D).
 //   inputs[0] = x      (row-contiguous activations)
 //   inputs[1] = w      (uint8 t5 weight bytes, (N, n_groups*bytes_per_group))
 //   inputs[2] = scales ((N, n_groups) scale per group; no biases)
-class BonsaiT5QmvPrimitive : public Primitive {
+class T5QmvPrimitive : public Primitive {
  public:
-    explicit BonsaiT5QmvPrimitive(Stream s, bool wide)
+    explicit T5QmvPrimitive(Stream s, bool wide)
         : Primitive(s), wide_(wide) {}
 
  private:
@@ -478,7 +468,7 @@ class BonsaiT5QmvPrimitive : public Primitive {
     void eval_cpu(
         const std::vector<array>& /* inputs */,
         std::vector<array>& /* outputs */) override {
-        throw std::runtime_error("BonsaiT5QmvPrimitive has no CPU path.");
+        throw std::runtime_error("T5QmvPrimitive has no CPU path.");
     }
 
     void eval_gpu(
@@ -508,11 +498,11 @@ class BonsaiT5QmvPrimitive : public Primitive {
         }
     }
 
-    DEFINE_NAME(BonsaiT5QmvPrimitive)
+    DEFINE_NAME(T5QmvPrimitive)
 };
 
 // ---------------------------------------------------------------------------
-// BonsaiT5QmmPrimitive: t5 MMA GEMM for prefill (Identity I-M).
+// T5QmmPrimitive: t5 MMA GEMM for prefill (Identity I-M).
 //   inputs[0] = x      (M, K) row-contiguous activations
 //   inputs[1] = w      (N, n_groups*bpg) uint8 t5 bytes
 //   inputs[2] = scales (N, n_groups)
@@ -534,7 +524,7 @@ static void dispatch_qmm_t5(
     const Stream& s) {
 
     std::string kname = qmm_t5_kname(type_str(x.dtype()), group_size);
-    auto kernel = get_bonsai_kernel(d, kname);
+    auto kernel = get_lowbit_kernel(d, kname);
     auto& enc   = metal::get_command_encoder(s);
     enc.set_compute_pipeline_state(kernel);
 
@@ -553,15 +543,15 @@ static void dispatch_qmm_t5(
     enc.dispatch_threadgroups(grid_dims, group_dims);
 }
 
-class BonsaiT5QmmPrimitive : public Primitive {
+class T5QmmPrimitive : public Primitive {
  public:
-    explicit BonsaiT5QmmPrimitive(Stream s) : Primitive(s) {}
+    explicit T5QmmPrimitive(Stream s) : Primitive(s) {}
 
  private:
     void eval_cpu(
         const std::vector<array>& /* inputs */,
         std::vector<array>& /* outputs */) override {
-        throw std::runtime_error("BonsaiT5QmmPrimitive has no CPU path.");
+        throw std::runtime_error("T5QmmPrimitive has no CPU path.");
     }
 
     void eval_gpu(
@@ -585,7 +575,7 @@ class BonsaiT5QmmPrimitive : public Primitive {
         dispatch_qmm_t5(x, w, scales, out, M, N, K, group_size, d, s);
     }
 
-    DEFINE_NAME(BonsaiT5QmmPrimitive)
+    DEFINE_NAME(T5QmmPrimitive)
 };
 
 } // namespace
@@ -600,7 +590,7 @@ static array ensure_dtype(const array& a, Dtype dt, const Stream& s) {
     return (a.dtype() == dt) ? a : astype(a, dt, s);
 }
 
-array bonsai_q1_affine_qmv(
+array q1_affine_qmv(
     const array& x,
     const array& w,
     const array& scales,
@@ -614,11 +604,11 @@ array bonsai_q1_affine_qmv(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 1, /*wide=*/false),
+        std::make_shared<LowbitQmvPrimitive>(s, 1, /*wide=*/false),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q2_affine_qmv(
+array q2_affine_qmv(
     const array& x,
     const array& w,
     const array& scales,
@@ -632,11 +622,11 @@ array bonsai_q2_affine_qmv(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 2, /*wide=*/false),
+        std::make_shared<LowbitQmvPrimitive>(s, 2, /*wide=*/false),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q1_affine_qmv_wide(
+array q1_affine_qmv_wide(
     const array& x,
     const array& w,
     const array& scales,
@@ -650,11 +640,11 @@ array bonsai_q1_affine_qmv_wide(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 1, /*wide=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 1, /*wide=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q2_affine_qmv_wide(
+array q2_affine_qmv_wide(
     const array& x,
     const array& w,
     const array& scales,
@@ -668,11 +658,11 @@ array bonsai_q2_affine_qmv_wide(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 2, /*wide=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 2, /*wide=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q1_affine_qmv_sym(
+array q1_affine_qmv_sym(
     const array& x,
     const array& w,
     const array& scales,
@@ -686,11 +676,11 @@ array bonsai_q1_affine_qmv_sym(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 1, /*wide=*/false, /*symmetric=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 1, /*wide=*/false, /*symmetric=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q2_affine_qmv_sym(
+array q2_affine_qmv_sym(
     const array& x,
     const array& w,
     const array& scales,
@@ -704,11 +694,11 @@ array bonsai_q2_affine_qmv_sym(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 2, /*wide=*/false, /*symmetric=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 2, /*wide=*/false, /*symmetric=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q1_affine_qmv_wide_sym(
+array q1_affine_qmv_wide_sym(
     const array& x,
     const array& w,
     const array& scales,
@@ -722,11 +712,11 @@ array bonsai_q1_affine_qmv_wide_sym(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 1, /*wide=*/true, /*symmetric=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 1, /*wide=*/true, /*symmetric=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_q2_affine_qmv_wide_sym(
+array q2_affine_qmv_wide_sym(
     const array& x,
     const array& w,
     const array& scales,
@@ -740,11 +730,11 @@ array bonsai_q2_affine_qmv_wide_sym(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiQmvPrimitive>(s, 2, /*wide=*/true, /*symmetric=*/true),
+        std::make_shared<LowbitQmvPrimitive>(s, 2, /*wide=*/true, /*symmetric=*/true),
         {x_c, w, sc, bi});
 }
 
-array bonsai_t5_qmv(
+array t5_qmv(
     const array& x,
     const array& w,
     const array& scales,
@@ -756,11 +746,11 @@ array bonsai_t5_qmv(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiT5QmvPrimitive>(s, /*wide=*/false),
+        std::make_shared<T5QmvPrimitive>(s, /*wide=*/false),
         {x_c, w, sc});
 }
 
-array bonsai_t5_qmv_wide(
+array t5_qmv_wide(
     const array& x,
     const array& w,
     const array& scales,
@@ -772,11 +762,11 @@ array bonsai_t5_qmv_wide(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiT5QmvPrimitive>(s, /*wide=*/true),
+        std::make_shared<T5QmvPrimitive>(s, /*wide=*/true),
         {x_c, w, sc});
 }
 
-array bonsai_t5_qmm(
+array t5_qmm(
     const array& x,
     const array& w,
     const array& scales,
@@ -789,11 +779,11 @@ array bonsai_t5_qmm(
     auto out_shape = x_c.shape();
     out_shape.back() = N;
     return array(out_shape, x_c.dtype(),
-        std::make_shared<BonsaiT5QmmPrimitive>(s),
+        std::make_shared<T5QmmPrimitive>(s),
         {x_c, w, sc});
 }
 
-std::pair<array, array> bonsai_spec_decode_verify(
+std::pair<array, array> spec_decode_verify(
     const array& draft,
     const array& target,
     StreamOrDevice s_) {
@@ -803,17 +793,17 @@ std::pair<array, array> bonsai_spec_decode_verify(
 
     if (draft.dtype() != mlx::core::int32 || target.dtype() != mlx::core::int32) {
         throw std::invalid_argument(
-            "[bonsai_spec_decode_verify] draft and target must be int32 token ids "
+            "[lowbit.spec_decode_verify] draft and target must be int32 token ids "
             "(argmax target logits before calling).");
     }
     if (target.ndim() != 2 || target.shape(0) != B || target.shape(1) != K + 1) {
         throw std::invalid_argument(
-            "[bonsai_spec_decode_verify] target must have shape [B, K+1].");
+            "[lowbit.spec_decode_verify] target must have shape [B, K+1].");
     }
 
     // Sibling outputs must be created through make_arrays so eval_gpu
     // receives both in one outputs vector.
-    auto primitive = std::make_shared<BonsaiSpecDecodePrimitive>(s);
+    auto primitive = std::make_shared<SpecDecodeVerifyPrimitive>(s);
     auto outs = array::make_arrays(
         {{B}, {B, K + 1}},
         {mlx::core::int32, mlx::core::int32},
@@ -822,15 +812,4 @@ std::pair<array, array> bonsai_spec_decode_verify(
     return {outs[0], outs[1]};
 }
 
-bool is_nax_available() {
-    try {
-        auto& d = metal::device(mlx::core::Device::gpu);
-        // Require gen >= 18 (gen-17 computes wrong results with NAX qmm/gemm,
-        // see Bonsai MLX fork commit 4446b4e6).
-        return d.get_architecture_gen() >= 18;
-    } catch (...) {
-        return false;
-    }
-}
-
-} // namespace omlx::bonsai_kernels
+} // namespace omlx::lowbit

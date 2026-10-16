@@ -1,5 +1,5 @@
 #include "mlx/backend/metal/kernels/utils.h"
-#include "kernels/steel_attention_block_token.h"
+#include "block_attention.h"
 
 #define instantiate_exact_attn(tname, dtype, bq, bk, bd, wm, wn)        \
   instantiate_kernel(                                                   \

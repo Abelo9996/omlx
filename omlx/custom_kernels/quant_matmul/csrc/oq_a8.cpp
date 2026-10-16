@@ -2,14 +2,17 @@
 //
 // Three ops:
 //
-//   qwen35_oq_a8_quantize        BF16/FP16 X -> (Qa, Sa, Ra)          [Stage A]
-//   qwen35_oq_a8_qmm_t           (Qa, Sa, Ra) x packed Q4/Q5/Q8 -> Y  [GEMM]
-//   qwen35_oq_a8_decode_weights  packed Q4/Q5/Q8 -> INT8 codes        [tests]
+//   oq_a8_quantize        BF16/FP16 X -> (Qa, Sa, Ra)          [Stage A]
+//   oq_a8_qmm_t           (Qa, Sa, Ra) x packed Q4/Q5/Q8 -> Y  [GEMM]
+//   oq_a8_decode_weights  packed Q4/Q5/Q8 -> INT8 codes        [tests]
 //
 // Stage A is separate so Python can share quantized activations between
 // projections of the same input.
 
-#include "qwen35_prefill.h"
+#include "oq_a8.h"
+#include "affine_qmm.h"
+#include "nax.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <algorithm>
@@ -25,7 +28,7 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::qwen35_prefill_kernels {
+namespace omlx::quant_matmul {
 
 namespace {
 
@@ -33,25 +36,14 @@ using namespace mlx::core;
 
 constexpr int kGroupSize = 64;
 // Column tile of the PackedLinear layout; must match kPackedTileN in
-// qwen35_oq_a8_nax.metal.
+// oq_a8_nax.metal.
 constexpr int kPackedTileN = 128;
-constexpr const char* kOqClassicMetallib = "omlx_qwen35_prefill_kernels";
-constexpr const char* kOqNaxMetallib = "omlx_qwen35_prefill_kernels_nax";
+constexpr const char* kOqClassicMetallib = "omlx_quant_matmul_kernels";
+constexpr const char* kOqNaxMetallib = "omlx_quant_matmul_kernels_nax";
 
 // Simdgroups per Stage-A threadgroup; must match kQuantSimdgroups in
-// qwen35_oq_a8.metal.
+// oq_a8.metal.
 constexpr int kQuantSimdgroups = 8;
-
-std::string oq_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&oq_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_qwen35_prefill binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 bool oq_row_contiguous(const array& arr) {
   // A trailing dimension of size 1 carries an arbitrary stride -- nothing
@@ -128,9 +120,9 @@ constexpr int kQ8TileN = 64;
 // Stage A
 // ---------------------------------------------------------------------------
 
-class Qwen35OqA8QuantizePrimitive : public Primitive {
+class OqA8QuantizePrimitive : public Primitive {
  public:
-  Qwen35OqA8QuantizePrimitive(Stream stream, int act_mode)
+  OqA8QuantizePrimitive(Stream stream, int act_mode)
       : Primitive(stream), act_mode_(act_mode) {
     if (act_mode_ != 0 && act_mode_ != 1) {
       std::ostringstream msg;
@@ -142,7 +134,7 @@ class Qwen35OqA8QuantizePrimitive : public Primitive {
   void eval_cpu(
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
-    throw std::runtime_error("Qwen35OqA8QuantizePrimitive has no CPU path.");
+    throw std::runtime_error("OqA8QuantizePrimitive has no CPU path.");
   }
 
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
@@ -169,7 +161,7 @@ class Qwen35OqA8QuantizePrimitive : public Primitive {
         "_am",
         act_mode_);
 
-    auto lib = d.get_library(kOqClassicMetallib, oq_binary_dir());
+    auto lib = d.get_library(kOqClassicMetallib, binary_dir());
     auto kernel = d.get_kernel(kname, lib);
 
     auto& compute_encoder = metal::get_command_encoder(s);
@@ -187,7 +179,7 @@ class Qwen35OqA8QuantizePrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(Qwen35OqA8QuantizePrimitive)
+  DEFINE_NAME(OqA8QuantizePrimitive)
   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
     auto qa_shape = inputs[0].shape();
     auto ra_shape = qa_shape;
@@ -198,7 +190,7 @@ class Qwen35OqA8QuantizePrimitive : public Primitive {
     return {std::move(qa_shape), std::move(sa_shape), std::move(ra_shape)};
   }
   bool is_equivalent(const Primitive& other) const override {
-    const auto& rhs = static_cast<const Qwen35OqA8QuantizePrimitive&>(other);
+    const auto& rhs = static_cast<const OqA8QuantizePrimitive&>(other);
     return act_mode_ == rhs.act_mode_;
   }
   auto state() const {
@@ -213,9 +205,9 @@ class Qwen35OqA8QuantizePrimitive : public Primitive {
 // GEMM
 // ---------------------------------------------------------------------------
 
-class Qwen35OqA8QmmTPrimitive : public Primitive {
+class OqA8QmmTPrimitive : public Primitive {
  public:
-  Qwen35OqA8QmmTPrimitive(
+  OqA8QmmTPrimitive(
       Stream stream,
       int bits,
       int act_mode,
@@ -242,7 +234,7 @@ class Qwen35OqA8QmmTPrimitive : public Primitive {
   void eval_cpu(
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
-    throw std::runtime_error("Qwen35OqA8QmmTPrimitive has no CPU path.");
+    throw std::runtime_error("OqA8QmmTPrimitive has no CPU path.");
   }
 
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
@@ -278,7 +270,7 @@ class Qwen35OqA8QmmTPrimitive : public Primitive {
                   cfg.wn, packed_ ? "_packed" : "");
     }
 
-    auto lib = d.get_library(kOqNaxMetallib, oq_binary_dir());
+    auto lib = d.get_library(kOqNaxMetallib, binary_dir());
     auto kernel = d.get_kernel(kname, lib);
 
     auto& compute_encoder = metal::get_command_encoder(s);
@@ -299,7 +291,7 @@ class Qwen35OqA8QmmTPrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(Qwen35OqA8QmmTPrimitive)
+  DEFINE_NAME(OqA8QmmTPrimitive)
   // Not DEFINE_INPUT_OUTPUT_SHAPE(): that macro returns the first input's
   // shape, and this output is [..., N] while Qa is [..., K].
   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
@@ -308,7 +300,7 @@ class Qwen35OqA8QmmTPrimitive : public Primitive {
     return {std::move(shape)};
   }
   bool is_equivalent(const Primitive& other) const override {
-    const auto& rhs = static_cast<const Qwen35OqA8QmmTPrimitive&>(other);
+    const auto& rhs = static_cast<const OqA8QmmTPrimitive&>(other);
     return bits_ == rhs.bits_ && act_mode_ == rhs.act_mode_ &&
         variant_ == rhs.variant_ && packed_ == rhs.packed_;
   }
@@ -327,9 +319,9 @@ class Qwen35OqA8QmmTPrimitive : public Primitive {
 // Weight decode (tests only)
 // ---------------------------------------------------------------------------
 
-class Qwen35OqA8DecodeWeightsPrimitive : public Primitive {
+class OqA8DecodeWeightsPrimitive : public Primitive {
  public:
-  Qwen35OqA8DecodeWeightsPrimitive(Stream stream, int bits, int k)
+  OqA8DecodeWeightsPrimitive(Stream stream, int bits, int k)
       : Primitive(stream), bits_(bits), k_(k) {
     if (!oq_a8_bits_supported(bits_)) {
       std::ostringstream msg;
@@ -342,7 +334,7 @@ class Qwen35OqA8DecodeWeightsPrimitive : public Primitive {
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
     throw std::runtime_error(
-        "Qwen35OqA8DecodeWeightsPrimitive has no CPU path.");
+        "OqA8DecodeWeightsPrimitive has no CPU path.");
   }
 
   void eval_gpu(const std::vector<array>& inputs, std::vector<array>& outputs)
@@ -361,7 +353,7 @@ class Qwen35OqA8DecodeWeightsPrimitive : public Primitive {
     std::string kname;
     concatenate(kname, "oq_a8_decode_weights_q", bits_);
 
-    auto lib = d.get_library(kOqClassicMetallib, oq_binary_dir());
+    auto lib = d.get_library(kOqClassicMetallib, binary_dir());
     auto kernel = d.get_kernel(kname, lib);
 
     auto& compute_encoder = metal::get_command_encoder(s);
@@ -376,13 +368,13 @@ class Qwen35OqA8DecodeWeightsPrimitive : public Primitive {
     compute_encoder.dispatch_threads(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(Qwen35OqA8DecodeWeightsPrimitive)
+  DEFINE_NAME(OqA8DecodeWeightsPrimitive)
   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
     return {Shape{inputs[0].shape(0), k_}};
   }
   bool is_equivalent(const Primitive& other) const override {
     const auto& rhs =
-        static_cast<const Qwen35OqA8DecodeWeightsPrimitive&>(other);
+        static_cast<const OqA8DecodeWeightsPrimitive&>(other);
     return bits_ == rhs.bits_ && k_ == rhs.k_;
   }
   auto state() const {
@@ -401,30 +393,30 @@ bool oq_a8_kernels_available() {
       oq_nax_runtime_ok.load(std::memory_order_relaxed);
 }
 
-std::vector<array> qwen35_oq_a8_quantize(
+std::vector<array> oq_a8_quantize(
     const array& x,
     int act_mode,
     StreamOrDevice s) {
   if (x.ndim() < 2) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_quantize] expected rank >= 2.");
+        "[quant_matmul.oq_a8_quantize] expected rank >= 2.");
   }
   if (x.dtype() != float16 && x.dtype() != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_quantize] expected float16 or "
+    msg << "[quant_matmul.oq_a8_quantize] expected float16 or "
         << "bfloat16 input, got " << x.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (!oq_row_contiguous(x)) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_quantize] expected a row-contiguous "
+        "[quant_matmul.oq_a8_quantize] expected a row-contiguous "
         "input.");
   }
 
   const int K = x.shape(-1);
   if (K <= 0 || K % kGroupSize != 0) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_quantize] K=" << K
+    msg << "[quant_matmul.oq_a8_quantize] K=" << K
         << " must be a positive multiple of " << kGroupSize << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -441,11 +433,11 @@ std::vector<array> qwen35_oq_a8_quantize(
   return array::make_arrays(
       {std::move(qa_shape), std::move(sa_shape), std::move(ra_shape)},
       {int8, float32, int16},
-      std::make_shared<Qwen35OqA8QuantizePrimitive>(stream, act_mode),
+      std::make_shared<OqA8QuantizePrimitive>(stream, act_mode),
       {x});
 }
 
-array qwen35_oq_a8_qmm_t(
+array oq_a8_qmm_t(
     const array& qa,
     const array& sa,
     const array& ra,
@@ -459,48 +451,48 @@ array qwen35_oq_a8_qmm_t(
     StreamOrDevice s) {
   if (!oq_a8_bits_supported(bits)) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] bits " << bits
+    msg << "[quant_matmul.oq_a8_qmm_t] bits " << bits
         << " unsupported (expected 4, 5 or 8).";
     throw std::invalid_argument(msg.str());
   }
   if (bits == 8 && packed) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] Q8 has no packed layout.");
+        "[quant_matmul.oq_a8_qmm_t] Q8 has no packed layout.");
   }
   if (qa.dtype() != int8 || sa.dtype() != float32 || ra.dtype() != int16) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] expected int8 Qa, "
+    msg << "[quant_matmul.oq_a8_qmm_t] expected int8 Qa, "
         << "float32 Sa and int16 Ra, got " << qa.dtype() << ", " << sa.dtype()
         << ", " << ra.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
   if (weight.dtype() != uint32) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] expected uint32 packed "
+    msg << "[quant_matmul.oq_a8_qmm_t] expected uint32 packed "
         << "weight, got " << weight.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
   const auto out_dtype = scales.dtype();
   if (out_dtype != float16 && out_dtype != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] expected float16 or "
+    msg << "[quant_matmul.oq_a8_qmm_t] expected float16 or "
         << "bfloat16 scales, got " << out_dtype << ".";
     throw std::invalid_argument(msg.str());
   }
   if (biases.dtype() != out_dtype) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] scales and biases must share "
+        "[quant_matmul.oq_a8_qmm_t] scales and biases must share "
         "a dtype.");
   }
   if (qa.ndim() < 2 || weight.ndim() != 2 ||
       (!packed && (scales.ndim() != 2 || biases.ndim() != 2))) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] unexpected input ranks.");
+        "[quant_matmul.oq_a8_qmm_t] unexpected input ranks.");
   }
   for (const auto& t : {qa, sa, ra, weight, scales, biases}) {
     if (!oq_row_contiguous(t)) {
       throw std::invalid_argument(
-          "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] every input must be "
+          "[quant_matmul.oq_a8_qmm_t] every input must be "
           "row-contiguous.");
     }
   }
@@ -512,13 +504,13 @@ array qwen35_oq_a8_qmm_t(
 
   if (K <= 0 || N <= 0 || M <= 0 || K % kGroupSize != 0) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] bad shape M=" << M
+    msg << "[quant_matmul.oq_a8_qmm_t] bad shape M=" << M
         << " N=" << N << " K=" << K << ".";
     throw std::invalid_argument(msg.str());
   }
   if (!oq_a8_packed_shape_matches(weight.shape(1), K, bits)) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] packed weight "
+    msg << "[quant_matmul.oq_a8_qmm_t] packed weight "
         << weight.shape() << " does not match K=" << K << " at " << bits
         << " bits.";
     throw std::invalid_argument(msg.str());
@@ -531,7 +523,7 @@ array qwen35_oq_a8_qmm_t(
     if (bits != 4 || out_dtype != bfloat16 || N % kPackedTileN != 0 ||
         groups % 4 != 0) {
       std::ostringstream msg;
-      msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] the packed layout "
+      msg << "[quant_matmul.oq_a8_qmm_t] the packed layout "
           << "needs Q4, bfloat16 metadata, N % " << kPackedTileN
           << " == 0 and K % 256 == 0; got bits=" << bits << " N=" << N
           << " K=" << K << ".";
@@ -546,21 +538,21 @@ array qwen35_oq_a8_qmm_t(
           biases.shape() == scales.shape();
   if (!sc_ok) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] scales " << scales.shape()
+    msg << "[quant_matmul.oq_a8_qmm_t] scales " << scales.shape()
         << " incompatible with N=" << N << " groups=" << groups
         << ".";
     throw std::invalid_argument(msg.str());
   }
   if (ra.size() != static_cast<size_t>(M) * static_cast<size_t>(groups)) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] Ra does not match [M, K/64].");
+        "[quant_matmul.oq_a8_qmm_t] Ra does not match [M, K/64].");
   }
   const size_t expected_sa = act_mode == 0
       ? static_cast<size_t>(M)
       : static_cast<size_t>(M) * static_cast<size_t>(groups);
   if (sa.size() != expected_sa) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] Sa does not match the "
+        "[quant_matmul.oq_a8_qmm_t] Sa does not match the "
         "activation scale mode.");
   }
 
@@ -569,7 +561,7 @@ array qwen35_oq_a8_qmm_t(
   const int tile_bn = bits == 8 ? kQ8TileN : oq_a8_nax_variant(variant).bn;
   if (N % tile_bn != 0) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] N=" << N
+    msg << "[quant_matmul.oq_a8_qmm_t] N=" << N
         << " is not a multiple of the tile BN=" << tile_bn << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -577,11 +569,11 @@ array qwen35_oq_a8_qmm_t(
   auto stream = to_stream(s);
   if (stream.device == Device::cpu) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] requires the GPU stream.");
+        "[quant_matmul.oq_a8_qmm_t] requires the GPU stream.");
   }
   if (!oq_a8_kernels_available()) {
     throw std::runtime_error(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_qmm_t] the NAX metallib is "
+        "[quant_matmul.oq_a8_qmm_t] the NAX metallib is "
         "unavailable on this runtime.");
   }
 
@@ -590,32 +582,32 @@ array qwen35_oq_a8_qmm_t(
   return array(
       std::move(out_shape),
       out_dtype,
-      std::make_shared<Qwen35OqA8QmmTPrimitive>(
+      std::make_shared<OqA8QmmTPrimitive>(
           stream, bits, act_mode, variant, packed),
       {qa, sa, ra, weight, scales, biases});
 }
 
-array qwen35_oq_a8_decode_weights(
+array oq_a8_decode_weights(
     const array& weight,
     int bits,
     int group_count,
     StreamOrDevice s) {
   if (!oq_a8_bits_supported(bits)) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_decode_weights] bits " << bits
+    msg << "[quant_matmul.oq_a8_decode_weights] bits " << bits
         << " unsupported (expected 4, 5 or 8).";
     throw std::invalid_argument(msg.str());
   }
   if (weight.dtype() != uint32 || weight.ndim() != 2 ||
       !oq_row_contiguous(weight)) {
     throw std::invalid_argument(
-        "[omlx_qwen35_prefill.qwen35_oq_a8_decode_weights] expected a "
+        "[quant_matmul.oq_a8_decode_weights] expected a "
         "row-contiguous 2D uint32 weight.");
   }
   const int K = group_count * kGroupSize;
   if (group_count <= 0 || !oq_a8_packed_shape_matches(weight.shape(1), K, bits)) {
     std::ostringstream msg;
-    msg << "[omlx_qwen35_prefill.qwen35_oq_a8_decode_weights] packed weight "
+    msg << "[quant_matmul.oq_a8_decode_weights] packed weight "
         << weight.shape() << " does not hold " << group_count << " groups at "
         << bits << " bits.";
     throw std::invalid_argument(msg.str());
@@ -625,8 +617,8 @@ array qwen35_oq_a8_decode_weights(
   return array(
       Shape{weight.shape(0), K},
       int8,
-      std::make_shared<Qwen35OqA8DecodeWeightsPrimitive>(stream, bits, K),
+      std::make_shared<OqA8DecodeWeightsPrimitive>(stream, bits, K),
       {weight});
 }
 
-} // namespace omlx::qwen35_prefill_kernels
+} // namespace omlx::quant_matmul

@@ -1,4 +1,5 @@
-#include "minimax_msa.h"
+#include "msa_block_topk.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <filesystem>
@@ -12,23 +13,11 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::minimax_m3_kernels {
+namespace omlx::sparse_index {
 
 namespace {
 
 using namespace mlx::core;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error(
-          "Unable to get omlx_minimax_m3_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 bool row_contiguous(const array& arr) {
   return arr.flags().row_contiguous && arr.strides(-1) == 1 &&
@@ -39,9 +28,9 @@ array ensure_row_contiguous(const array& arr, Stream stream) {
   return contiguous(arr, false, stream);
 }
 
-class MinimaxMSATopKPrimitive : public Primitive {
+class MSABlockTopKPrimitive : public Primitive {
  public:
-  MinimaxMSATopKPrimitive(
+  MSABlockTopKPrimitive(
       Stream stream,
       int q_start,
       float scale,
@@ -92,7 +81,7 @@ class MinimaxMSATopKPrimitive : public Primitive {
   void eval_cpu(
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
-    throw std::runtime_error("MinimaxMSATopKPrimitive has no CPU path.");
+    throw std::runtime_error("MSABlockTopKPrimitive has no CPU path.");
   }
 
   void eval_gpu(
@@ -158,7 +147,7 @@ class MinimaxMSATopKPrimitive : public Primitive {
         "_wn",
         wn);
 
-    auto lib = d.get_library("omlx_minimax_m3_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_sparse_index_kernels", binary_dir());
     auto block_kernel = d.get_kernel(block_kernel_name, lib);
     compute_encoder.set_compute_pipeline_state(block_kernel);
     compute_encoder.set_input_array(q, 0);
@@ -195,10 +184,10 @@ class MinimaxMSATopKPrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(topk_grid, topk_group);
   }
 
-  DEFINE_NAME(OMLXMinimaxMSATopK)
+  DEFINE_NAME(OMLXMSABlockTopK)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
-    const auto& rhs = static_cast<const MinimaxMSATopKPrimitive&>(other);
+    const auto& rhs = static_cast<const MSABlockTopKPrimitive&>(other);
     return q_start_ == rhs.q_start_ && scale_ == rhs.scale_ &&
         block_size_ == rhs.block_size_ && topk_ == rhs.topk_ &&
         init_blocks_ == rhs.init_blocks_ && local_blocks_ == rhs.local_blocks_;
@@ -219,7 +208,7 @@ class MinimaxMSATopKPrimitive : public Primitive {
 
 } // namespace
 
-array minimax_msa_topk(
+array msa_block_topk(
     const array& idx_queries,
     const array& idx_keys,
     int q_start,
@@ -231,7 +220,7 @@ array minimax_msa_topk(
     StreamOrDevice s) {
   if (idx_queries.ndim() != 4 || idx_keys.ndim() != 4) {
     std::ostringstream msg;
-    msg << "[omlx_minimax_m3.minimax_msa_topk] expected rank-4 idx "
+    msg << "[sparse_index.msa_block_topk] expected rank-4 idx "
         << "query/key arrays, got " << idx_queries.shape() << " and "
         << idx_keys.shape() << ".";
     throw std::invalid_argument(msg.str());
@@ -239,14 +228,14 @@ array minimax_msa_topk(
   if (idx_queries.shape(0) != idx_keys.shape(0) || idx_keys.shape(1) != 1 ||
       idx_queries.shape(3) != idx_keys.shape(3)) {
     std::ostringstream msg;
-    msg << "[omlx_minimax_m3.minimax_msa_topk] incompatible idx query/key "
+    msg << "[sparse_index.msa_block_topk] incompatible idx query/key "
         << "shapes " << idx_queries.shape() << " and " << idx_keys.shape()
         << ".";
     throw std::invalid_argument(msg.str());
   }
   if (block_size <= 0 || topk <= 0 || init_blocks < 0 || local_blocks < 0) {
     throw std::invalid_argument(
-        "[omlx_minimax_m3.minimax_msa_topk] block_size/topk must be "
+        "[sparse_index.msa_block_topk] block_size/topk must be "
         "positive and forced block counts must be non-negative.");
   }
 
@@ -254,7 +243,7 @@ array minimax_msa_topk(
   auto final_type = result_type(idx_queries, idx_keys);
   if (final_type != float32 && final_type != float16 && final_type != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_minimax_m3.minimax_msa_topk] expected floating idx "
+    msg << "[sparse_index.msa_block_topk] expected floating idx "
         << "query/key arrays, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -262,9 +251,9 @@ array minimax_msa_topk(
   auto q = ensure_row_contiguous(astype(idx_queries, final_type, stream), stream);
   auto k = ensure_row_contiguous(astype(idx_keys, final_type, stream), stream);
   std::vector<array> inputs = {q, k};
-  if (MinimaxMSATopKPrimitive::unsupported(q, k, block_size, topk, stream)) {
+  if (MSABlockTopKPrimitive::unsupported(q, k, block_size, topk, stream)) {
     throw std::invalid_argument(
-        "[omlx_minimax_m3.minimax_msa_topk] unsupported MiniMax M3 MSA "
+        "[sparse_index.msa_block_topk] unsupported MiniMax M3 MSA "
         "top-k shape.");
   }
 
@@ -272,7 +261,7 @@ array minimax_msa_topk(
   return array(
       std::move(out_shape),
       int32,
-      std::make_shared<MinimaxMSATopKPrimitive>(
+      std::make_shared<MSABlockTopKPrimitive>(
           stream,
           q_start,
           scale,
@@ -283,4 +272,4 @@ array minimax_msa_topk(
       std::move(inputs));
 }
 
-} // namespace omlx::minimax_m3_kernels
+} // namespace omlx::sparse_index

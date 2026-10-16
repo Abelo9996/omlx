@@ -6,9 +6,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::quant_matmul {
 
-mx::array dspark_exact_mxfp8_qmv_pair(
+mx::array mxfp8_qmv_pair(
     const mx::array& input,
     const mx::array& weight_a,
     const mx::array& scales_a,
@@ -16,4 +16,4 @@ mx::array dspark_exact_mxfp8_qmv_pair(
     const mx::array& scales_b,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::quant_matmul

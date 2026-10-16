@@ -1,6 +1,6 @@
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
-#include "kernels/steel_sparse_mla.h"
+#include "steel_sparse_mla.h"
 
 #define instantiate_sparse_mla(tname, dtype, bk, dc, h, d, pe, wm)      \
   instantiate_kernel(                                                   \

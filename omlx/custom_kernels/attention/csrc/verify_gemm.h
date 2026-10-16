@@ -6,19 +6,19 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
-mx::array dspark_rowwise_gemm(
+mx::array rowwise_gemm(
     const mx::array& lhs,
     const mx::array& rhs,
     bool transpose_rhs,
     mx::StreamOrDevice s = {});
 
-mx::array dspark_ring_gemm(
+mx::array ring_gemm(
     const mx::array& lhs,
     const mx::array& source,
     const mx::array& indices,
     bool transpose_rhs,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

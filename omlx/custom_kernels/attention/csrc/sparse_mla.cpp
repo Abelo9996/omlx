@@ -1,4 +1,5 @@
 #include "sparse_mla.h"
+#include "omlx/binary_dir.h"
 
 #include <cstdlib>
 #include <dlfcn.h>
@@ -11,22 +12,11 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
 namespace {
 
 using namespace mlx::core;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_glm_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 inline int64_t bcast_stride(const array& a, int axis) {
   return a.shape(axis) == 1 ? 0 : a.strides(axis);
@@ -59,9 +49,9 @@ struct GlmDsaSparseMlaParams {
   int64_t O_strides[3];
 };
 
-class GlmDsaSparseMlaAttentionPrimitive : public Primitive {
+class SparseMlaAttentionPrimitive : public Primitive {
  public:
-  GlmDsaSparseMlaAttentionPrimitive(
+  SparseMlaAttentionPrimitive(
       Stream stream,
       float scale,
       bool do_causal,
@@ -147,7 +137,7 @@ class GlmDsaSparseMlaAttentionPrimitive : public Primitive {
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
     throw std::runtime_error(
-        "GlmDsaSparseMlaAttentionPrimitive has no CPU path.");
+        "SparseMlaAttentionPrimitive has no CPU path.");
   }
 
   void eval_gpu(
@@ -246,7 +236,7 @@ class GlmDsaSparseMlaAttentionPrimitive : public Primitive {
         "_do_causal_",
         (do_causal ? 't' : 'n'));
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_attention_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib, hash_name, func_consts);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -296,11 +286,11 @@ class GlmDsaSparseMlaAttentionPrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(OMLXGlmDsaSparseMlaAttention)
+  DEFINE_NAME(OMLXSparseMlaAttention)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     const auto& rhs =
-        static_cast<const GlmDsaSparseMlaAttentionPrimitive&>(other);
+        static_cast<const SparseMlaAttentionPrimitive&>(other);
     return scale_ == rhs.scale_ && do_causal_ == rhs.do_causal_ &&
         topk_valid_prefix_ == rhs.topk_valid_prefix_ &&
         causal_prefix_indices_ == rhs.causal_prefix_indices_ &&
@@ -329,7 +319,7 @@ class GlmDsaSparseMlaAttentionPrimitive : public Primitive {
 
 } // namespace
 
-array glm_dsa_sparse_mla_attention(
+array sparse_mla_attention(
     const array& q_latent,
     const array& q_pe,
     const array& kv_latent,
@@ -345,20 +335,20 @@ array glm_dsa_sparse_mla_attention(
   for (const auto& tensor : {q_latent, q_pe, kv_latent, k_pe}) {
     if (tensor.ndim() != 4) {
       std::ostringstream msg;
-      msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] input with shape "
+      msg << "[attention.sparse_mla_attention] input with shape "
           << tensor.shape() << " expected to be rank 4.";
       throw std::invalid_argument(msg.str());
     }
   }
   if (topk_indices.ndim() != 4) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] topk_indices with "
+    msg << "[attention.sparse_mla_attention] topk_indices with "
         << "shape " << topk_indices.shape() << " expected to be rank 4.";
     throw std::invalid_argument(msg.str());
   }
   if (causal_prefix_rows < 0 || causal_prefix_rows > q_latent.shape(2)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] "
+    msg << "[attention.sparse_mla_attention] "
         << "causal_prefix_rows must be in [0, L], got "
         << causal_prefix_rows << " for L=" << q_latent.shape(2) << ".";
     throw std::invalid_argument(msg.str());
@@ -380,7 +370,7 @@ array glm_dsa_sparse_mla_attention(
       q_latent.shape(3) != kv_latent.shape(3) ||
       q_pe.shape(3) != k_pe.shape(3)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] incompatible "
+    msg << "[attention.sparse_mla_attention] incompatible "
         << "shapes: " << q_latent.shape() << ", " << q_pe.shape() << ", "
         << kv_latent.shape() << ", " << k_pe.shape() << ", "
         << topk_indices.shape() << ".";
@@ -388,7 +378,7 @@ array glm_dsa_sparse_mla_attention(
   }
   if (topk_indices.dtype() != uint32) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] topk_indices must "
+    msg << "[attention.sparse_mla_attention] topk_indices must "
         << "be uint32, got " << topk_indices.dtype() << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -400,14 +390,14 @@ array glm_dsa_sparse_mla_attention(
         (lengths.ndim() == 2 || lengths.shape(1) == 1);
     if (!shape_ok) {
       std::ostringstream msg;
-      msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] topk_length "
+      msg << "[attention.sparse_mla_attention] topk_length "
           << "with shape " << lengths.shape() << " expected [B, L] or "
           << "[B, 1, L].";
       throw std::invalid_argument(msg.str());
     }
     if (lengths.dtype() != uint32) {
       std::ostringstream msg;
-      msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] topk_length must "
+      msg << "[attention.sparse_mla_attention] topk_length must "
           << "be uint32, got " << lengths.dtype() << ".";
       throw std::invalid_argument(msg.str());
     }
@@ -417,7 +407,7 @@ array glm_dsa_sparse_mla_attention(
       result_type(std::vector<array>{q_latent, q_pe, kv_latent, k_pe});
   if (final_type != float16 && final_type != bfloat16 && final_type != float32) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] expected floating "
+    msg << "[attention.sparse_mla_attention] expected floating "
         << "inputs, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -432,7 +422,7 @@ array glm_dsa_sparse_mla_attention(
   if (topk_length.has_value()) {
     inputs.push_back(*topk_length);
   }
-  if (GlmDsaSparseMlaAttentionPrimitive::unsupported(
+  if (SparseMlaAttentionPrimitive::unsupported(
           ql,
           qp,
           kv,
@@ -445,14 +435,14 @@ array glm_dsa_sparse_mla_attention(
           causal,
           stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.glm_dsa_sparse_mla_attention] unsupported M3 GLM shape.");
+        "[attention.sparse_mla_attention] unsupported M3 GLM shape.");
   }
 
   Shape out_shape{ql.shape(0), ql.shape(1), ql.shape(2), kv.shape(3)};
   return array(
       std::move(out_shape),
       final_type,
-      std::make_shared<GlmDsaSparseMlaAttentionPrimitive>(
+      std::make_shared<SparseMlaAttentionPrimitive>(
           stream,
           scale,
           causal,
@@ -463,4 +453,4 @@ array glm_dsa_sparse_mla_attention(
       std::move(inputs));
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

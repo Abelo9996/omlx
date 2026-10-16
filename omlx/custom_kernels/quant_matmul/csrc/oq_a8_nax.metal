@@ -17,7 +17,7 @@
 // matrix is ever materialized in device memory, so the kernel keeps
 // oQ's bandwidth advantage: the weights are read exactly once, still packed.
 //
-// Compiled into the separate omlx_qwen35_prefill_kernels_nax metallib with a
+// Compiled into the separate omlx_quant_matmul_kernels_nax metallib with a
 // 26.2 deployment floor; the C++ op only loads it when the runtime reports NAX
 // support.
 
@@ -434,7 +434,7 @@ template <typename T, int BITS, int ACT_MODE, int WM, int WN, bool PACKED>
       wn,                                                                     \
       true)
 
-// Tile variants must stay in sync with oq_a8_nax_variant() in qwen35_oq_a8.cpp
+// Tile variants must stay in sync with oq_a8_nax_variant() in oq_a8.cpp
 // and with _VARIANT_TILES in omlx/patches/qwen35_oq_a8.py, which index the
 // same table from the 800 base. The field is flat within ~3% at M=2048, and Q4
 // and Q5 are tuned independently because the Q5 decoder reads a wider window

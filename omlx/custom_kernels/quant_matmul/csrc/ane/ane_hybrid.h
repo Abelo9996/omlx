@@ -13,7 +13,7 @@ class Buffer;
 class CommandBuffer;
 } // namespace MTL
 
-namespace omlx::qwen35_prefill_kernels {
+namespace omlx::quant_matmul {
 
 // Opaque owner for one private-ANE, fixed-shape INT8 linear slice.
 // The public Python feature is opt-in because these APIs are undocumented and
@@ -63,17 +63,17 @@ private:
   friend class AneLinearBankBuilder;
   friend class AneFusedBankBuilder;
   friend std::shared_ptr<AneLinearModel>
-  qwen35_ane_compile_linear(const mlx::core::array &, int, int);
+  ane_compile_linear(const mlx::core::array &, int, int);
   friend std::vector<std::shared_ptr<AneLinearModel>>
-  qwen35_ane_compile_linear_bank(const std::vector<mlx::core::array> &, int,
+  ane_compile_linear_bank(const std::vector<mlx::core::array> &, int,
                                  int);
   friend std::shared_ptr<AneLinearModel>
-  qwen35_ane_compile_fp16_linear(const mlx::core::array &, int);
-  friend std::shared_ptr<AneLinearModel> qwen35_ane_compile_swiglu_down(
+  ane_compile_fp16_linear(const mlx::core::array &, int);
+  friend std::shared_ptr<AneLinearModel> ane_compile_swiglu_down(
       const mlx::core::array &, const mlx::core::array &,
       const mlx::core::array &, int, int);
   friend std::vector<std::shared_ptr<AneLinearModel>>
-  qwen35_ane_compile_swiglu_down_bank(
+  ane_compile_swiglu_down_bank(
       const std::vector<mlx::core::array> &,
       const std::vector<mlx::core::array> &,
       const std::vector<mlx::core::array> &, int, int);
@@ -121,25 +121,25 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-bool qwen35_ane_available();
-bool qwen35_ane_hybrid_nax_enabled();
-bool qwen35_cpu_shared_resource_available();
-void qwen35_ane_profile_set_enabled(bool enabled);
-void qwen35_ane_profile_reset();
-std::vector<double> qwen35_ane_profile_snapshot();
+bool ane_available();
+bool ane_hybrid_nax_enabled();
+bool cpu_shared_resource_available();
+void ane_profile_set_enabled(bool enabled);
+void ane_profile_reset();
+std::vector<double> ane_profile_snapshot();
 
 std::shared_ptr<AneLinearModel>
-qwen35_ane_compile_linear(const mlx::core::array &weight, int sequence_length);
+ane_compile_linear(const mlx::core::array &weight, int sequence_length);
 
 std::shared_ptr<AneLinearModel>
-qwen35_ane_compile_linear(const mlx::core::array &weight, int sequence_length,
+ane_compile_linear(const mlx::core::array &weight, int sequence_length,
                           int ane_instance);
 
-std::vector<std::shared_ptr<AneLinearModel>> qwen35_ane_compile_linear_bank(
+std::vector<std::shared_ptr<AneLinearModel>> ane_compile_linear_bank(
     const std::vector<mlx::core::array> &weights, int sequence_length,
     int ane_instance);
 
-mlx::core::array qwen35_cpu_fp16_affine_qmm_t(
+mlx::core::array cpu_fp16_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases, int bits, int variant = 8,
@@ -147,14 +147,14 @@ mlx::core::array qwen35_cpu_fp16_affine_qmm_t(
     bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_affine_qmm_t(
+mlx::core::array ane_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int bits,
     int variant = 8, int group_size = 128, int profile_category = 1,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_cpu_fp16_affine_qmm_t(
+mlx::core::array ane_cpu_fp16_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -162,7 +162,7 @@ mlx::core::array qwen35_ane_cpu_fp16_affine_qmm_t(
     int group_size = 128, int profile_category = 1, int cpu_threads = 0,
     bool cpu_shared_resource = false, mlx::core::StreamOrDevice s = {});
 
-std::shared_ptr<AneLinearModel> qwen35_ane_compile_fp16_linear(
+std::shared_ptr<AneLinearModel> ane_compile_fp16_linear(
     const mlx::core::array &weight, int sequence_length);
 
 mlx::core::array ane_planar(const mlx::core::array &x,
@@ -171,40 +171,40 @@ std::shared_ptr<AneLinearModel> ane_compile_program(
     const std::string &mil, const mlx::core::array &weight_blob,
     int input_dim, int output_dim, int sequence_length);
 
-std::shared_ptr<AneLinearModel> qwen35_ane_compile_swiglu_down(
+std::shared_ptr<AneLinearModel> ane_compile_swiglu_down(
     const mlx::core::array &gate_weight,
     const mlx::core::array &up_weight,
     const mlx::core::array &down_weight,
     int sequence_length, int ane_instance = 0);
 
 std::vector<std::shared_ptr<AneLinearModel>>
-qwen35_ane_compile_swiglu_down_bank(
+ane_compile_swiglu_down_bank(
     const std::vector<mlx::core::array> &gate_weights,
     const std::vector<mlx::core::array> &up_weights,
     const std::vector<mlx::core::array> &down_weights,
     int sequence_length, int ane_instance);
 
-mlx::core::array qwen35_ane_q4_affine_qmm_t(
+mlx::core::array ane_q4_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int variant = 8,
     int group_size = 128, int profile_category = 0,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_q4_swiglu_t(
+mlx::core::array ane_q4_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int variant = 8,
     int group_size = 128, mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_affine_swiglu_t(
+mlx::core::array ane_affine_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int bits,
     int variant = 8, int group_size = 128,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_cpu_fp16_swiglu_t(
+mlx::core::array ane_cpu_fp16_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -212,7 +212,7 @@ mlx::core::array qwen35_ane_cpu_fp16_swiglu_t(
     int group_size = 128, int cpu_threads = 0, bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_cpu_fp16_q4_swiglu_t(
+mlx::core::array ane_cpu_fp16_q4_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -220,7 +220,7 @@ mlx::core::array qwen35_ane_cpu_fp16_q4_swiglu_t(
     int group_size = 128, int cpu_threads = 0, bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_affine_qmm_t(
+mlx::core::array ane_dual_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -228,7 +228,7 @@ mlx::core::array qwen35_ane_dual_affine_qmm_t(
     int variant = 8, int group_size = 128, int profile_category = 1,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_cpu_fp16_affine_qmm_t(
+mlx::core::array ane_dual_cpu_fp16_affine_qmm_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -238,7 +238,7 @@ mlx::core::array qwen35_ane_dual_cpu_fp16_affine_qmm_t(
     int cpu_threads = 0, bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_cpu_fp16_swiglu_t(
+mlx::core::array ane_dual_cpu_fp16_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -248,14 +248,14 @@ mlx::core::array qwen35_ane_dual_cpu_fp16_swiglu_t(
     bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_q4_swiglu_t(
+mlx::core::array ane_dual_q4_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
     const std::shared_ptr<AneLinearModel> &ane_model1, int variant = 8,
     int group_size = 128, mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_affine_swiglu_t(
+mlx::core::array ane_dual_affine_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &gpu_weight,
     const mlx::core::array &gpu_scales, const mlx::core::array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -263,7 +263,7 @@ mlx::core::array qwen35_ane_dual_affine_swiglu_t(
     int variant = 8, int group_size = 128,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_cpu_fp16_q4_swiglu_t(
+mlx::core::array ane_dual_cpu_fp16_q4_swiglu_t(
     const mlx::core::array &x, const mlx::core::array &cpu_weight,
     const mlx::core::array &gpu_weight, const mlx::core::array &gpu_scales,
     const mlx::core::array &gpu_biases,
@@ -273,7 +273,7 @@ mlx::core::array qwen35_ane_dual_cpu_fp16_q4_swiglu_t(
     bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_q4_swiglu_down_t(
+mlx::core::array ane_q4_swiglu_down_t(
     const mlx::core::array &x,
     const mlx::core::array &gpu_gate_up_weight,
     const mlx::core::array &gpu_gate_up_scales,
@@ -284,7 +284,7 @@ mlx::core::array qwen35_ane_q4_swiglu_down_t(
     const std::shared_ptr<AneLinearModel> &ane_model, int variant = 8,
     int group_size = 128, mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_q4_swiglu_down_t(
+mlx::core::array ane_dual_q4_swiglu_down_t(
     const mlx::core::array &x,
     const mlx::core::array &gpu_gate_up_weight,
     const mlx::core::array &gpu_gate_up_scales,
@@ -296,7 +296,7 @@ mlx::core::array qwen35_ane_dual_q4_swiglu_down_t(
     const std::shared_ptr<AneLinearModel> &ane_model1, int variant = 8,
     int group_size = 128, mlx::core::StreamOrDevice s = {});
 
-mlx::core::array qwen35_ane_dual_cpu_fp16_q4_swiglu_down_t(
+mlx::core::array ane_dual_cpu_fp16_q4_swiglu_down_t(
     const mlx::core::array &x,
     const mlx::core::array &cpu_gate_up_weight,
     const mlx::core::array &cpu_down_weight,
@@ -312,4 +312,4 @@ mlx::core::array qwen35_ane_dual_cpu_fp16_q4_swiglu_down_t(
     bool cpu_shared_resource = false,
     mlx::core::StreamOrDevice s = {});
 
-} // namespace omlx::qwen35_prefill_kernels
+} // namespace omlx::quant_matmul

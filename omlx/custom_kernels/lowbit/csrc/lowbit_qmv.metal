@@ -13,7 +13,7 @@
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/gemm/gemm.h"
 #include "mlx/backend/metal/kernels/quantized_utils.h"
-#include "quantized.h"   // Bonsai-patched: 1-bit qmv_fast + qmv_wide
+#include "lowbit_quantized.h"   // Bonsai-patched: 1-bit qmv_fast + qmv_wide
 
 // ---- instantiation helpers ------------------------------------------------
 

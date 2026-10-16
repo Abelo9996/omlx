@@ -1,6 +1,7 @@
 // Copyright © 2024-25 Apple Inc.
 
 #include "mlx/backend/metal/kernels/steel/attn/attn.h"
+#include "attn_params.h"
 
 using namespace mlx::steel;
 
@@ -18,7 +19,7 @@ constant bool has_block_mask [[function_constant(303)]];
 constant bool has_block_token_mask [[function_constant(304)]];
 constant bool has_block_indices [[function_constant(305)]];
 // Chunked-dispatch partial outputs (issue #2225). Defaulted so pipelines
-// built by callers that predate the constant (glm_moe_dsa) keep compiling.
+// built by callers that predate the constant (block_mask_attention) keep compiling.
 constant bool output_partials [[function_constant(306)]];
 constant bool output_partials_defined =
     is_function_constant_defined(output_partials);

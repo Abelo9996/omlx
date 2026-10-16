@@ -6,9 +6,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::minimax_m3_kernels {
+namespace omlx::sparse_index {
 
-mx::array minimax_msa_topk(
+mx::array msa_block_topk(
     const mx::array& idx_queries,
     const mx::array& idx_keys,
     int q_start,
@@ -19,4 +19,4 @@ mx::array minimax_msa_topk(
     int local_blocks,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::minimax_m3_kernels
+} // namespace omlx::sparse_index

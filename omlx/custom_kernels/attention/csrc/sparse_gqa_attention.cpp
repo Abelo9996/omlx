@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include "qwen4_qsa_sparse_gqa.h"
+#include "sparse_gqa_attention.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <filesystem>
@@ -12,22 +13,11 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
 namespace {
 
 using namespace mlx::core;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void *>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_glm_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 bool last_dim_contiguous(const array &arr) { return arr.strides(-1) == 1; }
 
@@ -50,9 +40,9 @@ struct Qwen4QSASparseGQAParams {
   int64_t O_strides[3];
 };
 
-class Qwen4QSASparseGQAPrimitive : public Primitive {
+class SparseGQAAttentionPrimitive : public Primitive {
 public:
-  Qwen4QSASparseGQAPrimitive(Stream stream, float scale, int q_offset,
+  SparseGQAAttentionPrimitive(Stream stream, float scale, int q_offset,
                              int key_tile, int dimension_tile)
       : Primitive(stream), scale_(scale), q_offset_(q_offset),
         key_tile_(key_tile), dimension_tile_(dimension_tile) {}
@@ -93,7 +83,7 @@ public:
 
   void eval_cpu(const std::vector<array> & /* inputs */,
                 std::vector<array> & /* outputs */) override {
-    throw std::runtime_error("Qwen4QSASparseGQAPrimitive has no CPU path.");
+    throw std::runtime_error("SparseGQAAttentionPrimitive has no CPU path.");
   }
 
   void eval_gpu(const std::vector<array> &inputs,
@@ -135,7 +125,7 @@ public:
                 key_tile_, "_dc", dimension_tile_, "_gqa", gqa, "_hp", hpad,
                 "_d", dim, "_wm", wm);
 
-    auto library = device.get_library("omlx_glm_kernels", current_binary_dir());
+    auto library = device.get_library("omlx_attention_kernels", binary_dir());
     auto kernel = device.get_kernel(kernel_name, library);
     auto &encoder = metal::get_command_encoder(stream);
     encoder.set_compute_pipeline_state(kernel);
@@ -149,10 +139,10 @@ public:
                                   MTL::Size(32, wm, 1));
   }
 
-  DEFINE_NAME(OMLXQwen4QSASparseGQAAttention)
+  DEFINE_NAME(OMLXSparseGQAAttention)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive &other) const override {
-    const auto &rhs = static_cast<const Qwen4QSASparseGQAPrimitive &>(other);
+    const auto &rhs = static_cast<const SparseGQAAttentionPrimitive &>(other);
     return scale_ == rhs.scale_ && q_offset_ == rhs.q_offset_ &&
            key_tile_ == rhs.key_tile_ && dimension_tile_ == rhs.dimension_tile_;
   }
@@ -170,17 +160,17 @@ private:
 
 } // namespace
 
-array qwen4_qsa_sparse_gqa_attention(const array &queries, const array &keys,
+array sparse_gqa_attention(const array &queries, const array &keys,
                                      const array &values,
                                      const array &selected_blocks, float scale,
                                      int q_offset, int key_tile,
                                      int dimension_tile, StreamOrDevice s) {
   auto stream = to_stream(s);
-  if (Qwen4QSASparseGQAPrimitive::unsupported(
+  if (SparseGQAAttentionPrimitive::unsupported(
           queries, keys, values, selected_blocks, q_offset, key_tile,
           dimension_tile, stream)) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.qwen4_qsa_sparse_gqa_attention] expected "
+    msg << "[attention.sparse_gqa_attention] expected "
         << "q=[1,24,M,256], k/v=[1,2,K,256], uint32 selected blocks="
         << "[1,1,M,512], q_offset>=0, (BK,DC) in "
         << "{(128,32),(256,32),(64,64),(128,64)}; got " << queries.shape()
@@ -192,9 +182,9 @@ array qwen4_qsa_sparse_gqa_attention(const array &queries, const array &keys,
   Shape out_shape{queries.shape(0), queries.shape(1), queries.shape(2),
                   queries.shape(3)};
   return array(std::move(out_shape), queries.dtype(),
-               std::make_shared<Qwen4QSASparseGQAPrimitive>(
+               std::make_shared<SparseGQAAttentionPrimitive>(
                    stream, scale, q_offset, key_tile, dimension_tile),
                std::vector<array>{queries, keys, values, selected_blocks});
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

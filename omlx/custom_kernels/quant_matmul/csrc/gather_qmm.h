@@ -6,22 +6,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::quant_matmul {
 
-mx::array glm_dsa_q8_vup_flat(
-    const mx::array& x,
-    const mx::array& weight,
-    const mx::array& scales,
-    const mx::array& biases,
-    mx::StreamOrDevice s = {});
-
-mx::array glm_moe_weighted_sum(
-    const mx::array& x_sorted,
-    const mx::array& inv_order,
-    const mx::array& scores,
-    mx::StreamOrDevice s = {});
-
-mx::array deepseek_mxfp4_gather_qmm_blocks(
+mx::array mxfp4_gather_qmm_blocks(
     const mx::array& x,
     const mx::array& weight,
     const mx::array& scales,
@@ -30,7 +17,7 @@ mx::array deepseek_mxfp4_gather_qmm_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array deepseek_mxfp4_gather_qmm_pair_blocks(
+mx::array mxfp4_gather_qmm_pair_blocks(
     const mx::array& x,
     const mx::array& weight0,
     const mx::array& scales0,
@@ -41,7 +28,7 @@ mx::array deepseek_mxfp4_gather_qmm_pair_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array deepseek_mxfp4_gather_qmm_pair_concat_blocks(
+mx::array mxfp4_gather_qmm_pair_concat_blocks(
     const mx::array& x,
     const mx::array& weight0,
     const mx::array& scales0,
@@ -52,7 +39,7 @@ mx::array deepseek_mxfp4_gather_qmm_pair_concat_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array deepseek_affine_gather_qmm_blocks(
+mx::array affine_gather_qmm_blocks(
     const mx::array& x,
     const mx::array& weight,
     const mx::array& scales,
@@ -64,7 +51,7 @@ mx::array deepseek_affine_gather_qmm_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array deepseek_affine_gather_qmm_pair_concat_blocks(
+mx::array affine_gather_qmm_pair_concat_blocks(
     const mx::array& x,
     const mx::array& weight0,
     const mx::array& scales0,
@@ -79,7 +66,7 @@ mx::array deepseek_affine_gather_qmm_pair_concat_blocks(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-mx::array deepseek_mxfp4_gather_qmm_expert(
+mx::array mxfp4_gather_qmm_expert(
     const mx::array& x,
     const mx::array& weight,
     const mx::array& scales,
@@ -87,4 +74,4 @@ mx::array deepseek_mxfp4_gather_qmm_expert(
     int variant = 0,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::quant_matmul

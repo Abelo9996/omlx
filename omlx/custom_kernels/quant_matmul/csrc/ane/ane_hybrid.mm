@@ -1,5 +1,7 @@
-#include "qwen35_ane.h"
-#include "qwen35_prefill.h"
+#include "ane/ane_hybrid.h"
+#include "omlx/binary_dir.h"
+#include "affine_qmm.h"
+#include "nax.h"
 
 #import <Accelerate/Accelerate.h>
 #import <dispatch/dispatch.h>
@@ -37,7 +39,7 @@
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::qwen35_prefill_kernels {
+namespace omlx::quant_matmul {
 namespace {
 
 using namespace mlx::core;
@@ -80,17 +82,6 @@ uint64_t profile_now_ns() {
 void profile_add(int category, ProfileMetric metric, uint64_t value) {
   g_ane_profile[category][metric].fetch_add(value,
                                              std::memory_order_relaxed);
-}
-
-std::string binary_dir() {
-  static const std::string path = [] {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void *>(&binary_dir), &info)) {
-      throw std::runtime_error("Unable to locate the qwen35 native extension.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return path;
 }
 
 void load_ane_framework() {
@@ -1358,7 +1349,7 @@ private:
   bool armed_ = true;
 };
 
-bool qwen35_ane_available() {
+bool ane_available() {
   @autoreleasepool {
     try {
       load_ane_framework();
@@ -1376,11 +1367,11 @@ bool qwen35_ane_available() {
   }
 }
 
-void qwen35_ane_profile_set_enabled(bool enabled) {
+void ane_profile_set_enabled(bool enabled) {
   g_ane_profile_enabled.store(enabled, std::memory_order_relaxed);
 }
 
-void qwen35_ane_profile_reset() {
+void ane_profile_reset() {
   for (auto &category : g_ane_profile) {
     for (auto &metric : category) {
       metric.store(0, std::memory_order_relaxed);
@@ -1389,7 +1380,7 @@ void qwen35_ane_profile_reset() {
   g_previous_ane_done_ns.store(0, std::memory_order_relaxed);
 }
 
-std::vector<double> qwen35_ane_profile_snapshot() {
+std::vector<double> ane_profile_snapshot() {
   std::vector<double> result;
   result.reserve(2 * kProfileMetricCount);
   for (const auto &category : g_ane_profile) {
@@ -1401,14 +1392,14 @@ std::vector<double> qwen35_ane_profile_snapshot() {
   return result;
 }
 
-std::shared_ptr<AneLinearModel> qwen35_ane_compile_linear(const array &weight,
+std::shared_ptr<AneLinearModel> ane_compile_linear(const array &weight,
                                                           int sequence_length) {
-  return qwen35_ane_compile_linear(weight, sequence_length, 0);
+  return ane_compile_linear(weight, sequence_length, 0);
 }
 
-std::shared_ptr<AneLinearModel> qwen35_ane_compile_linear(
+std::shared_ptr<AneLinearModel> ane_compile_linear(
     const array &weight, int sequence_length, int ane_instance) {
-  if (!qwen35_ane_available()) {
+  if (!ane_available()) {
     throw std::runtime_error("Private ANE runtime is unavailable.");
   }
   if (weight.dtype() != float32 || weight.ndim() != 2 ||
@@ -1437,7 +1428,7 @@ struct AneLinearBankBuilder::Impl {
 
 AneLinearBankBuilder::AneLinearBankBuilder(int sequence_length)
     : impl_(std::make_unique<Impl>()) {
-  if (!qwen35_ane_available()) {
+  if (!ane_available()) {
     throw std::runtime_error("Private ANE runtime is unavailable.");
   }
   if (sequence_length <= 1) {
@@ -1547,7 +1538,7 @@ AneLinearBankBuilder::compile(int ane_instance, int start, int stop) {
   }
 }
 
-std::vector<std::shared_ptr<AneLinearModel>> qwen35_ane_compile_linear_bank(
+std::vector<std::shared_ptr<AneLinearModel>> ane_compile_linear_bank(
     const std::vector<array> &weights, int sequence_length, int ane_instance) {
   AneLinearBankBuilder builder(sequence_length);
   if (weights.empty() || weights.size() > 256) {
@@ -1560,8 +1551,8 @@ std::vector<std::shared_ptr<AneLinearModel>> qwen35_ane_compile_linear_bank(
 }
 
 std::shared_ptr<AneLinearModel>
-qwen35_ane_compile_fp16_linear(const array &weight, int sequence_length) {
-  if (!qwen35_ane_available()) {
+ane_compile_fp16_linear(const array &weight, int sequence_length) {
+  if (!ane_available()) {
     throw std::runtime_error("Private ANE runtime is unavailable.");
   }
   if (weight.dtype() != float32 || weight.ndim() != 2 ||
@@ -1575,9 +1566,9 @@ qwen35_ane_compile_fp16_linear(const array &weight, int sequence_length) {
   return std::shared_ptr<AneLinearModel>(new AneLinearModel(std::move(impl)));
 }
 
-class K2AnePlanarPrimitive : public Primitive {
+class AnePlanarPrimitive : public Primitive {
 public:
-  K2AnePlanarPrimitive(Stream stream, std::shared_ptr<AneLinearModel> model)
+  AnePlanarPrimitive(Stream stream, std::shared_ptr<AneLinearModel> model)
       : Primitive(stream), model_(std::move(model)) {}
 
   void eval_cpu(const std::vector<array> &, std::vector<array> &) override {
@@ -1587,7 +1578,7 @@ public:
   void eval_gpu(const std::vector<array> &inputs, std::vector<array> &outputs) override {
     auto &device = metal::device(stream().device);
     auto &encoder = metal::get_command_encoder(stream());
-    auto library = device.get_library("omlx_qwen35_prefill_kernels", binary_dir());
+    auto library = device.get_library("omlx_quant_matmul_kernels", binary_dir());
     auto copy = device.get_kernel("k2_ane_copy_planar", library);
     const auto &x = inputs[0];
     auto &output = outputs[0];
@@ -1642,9 +1633,9 @@ public:
       encoder.dispatch_threads(MTL::Size(1, 1, 1), MTL::Size(1, 1, 1));
     }
   }
-  DEFINE_NAME(K2AnePlanarPrimitive);
+  DEFINE_NAME(AnePlanarPrimitive);
   bool is_equivalent(const Primitive &other) const override {
-    return model_ == static_cast<const K2AnePlanarPrimitive &>(other).model_;
+    return model_ == static_cast<const AnePlanarPrimitive &>(other).model_;
   }
 private:
   std::shared_ptr<AneLinearModel> model_;
@@ -1664,13 +1655,13 @@ array ane_planar(const array &x, const std::shared_ptr<AneLinearModel> &model) {
   // Keep transfers independent of the already-submitted GPU MLP suffix.
   static const auto transfer_stream = new_thread_unsafe_stream(Device::gpu);
   return array({model->output_dim(), model->sequence_length()}, float16,
-      std::make_shared<K2AnePlanarPrimitive>(transfer_stream, model), {input});
+      std::make_shared<AnePlanarPrimitive>(transfer_stream, model), {input});
 }
 
 std::shared_ptr<AneLinearModel> ane_compile_program(
     const std::string &mil_source, const array &weight_blob,
     int input_dim, int output_dim, int sequence_length) {
-  if (!qwen35_ane_available()) throw std::runtime_error("Private ANE runtime is unavailable.");
+  if (!ane_available()) throw std::runtime_error("Private ANE runtime is unavailable.");
   if (mil_source.empty() || weight_blob.dtype() != mlx::core::uint8 || weight_blob.ndim() != 1 ||
       !row_contiguous(weight_blob) || weight_blob.size() < 128 ||
       input_dim <= 0 || output_dim <= 0 || sequence_length < 2 ||
@@ -1700,10 +1691,10 @@ std::shared_ptr<AneLinearModel> ane_compile_program(
   }
 }
 
-std::shared_ptr<AneLinearModel> qwen35_ane_compile_swiglu_down(
+std::shared_ptr<AneLinearModel> ane_compile_swiglu_down(
     const array &gate_weight, const array &up_weight, const array &down_weight,
     int sequence_length, int ane_instance) {
-  if (!qwen35_ane_available()) {
+  if (!ane_available()) {
     throw std::runtime_error("Private ANE runtime is unavailable.");
   }
   for (const auto *weight : {&gate_weight, &up_weight, &down_weight}) {
@@ -1741,7 +1732,7 @@ struct AneFusedBankBuilder::Impl {
 
 AneFusedBankBuilder::AneFusedBankBuilder(int sequence_length)
     : impl_(std::make_unique<Impl>()) {
-  if (!qwen35_ane_available()) {
+  if (!ane_available()) {
     throw std::runtime_error("Private ANE runtime is unavailable.");
   }
   if (sequence_length <= 1) {
@@ -1862,7 +1853,7 @@ AneFusedBankBuilder::compile(int ane_instance, int start, int stop) {
 }
 
 std::vector<std::shared_ptr<AneLinearModel>>
-qwen35_ane_compile_swiglu_down_bank(
+ane_compile_swiglu_down_bank(
     const std::vector<array> &gate_weights,
     const std::vector<array> &up_weights,
     const std::vector<array> &down_weights, int sequence_length,
@@ -1916,7 +1907,7 @@ MTL::ComputePipelineState *hybrid_qmm_kernel(
   if (K % 64 == 0 && N % 64 == 0 && hybrid_nax_enabled()) {
     try {
       auto nax_library = device.get_library(
-          "omlx_qwen35_prefill_kernels_nax", binary_dir());
+          "omlx_quant_matmul_kernels_nax", binary_dir());
       return device.get_kernel(
           hybrid_nax_qmm_name(bits, group_size, type), nax_library);
     } catch (const std::exception &) {
@@ -2207,7 +2198,7 @@ public:
     gpu_output.set_data(allocator::malloc(gpu_output.nbytes()));
 
     auto library =
-        device.get_library("omlx_qwen35_prefill_kernels", binary_dir());
+        device.get_library("omlx_quant_matmul_kernels", binary_dir());
     if (cpu_input) {
       auto pack = device.get_kernel(
           "qwen35_cpu_pack_input_" + metal_type_name(x.dtype()), library);
@@ -2238,7 +2229,7 @@ public:
       if (hybrid_nax_enabled()) {
         try {
           auto nax_library = device.get_library(
-              "omlx_qwen35_prefill_kernels_nax", binary_dir());
+              "omlx_quant_matmul_kernels_nax", binary_dir());
           return device.get_kernel(
               hybrid_nax_qmm_name(bits_, group_size_, qmm_type), nax_library);
         } catch (const std::exception &) {
@@ -2303,7 +2294,7 @@ public:
     encoder.add_temporary(std::move(gpu_output));
   }
 
-  DEFINE_NAME(Qwen35CpuFp16Hybrid)
+  DEFINE_NAME(CpuFp16Hybrid)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive &other) const override {
     const auto &rhs = static_cast<const CpuFp16HybridPrimitive &>(other);
@@ -2388,7 +2379,7 @@ public:
     }
 
     auto library =
-        device.get_library("omlx_qwen35_prefill_kernels", binary_dir());
+        device.get_library("omlx_quant_matmul_kernels", binary_dir());
     auto pack =
         device.get_kernel(std::string(cpu_input ? "qwen35_ane_pack_input_cpu_"
                                                 : "qwen35_ane_pack_input_") +
@@ -2448,7 +2439,7 @@ public:
       if (hybrid_nax_enabled()) {
         try {
           auto nax_library = device.get_library(
-              "omlx_qwen35_prefill_kernels_nax", binary_dir());
+              "omlx_quant_matmul_kernels_nax", binary_dir());
           return device.get_kernel(
               hybrid_nax_qmm_name(bits_, group_size_, qmm_type), nax_library);
         } catch (const std::exception &) {
@@ -2640,7 +2631,7 @@ public:
     }
   }
 
-  DEFINE_NAME(Qwen35AneHybridQ4)
+  DEFINE_NAME(AneHybridQ4)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive &other) const override {
     const auto &rhs = static_cast<const AneHybridQ4Primitive &>(other);
@@ -2738,7 +2729,7 @@ public:
     }
 
     auto library =
-        device.get_library("omlx_qwen35_prefill_kernels", binary_dir());
+        device.get_library("omlx_quant_matmul_kernels", binary_dir());
     auto pack = device.get_kernel(
         std::string(cpu_input ? "qwen35_ane_pack_input_dual_cpu_"
                               : "qwen35_ane_pack_input_dual_") +
@@ -2792,7 +2783,7 @@ public:
       if (hybrid_nax_enabled()) {
         try {
           auto nax_library = device.get_library(
-              "omlx_qwen35_prefill_kernels_nax", binary_dir());
+              "omlx_quant_matmul_kernels_nax", binary_dir());
           return device.get_kernel(
               hybrid_nax_qmm_name(bits_, group_size_, qmm_type), nax_library);
         } catch (const std::exception &) {
@@ -2980,7 +2971,7 @@ public:
     }
   }
 
-  DEFINE_NAME(Qwen35DualAneHybrid)
+  DEFINE_NAME(DualAneHybrid)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive &other) const override {
     const auto &rhs = static_cast<const DualAneHybridPrimitive &>(other);
@@ -3096,7 +3087,7 @@ public:
     }
 
     auto library =
-        device.get_library("omlx_qwen35_prefill_kernels", binary_dir());
+        device.get_library("omlx_quant_matmul_kernels", binary_dir());
     auto pack = device.get_kernel(
         std::string(model1_ ? "qwen35_ane_pack_input_dual_"
                             : "qwen35_ane_pack_input_") +
@@ -3358,7 +3349,7 @@ public:
     }
   }
 
-  DEFINE_NAME(Qwen35AneHybridQ4SwiGLUDown)
+  DEFINE_NAME(AneHybridQ4SwiGLUDown)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive &other) const override {
     const auto &rhs =
@@ -3388,13 +3379,13 @@ private:
 
 } // namespace
 
-bool qwen35_ane_hybrid_nax_enabled() { return hybrid_nax_enabled(); }
+bool ane_hybrid_nax_enabled() { return hybrid_nax_enabled(); }
 
-bool qwen35_cpu_shared_resource_available() {
+bool cpu_shared_resource_available() {
   return cpu_shared_resource_policy_available();
 }
 
-array qwen35_cpu_fp16_affine_qmm_t(
+array cpu_fp16_affine_qmm_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases, int bits, int variant,
     int group_size, int cpu_threads, bool cpu_shared_resource,
@@ -3433,7 +3424,7 @@ array qwen35_cpu_fp16_affine_qmm_t(
                                   gpu_biases});
 }
 
-array qwen35_ane_affine_qmm_t(
+array ane_affine_qmm_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases, const std::shared_ptr<AneLinearModel> &ane_model,
     int bits, int variant, int group_size, int profile_category,
@@ -3469,7 +3460,7 @@ array qwen35_ane_affine_qmm_t(
                std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases});
 }
 
-array qwen35_ane_cpu_fp16_affine_qmm_t(
+array ane_cpu_fp16_affine_qmm_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int bits, int variant,
@@ -3512,16 +3503,16 @@ array qwen35_ane_cpu_fp16_affine_qmm_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases, cpu_weight});
 }
 
-array qwen35_ane_q4_affine_qmm_t(
+array ane_q4_affine_qmm_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases, const std::shared_ptr<AneLinearModel> &ane_model,
     int variant, int group_size, int profile_category, StreamOrDevice s) {
-  return qwen35_ane_affine_qmm_t(x, gpu_weight, gpu_scales, gpu_biases,
+  return ane_affine_qmm_t(x, gpu_weight, gpu_scales, gpu_biases,
                                  ane_model, 4, variant, group_size,
                                  profile_category, s);
 }
 
-array qwen35_ane_affine_swiglu_t(
+array ane_affine_swiglu_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases, const std::shared_ptr<AneLinearModel> &ane_model,
     int bits, int variant, int group_size, StreamOrDevice s) {
@@ -3557,7 +3548,7 @@ array qwen35_ane_affine_swiglu_t(
                std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases});
 }
 
-array qwen35_ane_cpu_fp16_swiglu_t(
+array ane_cpu_fp16_swiglu_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int bits, int variant,
@@ -3601,26 +3592,26 @@ array qwen35_ane_cpu_fp16_swiglu_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases, cpu_weight});
 }
 
-array qwen35_ane_cpu_fp16_q4_swiglu_t(
+array ane_cpu_fp16_q4_swiglu_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model, int variant,
     int group_size, int cpu_threads, bool cpu_shared_resource,
     StreamOrDevice s) {
-  return qwen35_ane_cpu_fp16_swiglu_t(
+  return ane_cpu_fp16_swiglu_t(
       x, cpu_weight, gpu_weight, gpu_scales, gpu_biases, ane_model, 4, variant,
       group_size, cpu_threads, cpu_shared_resource, s);
 }
 
-array qwen35_ane_q4_swiglu_t(
+array ane_q4_swiglu_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases, const std::shared_ptr<AneLinearModel> &ane_model,
     int variant, int group_size, StreamOrDevice s) {
-  return qwen35_ane_affine_swiglu_t(x, gpu_weight, gpu_scales, gpu_biases,
+  return ane_affine_swiglu_t(x, gpu_weight, gpu_scales, gpu_biases,
                                     ane_model, 4, variant, group_size, s);
 }
 
-array qwen35_ane_dual_affine_qmm_t(
+array ane_dual_affine_qmm_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -3661,7 +3652,7 @@ array qwen35_ane_dual_affine_qmm_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases});
 }
 
-array qwen35_ane_dual_cpu_fp16_affine_qmm_t(
+array ane_dual_cpu_fp16_affine_qmm_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -3707,7 +3698,7 @@ array qwen35_ane_dual_cpu_fp16_affine_qmm_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases, cpu_weight});
 }
 
-array qwen35_ane_dual_cpu_fp16_swiglu_t(
+array ane_dual_cpu_fp16_swiglu_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -3756,7 +3747,7 @@ array qwen35_ane_dual_cpu_fp16_swiglu_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases, cpu_weight});
 }
 
-array qwen35_ane_dual_affine_swiglu_t(
+array ane_dual_affine_swiglu_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -3800,18 +3791,18 @@ array qwen35_ane_dual_affine_swiglu_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases});
 }
 
-array qwen35_ane_dual_q4_swiglu_t(
+array ane_dual_q4_swiglu_t(
     const array &x, const array &gpu_weight, const array &gpu_scales,
     const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
     const std::shared_ptr<AneLinearModel> &ane_model1, int variant,
     int group_size, StreamOrDevice s) {
-  return qwen35_ane_dual_affine_swiglu_t(
+  return ane_dual_affine_swiglu_t(
       x, gpu_weight, gpu_scales, gpu_biases, ane_model0, ane_model1, 4,
       variant, group_size, s);
 }
 
-array qwen35_ane_dual_cpu_fp16_q4_swiglu_t(
+array ane_dual_cpu_fp16_q4_swiglu_t(
     const array &x, const array &cpu_weight, const array &gpu_weight,
     const array &gpu_scales, const array &gpu_biases,
     const std::shared_ptr<AneLinearModel> &ane_model0,
@@ -3857,7 +3848,7 @@ array qwen35_ane_dual_cpu_fp16_q4_swiglu_t(
       std::vector<array>{x, gpu_weight, gpu_scales, gpu_biases, cpu_weight});
 }
 
-array qwen35_ane_q4_swiglu_down_t(
+array ane_q4_swiglu_down_t(
     const array &x, const array &gpu_gate_up_weight,
     const array &gpu_gate_up_scales, const array &gpu_gate_up_biases,
     const array &gpu_down_weight, const array &gpu_down_scales,
@@ -3908,7 +3899,7 @@ array qwen35_ane_q4_swiglu_down_t(
                          gpu_down_biases});
 }
 
-array qwen35_ane_dual_q4_swiglu_down_t(
+array ane_dual_q4_swiglu_down_t(
     const array &x, const array &gpu_gate_up_weight,
     const array &gpu_gate_up_scales, const array &gpu_gate_up_biases,
     const array &gpu_down_weight, const array &gpu_down_scales,
@@ -3964,7 +3955,7 @@ array qwen35_ane_dual_q4_swiglu_down_t(
                          gpu_down_biases});
 }
 
-array qwen35_ane_dual_cpu_fp16_q4_swiglu_down_t(
+array ane_dual_cpu_fp16_q4_swiglu_down_t(
     const array &x, const array &cpu_gate_up_weight,
     const array &cpu_down_weight, const array &gpu_gate_up_weight,
     const array &gpu_gate_up_scales, const array &gpu_gate_up_biases,
@@ -4035,4 +4026,4 @@ array qwen35_ane_dual_cpu_fp16_q4_swiglu_down_t(
                          cpu_down_weight});
 }
 
-} // namespace omlx::qwen35_prefill_kernels
+} // namespace omlx::quant_matmul

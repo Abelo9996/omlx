@@ -1,11 +1,11 @@
-#include "deepseek_v41_grouped_expert.h"
+#include "grouped_expert.h"
 
 #include <stdexcept>
 #include <string>
 #include "mlx/backend/metal/device.h"
 #include "mlx/primitives.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::quant_matmul {
 namespace {
 using namespace mlx::core;
 
@@ -58,7 +58,7 @@ class GroupedExpert : public Primitive {
 };
 } // namespace
 
-mlx::core::array deepseek_v41_grouped_expert(
+mlx::core::array grouped_expert(
     const mlx::core::array& gate, const mlx::core::array& up,
     const mlx::core::array& activation, const mlx::core::array& down) {
   using namespace mlx::core;
@@ -100,4 +100,4 @@ mlx::core::array deepseek_v41_grouped_expert(
                std::make_shared<GroupedExpert>(s, gate, up, activation, down),
                std::move(inputs));
 }
-} // namespace omlx::glm_kernels
+} // namespace omlx::quant_matmul

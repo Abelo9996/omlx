@@ -1,6 +1,6 @@
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
-#include "kernels/steel_deepseek_v41_packed_attention.h"
+#include "steel_packed_sparse_attention.h"
 
 #define instantiate_deepseek_v41_packed_attention(tname, dtype, bk, dc, h, d, wm) \
   instantiate_kernel(                                                            \

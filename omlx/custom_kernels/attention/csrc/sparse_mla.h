@@ -8,9 +8,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
-mx::array glm_dsa_sparse_mla_attention(
+mx::array sparse_mla_attention(
     const mx::array& q_latent,
     const mx::array& q_pe,
     const mx::array& kv_latent,
@@ -24,4 +24,4 @@ mx::array glm_dsa_sparse_mla_attention(
     int causal_prefix_rows = 0,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

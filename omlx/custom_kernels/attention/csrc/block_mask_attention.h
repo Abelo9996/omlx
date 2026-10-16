@@ -6,9 +6,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
-mx::array glm_dsa_exact_block_attention(
+mx::array block_mask_attention(
     const mx::array& q,
     const mx::array& k,
     const mx::array& v,
@@ -18,4 +18,4 @@ mx::array glm_dsa_exact_block_attention(
     bool causal = true,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

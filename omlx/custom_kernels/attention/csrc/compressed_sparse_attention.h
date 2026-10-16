@@ -6,9 +6,9 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
-mx::array deepseek_v4_sparse_attention(
+mx::array compressed_sparse_attention(
     const mx::array& q,
     const mx::array& local_kv,
     const mx::array& pooled,
@@ -20,4 +20,4 @@ mx::array deepseek_v4_sparse_attention(
     int local_window,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

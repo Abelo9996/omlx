@@ -1,6 +1,6 @@
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/gemm/gemm.h"
-#include "kernels/quantized_moe.h"
+#include "affine_quantized.h"
 
 #define define_qwen35_q_affine_qmm_t(bits)                                    \
   template <typename T, const int BM, const int BK, const int BN>              \
@@ -143,17 +143,6 @@
   instantiate_qwen35_q_affine_qmm128_t(bits, float16_t, 128, 32, 64);        \
   instantiate_qwen35_q_affine_qmm128_t(bits, bfloat16_t, 128, 32, 64)
 
-#define instantiate_qwen35_moe_weighted_sum_tiled(type, score_type, topk,      \
-                                                  threads)                    \
-  instantiate_kernel(                                                          \
-      "moe_weighted_sum_tiled_" #type "_score_" #score_type "_topk_" #topk     \
-      "_t_" #threads,                                                          \
-      moe_weighted_sum_tiled,                                                  \
-      type,                                                                    \
-      score_type,                                                              \
-      topk,                                                                    \
-      threads)
-
 define_qwen35_q_affine_qmm_t(2)
 define_qwen35_q_affine_qmm_t(4)
 define_qwen35_q_affine_qmm_t(5)
@@ -177,10 +166,3 @@ instantiate_qwen35_q_affine_variants128(4);
 instantiate_qwen35_q_affine_variants128(5);
 instantiate_qwen35_q_affine_variants128(6);
 instantiate_qwen35_q_affine_variants128(8);
-
-instantiate_qwen35_moe_weighted_sum_tiled(float16_t, float, 8, 256);
-instantiate_qwen35_moe_weighted_sum_tiled(bfloat16_t, float, 8, 256);
-instantiate_qwen35_moe_weighted_sum_tiled(float16_t, float, 6, 256);
-instantiate_qwen35_moe_weighted_sum_tiled(bfloat16_t, float, 6, 256);
-instantiate_qwen35_moe_weighted_sum_tiled(float16_t, float, 10, 256);
-instantiate_qwen35_moe_weighted_sum_tiled(bfloat16_t, float, 10, 256);

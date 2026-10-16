@@ -6,7 +6,7 @@
 // HOST-SIDE HEADER: the kernel ships as a Metal source string compiled at
 // runtime through mlx's Device::get_library(name, builder) — i.e. by the
 // macOS runtime Metal compiler, NOT the Xcode CLI toolchain that builds
-// omlx_glm_kernels.metallib. This is deliberate and measured: the CLI
+// omlx_sparse_index_kernels.metallib. This is deliberate and measured: the CLI
 // toolchain (metalfe-32023.921, Xcode 27 beta) generates code for this
 // kernel that runs 3.4 %-points of peak slower (57.2ms vs 55.0ms at
 // M=4096/N=16384) than the runtime compiler that produced every accepted
@@ -43,7 +43,7 @@
 
 #pragma once
 
-namespace omlx::glm_kernels {
+namespace omlx::sparse_index {
 
 struct OMLXMMADSAScoreParamsHost {
   int M;
@@ -268,4 +268,4 @@ decltype(mma_dsa_indexer_score<bfloat, 64, 64, 2, 2, 64, 128, true>)
 mma_dsa_indexer_score<bfloat, 64, 64, 2, 2, 64, 128, true>;
 )MMADSA";
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::sparse_index

@@ -4,7 +4,7 @@
 #pragma once
 
 #include "mlx/backend/metal/kernels/steel/attn/attn.h"
-#include "mlx/backend/metal/kernels/steel/attn/params.h"
+#include "attn_params.h"
 
 using namespace mlx::steel;
 

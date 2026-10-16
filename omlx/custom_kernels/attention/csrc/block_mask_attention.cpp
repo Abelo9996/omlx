@@ -1,4 +1,5 @@
-#include "exact_block_attention.h"
+#include "block_mask_attention.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <filesystem>
@@ -6,28 +7,17 @@
 
 #include "mlx/backend/common/utils.h"
 #include "mlx/backend/metal/device.h"
-#include "mlx/backend/metal/kernels/steel/attn/params.h"
+#include "attn_params.h"
 #include "mlx/backend/metal/utils.h"
 #include "mlx/ops.h"
 #include "mlx/utils.h"
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
 namespace {
 
 using namespace mlx::core;
 using namespace mlx::steel;
-
-std::string current_binary_dir() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir), &info)) {
-      throw std::runtime_error("Unable to get omlx_glm_kernels binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
-}
 
 inline int64_t bcast_stride(const array& a, int axis) {
   return a.shape(axis) == 1 ? 0 : a.strides(axis);
@@ -37,9 +27,9 @@ bool last_dim_contiguous(const array& arr) {
   return arr.strides(-1) == 1;
 }
 
-class GlmDsaExactBlockAttentionPrimitive : public Primitive {
+class BlockMaskAttentionPrimitive : public Primitive {
  public:
-  GlmDsaExactBlockAttentionPrimitive(Stream stream, float scale, bool causal)
+  BlockMaskAttentionPrimitive(Stream stream, float scale, bool causal)
       : Primitive(stream), scale_(scale), causal_(causal) {}
 
   static bool unsupported(
@@ -108,7 +98,7 @@ class GlmDsaExactBlockAttentionPrimitive : public Primitive {
   void eval_cpu(
       const std::vector<array>& /* inputs */,
       std::vector<array>& /* outputs */) override {
-    throw std::runtime_error("GlmDsaExactBlockAttentionPrimitive has no CPU path.");
+    throw std::runtime_error("BlockMaskAttentionPrimitive has no CPU path.");
   }
 
   void eval_gpu(
@@ -205,7 +195,7 @@ class GlmDsaExactBlockAttentionPrimitive : public Primitive {
         {str_oB, str_oH, str_oL, str_oD},
         flags);
 
-    auto lib = d.get_library("omlx_glm_kernels", current_binary_dir());
+    auto lib = d.get_library("omlx_attention_kernels", binary_dir());
     auto& compute_encoder = metal::get_command_encoder(s);
     auto kernel = d.get_kernel(base_name, lib, hash_name, func_consts);
     compute_encoder.set_compute_pipeline_state(kernel);
@@ -259,11 +249,11 @@ class GlmDsaExactBlockAttentionPrimitive : public Primitive {
     compute_encoder.dispatch_threadgroups(grid_dims, group_dims);
   }
 
-  DEFINE_NAME(OMLXGlmDsaExactBlockAttention)
+  DEFINE_NAME(OMLXBlockMaskAttention)
   DEFINE_INPUT_OUTPUT_SHAPE()
   bool is_equivalent(const Primitive& other) const override {
     const auto& rhs =
-        static_cast<const GlmDsaExactBlockAttentionPrimitive&>(other);
+        static_cast<const BlockMaskAttentionPrimitive&>(other);
     return scale_ == rhs.scale_ && causal_ == rhs.causal_;
   }
   auto state() const {
@@ -277,7 +267,7 @@ class GlmDsaExactBlockAttentionPrimitive : public Primitive {
 
 } // namespace
 
-array glm_dsa_exact_block_attention(
+array block_mask_attention(
     const array& q,
     const array& k,
     const array& v,
@@ -289,7 +279,7 @@ array glm_dsa_exact_block_attention(
   for (const auto& tensor : {q, k, v}) {
     if (tensor.ndim() != 4) {
       std::ostringstream msg;
-      msg << "[omlx_glm_kernels.glm_dsa_exact_block_attention] input with "
+      msg << "[attention.block_mask_attention] input with "
           << "shape " << tensor.shape() << " expected rank 4.";
       throw std::invalid_argument(msg.str());
     }
@@ -298,7 +288,7 @@ array glm_dsa_exact_block_attention(
   auto final_type = result_type(std::vector<array>{q, k, v});
   if (final_type != float16 && final_type != bfloat16) {
     std::ostringstream msg;
-    msg << "[omlx_glm_kernels.glm_dsa_exact_block_attention] expected fp16 "
+    msg << "[attention.block_mask_attention] expected fp16 "
         << "or bf16 inputs, got " << final_type << ".";
     throw std::invalid_argument(msg.str());
   }
@@ -306,10 +296,10 @@ array glm_dsa_exact_block_attention(
   auto q_cast = astype(q, final_type, stream);
   auto k_cast = astype(k, final_type, stream);
   auto v_cast = astype(v, final_type, stream);
-  if (GlmDsaExactBlockAttentionPrimitive::unsupported(
+  if (BlockMaskAttentionPrimitive::unsupported(
           q_cast, k_cast, v_cast, block_mask, block_token_mask, causal, stream)) {
     throw std::invalid_argument(
-        "[omlx_glm_kernels.glm_dsa_exact_block_attention] unsupported GLM exact block SDPA shape.");
+        "[attention.block_mask_attention] unsupported GLM exact block SDPA shape.");
   }
 
   Shape out_shape{q_cast.shape(0), q_cast.shape(1), q_cast.shape(2), v_cast.shape(3)};
@@ -317,9 +307,9 @@ array glm_dsa_exact_block_attention(
   return array(
       std::move(out_shape),
       final_type,
-      std::make_shared<GlmDsaExactBlockAttentionPrimitive>(
+      std::make_shared<BlockMaskAttentionPrimitive>(
           stream, scale, causal),
       std::move(inputs));
 }
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

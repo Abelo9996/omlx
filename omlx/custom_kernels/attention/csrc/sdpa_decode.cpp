@@ -6,13 +6,14 @@
 // scaled_dot_product_attention.cpp vector paths, with kernel names and the
 // metallib swapped for the omlx ones.
 //
-// Layout contract matches the other decode_fast ops: realized inputs must
+// Layout contract matches the other attention ops: realized inputs must
 // satisfy the stride predicates below (KV caches and decode-time queries in
 // omlx always do). A misaligned realized input is a hard error, since
 // neither a nested eval nor an immediate contiguous copy is legal inside
 // eval_gpu; use the mx.fast fallback for exotic layouts.
 
 #include "sdpa_decode.h"
+#include "omlx/binary_dir.h"
 
 #include <dlfcn.h>
 #include <algorithm>
@@ -29,7 +30,7 @@
 #include "mlx/primitives.h"
 #include "mlx/utils.h"
 
-namespace omlx::decode_fast_kernels {
+namespace omlx::attention {
 
 namespace {
 
@@ -48,17 +49,6 @@ std::string sdpa_type_name(Dtype dtype) {
   std::ostringstream msg;
   msg << "Unsupported sdpa_decode dtype: " << dtype << ".";
   throw std::invalid_argument(msg.str());
-}
-
-std::string current_binary_dir_sdpa() {
-  static std::string binary_dir = []() {
-    Dl_info info;
-    if (!dladdr(reinterpret_cast<void*>(&current_binary_dir_sdpa), &info)) {
-      throw std::runtime_error("Unable to get omlx_decode_fast binary dir.");
-    }
-    return std::filesystem::path(info.dli_fname).parent_path().string();
-  }();
-  return binary_dir;
 }
 
 // Layout predicates mirrored from ScaledDotProductAttention::eval_gpu.
@@ -376,7 +366,7 @@ class SdpaDecodePrimitive : public Primitive {
            (*mask).strides(0) == (*mask).strides(1) * (*mask).shape(1))) ||
         (sinks && (*sinks).strides(-1) != 1)) {
       throw std::runtime_error(
-          "[omlx_decode_fast.sdpa_decode] realized input layout is not "
+          "[attention.sdpa_decode] realized input layout is not "
           "compatible with the vectorized decode kernels; use "
           "mx.fast.scaled_dot_product_attention for this layout.");
     }
@@ -395,7 +385,7 @@ class SdpaDecodePrimitive : public Primitive {
     }
 
     auto lib = d.get_library(
-        "omlx_decode_fast_kernels", current_binary_dir_sdpa());
+        "omlx_attention_kernels", binary_dir());
     if (use_2pass) {
       sdpa_decode_2pass(
           s, d, lib, q, k, v, o, scale_, do_causal, mask, sinks);
@@ -476,7 +466,7 @@ mx::array sdpa_decode(
     mx::StreamOrDevice s_) {
   if (!sdpa_decode_supported(q, k, v, s_)) {
     throw std::invalid_argument(
-        "[omlx_decode_fast.sdpa_decode] unsupported shapes/dtypes for the "
+        "[attention.sdpa_decode] unsupported shapes/dtypes for the "
         "decode kernels.");
   }
   auto s = to_stream(s_);
@@ -494,4 +484,4 @@ mx::array sdpa_decode(
       std::move(out_shape), q.dtype(), std::move(primitive), std::move(inputs));
 }
 
-} // namespace omlx::decode_fast_kernels
+} // namespace omlx::attention

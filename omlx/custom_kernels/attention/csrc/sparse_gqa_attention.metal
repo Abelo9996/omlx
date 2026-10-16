@@ -5,7 +5,7 @@
 // clang-format off
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h"
-#include "kernels/steel_qwen4_qsa_sparse_gqa.h"
+#include "steel_sparse_gqa_attention.h"
 // clang-format on
 
 #define instantiate_qwen4_sparse_gqa(tname, dtype, bk, dc)                     \

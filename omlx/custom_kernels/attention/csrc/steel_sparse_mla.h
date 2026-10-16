@@ -3,6 +3,7 @@
 #pragma once
 
 #include "mlx/backend/metal/kernels/steel/attn/attn.h"
+#include "attn_params.h"
 
 using namespace mlx::steel;
 

@@ -8,11 +8,11 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::attention {
 
-mx::array qwen4_qsa_sparse_gqa_attention(
+mx::array sparse_gqa_attention(
     const mx::array &queries, const mx::array &keys, const mx::array &values,
     const mx::array &selected_blocks, float scale, int q_offset,
     int key_tile = 128, int dimension_tile = 32, mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::attention

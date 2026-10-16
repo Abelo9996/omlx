@@ -6,7 +6,7 @@
 
 namespace mx = mlx::core;
 
-namespace omlx::glm_kernels {
+namespace omlx::sparse_index {
 
 mx::array dsa_indexer_scores(
     const mx::array& queries,
@@ -48,7 +48,7 @@ mx::array dsa_indexer_scores_mma(
 // The pooled causal mask is applied in the epilogue, so no [1,4,M,N]
 // intermediate is materialized. Unsupported shapes fail closed at the ABI;
 // the QSA caller retains its portable float32 implementation as fallback.
-mx::array qwen4_qsa_indexer_scores(
+mx::array qsa_indexer_scores(
     const mx::array& queries,
     const mx::array& pooled_keys,
     int mask_ratio = 4,
@@ -56,10 +56,10 @@ mx::array qwen4_qsa_indexer_scores(
     mx::StreamOrDevice s = {});
 
 // Lossless fixed-width Qwen4 QSA block selection. Scores are the contiguous
-// fp32 [1, M, N] result of qwen4_qsa_indexer_scores; the output is uint32
+// fp32 [1, M, N] result of qsa_indexer_scores; the output is uint32
 // [1, M, 512]. Cutoff ties deliberately retain the highest block indices to
 // match mx.argpartition(scores, kth=-512)[..., -512:] set membership.
-mx::array qwen4_qsa_topk_indices(
+mx::array qsa_topk_indices(
     const mx::array& scores,
     int topk = 512,
     mx::StreamOrDevice s = {});
@@ -71,7 +71,7 @@ mx::array dsa_topk_indices(
     bool causal_valid_prefix = false,
     mx::StreamOrDevice s = {});
 
-mx::array dspark_fp32_topk_indices(
+mx::array fp32_topk_indices(
     const mx::array& scores,
     int topk = 512,
     mx::StreamOrDevice s = {});
@@ -88,4 +88,4 @@ mx::array dsa_decode_scores(
     bool fp32_scores = false,
     mx::StreamOrDevice s = {});
 
-} // namespace omlx::glm_kernels
+} // namespace omlx::sparse_index

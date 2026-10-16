@@ -3,25 +3,20 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/variant.h>
 
-#include "dsa_indexer.h"
-#include "deepseek_v4_sparse_attention.h"
-#include "deepseek_v41_packed_attention.h"
-#include "deepseek_v41_grouped_expert.h"
-#include "dspark_gemm.h"
-#include "dspark_qmv.h"
-#include "exact_block_attention.h"
-#include "fused_moe.h"
-#include "qwen4_qsa_sparse_gqa.h"
+#include "block_mask_attention.h"
+#include "compressed_sparse_attention.h"
+#include "fa256_attention.h"
+#include "packed_sparse_attention.h"
+#include "sdpa_decode.h"
+#include "sparse_gqa_attention.h"
 #include "sparse_mla.h"
+#include "verify_gemm.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 
 NB_MODULE(_ext, m) {
-  m.doc() = "Native GLM kernels for oMLX";
-  m.def("deepseek_v41_grouped_expert",
-        &omlx::glm_kernels::deepseek_v41_grouped_expert,
-        "gate"_a, "up"_a, "activation"_a, "down"_a);
+  m.doc() = "Native attention kernels for oMLX";
 
   // ABI canary: when the extension is built with a nanobind whose ABI tag
   // differs from the one the mlx wheel was built with, the NB_DOMAIN is
@@ -34,46 +29,9 @@ NB_MODULE(_ext, m) {
         return static_cast<int64_t>(a.size());
       },
       "a"_a);
-
   m.def(
-      "dsa_indexer_scores",
-      &omlx::glm_kernels::dsa_indexer_scores,
-      "queries"_a,
-      "keys"_a,
-      "weights"_a,
-      "causal"_a = true,
-      "unused_causal_prefix_topk"_a = 0,
-      "skip_causal_future_store"_a = false,
-      "causal_q_offset"_a = -1,
-      "mask_ratio"_a = 0,
-      "mask_q_offset"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "dsa_indexer_scores_mma",
-      &omlx::glm_kernels::dsa_indexer_scores_mma,
-      "queries"_a,
-      "keys"_a,
-      "weights"_a,
-      "mask_ratio"_a = 0,
-      "mask_q_offset"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "qwen4_qsa_indexer_scores",
-      &omlx::glm_kernels::qwen4_qsa_indexer_scores,
-      "queries"_a,
-      "pooled_keys"_a,
-      "mask_ratio"_a = 4,
-      "mask_q_offset"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "qwen4_qsa_topk_indices",
-      &omlx::glm_kernels::qwen4_qsa_topk_indices,
-      "scores"_a,
-      "topk"_a = 512,
-      "stream"_a = nb::none());
-  m.def(
-      "qwen4_qsa_sparse_gqa_attention",
-      &omlx::glm_kernels::qwen4_qsa_sparse_gqa_attention,
+      "sparse_gqa_attention",
+      &omlx::attention::sparse_gqa_attention,
       "queries"_a,
       "keys"_a,
       "values"_a,
@@ -84,31 +42,8 @@ NB_MODULE(_ext, m) {
       "dimension_tile"_a = 32,
       "stream"_a = nb::none());
   m.def(
-      "dsa_topk_indices",
-      &omlx::glm_kernels::dsa_topk_indices,
-      "scores"_a,
-      "topk"_a,
-      "bucketed"_a = false,
-      "causal_valid_prefix"_a = false,
-      "stream"_a = nb::none());
-  m.def(
-      "dspark_fp32_topk_indices",
-      &omlx::glm_kernels::dspark_fp32_topk_indices,
-      "scores"_a,
-      "topk"_a = 512,
-      "stream"_a = nb::none());
-  m.def(
-      "dsa_decode_scores",
-      &omlx::glm_kernels::dsa_decode_scores,
-      "queries"_a,
-      "keys"_a,
-      "weights"_a,
-      "fp32_scores"_a = false,
-      "stream"_a = nb::none());
-
-  m.def(
-      "glm_dsa_sparse_mla_attention",
-      &omlx::glm_kernels::glm_dsa_sparse_mla_attention,
+      "sparse_mla_attention",
+      &omlx::attention::sparse_mla_attention,
       "q_latent"_a,
       "q_pe"_a,
       "kv_latent"_a,
@@ -122,8 +57,8 @@ NB_MODULE(_ext, m) {
       "causal_prefix_rows"_a = 0,
       "stream"_a = nb::none());
   m.def(
-      "glm_dsa_exact_block_attention",
-      &omlx::glm_kernels::glm_dsa_exact_block_attention,
+      "block_mask_attention",
+      &omlx::attention::block_mask_attention,
       "q"_a,
       "k"_a,
       "v"_a,
@@ -133,32 +68,23 @@ NB_MODULE(_ext, m) {
       "causal"_a = true,
       "stream"_a = nb::none());
   m.def(
-      "dspark_rowwise_gemm",
-      &omlx::glm_kernels::dspark_rowwise_gemm,
+      "rowwise_gemm",
+      &omlx::attention::rowwise_gemm,
       "lhs"_a,
       "rhs"_a,
       "transpose_rhs"_a,
       "stream"_a = nb::none());
   m.def(
-      "dspark_ring_gemm",
-      &omlx::glm_kernels::dspark_ring_gemm,
+      "ring_gemm",
+      &omlx::attention::ring_gemm,
       "lhs"_a,
       "source"_a,
       "indices"_a,
       "transpose_rhs"_a,
       "stream"_a = nb::none());
   m.def(
-      "dspark_exact_mxfp8_qmv_pair",
-      &omlx::glm_kernels::dspark_exact_mxfp8_qmv_pair,
-      "input"_a,
-      "weight_a"_a,
-      "scales_a"_a,
-      "weight_b"_a,
-      "scales_b"_a,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_v4_sparse_attention",
-      &omlx::glm_kernels::deepseek_v4_sparse_attention,
+      "compressed_sparse_attention",
+      &omlx::attention::compressed_sparse_attention,
       "q"_a,
       "local_kv"_a,
       "pooled"_a,
@@ -170,8 +96,8 @@ NB_MODULE(_ext, m) {
       "local_window"_a,
       "stream"_a = nb::none());
   m.def(
-      "deepseek_v41_packed_attention",
-      &omlx::glm_kernels::deepseek_v41_packed_attention,
+      "packed_sparse_attention",
+      &omlx::attention::packed_sparse_attention,
       "q"_a,
       "local_kv"_a,
       "pooled"_a,
@@ -183,90 +109,36 @@ NB_MODULE(_ext, m) {
       "local_window"_a,
       "stream"_a = nb::none());
   m.def(
-      "glm_dsa_q8_vup_flat",
-      &omlx::glm_kernels::glm_dsa_q8_vup_flat,
-      "x"_a,
-      "weight"_a,
-      "scales"_a,
-      "biases"_a,
+      "fa256_attention",
+      &omlx::attention::fa256_attention,
+      "q"_a,
+      "k"_a,
+      "v"_a,
+      "scale"_a,
+      "causal"_a = true,
+      "q_block"_a = 32,
+      "k_block"_a = 8,
+      "dispatch_budget"_a = 0,
+      "stream"_a = nb::none());
+  // Capability probe for fast.py: older extensions reject the
+  // dispatch_budget kwarg, so the wrapper only forwards it when present.
+  m.attr("FA256_HAS_DISPATCH_BUDGET") = true;
+  m.def(
+      "sdpa_decode_supported",
+      &omlx::attention::sdpa_decode_supported,
+      "q"_a,
+      "k"_a,
+      "v"_a,
       "stream"_a = nb::none());
   m.def(
-      "glm_moe_weighted_sum",
-      &omlx::glm_kernels::glm_moe_weighted_sum,
-      "x_sorted"_a,
-      "inv_order"_a,
-      "scores"_a,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_mxfp4_gather_qmm_blocks",
-      &omlx::glm_kernels::deepseek_mxfp4_gather_qmm_blocks,
-      "x"_a,
-      "weight"_a,
-      "scales"_a,
-      "block_meta"_a,
-      "block_count"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_mxfp4_gather_qmm_pair_blocks",
-      &omlx::glm_kernels::deepseek_mxfp4_gather_qmm_pair_blocks,
-      "x"_a,
-      "weight0"_a,
-      "scales0"_a,
-      "weight1"_a,
-      "scales1"_a,
-      "block_meta"_a,
-      "block_count"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_mxfp4_gather_qmm_pair_concat_blocks",
-      &omlx::glm_kernels::deepseek_mxfp4_gather_qmm_pair_concat_blocks,
-      "x"_a,
-      "weight0"_a,
-      "scales0"_a,
-      "weight1"_a,
-      "scales1"_a,
-      "block_meta"_a,
-      "block_count"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_affine_gather_qmm_blocks",
-      &omlx::glm_kernels::deepseek_affine_gather_qmm_blocks,
-      "x"_a,
-      "weight"_a,
-      "scales"_a,
-      "biases"_a,
-      "block_meta"_a,
-      "block_count"_a,
-      "group_size"_a,
-      "bits"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_affine_gather_qmm_pair_concat_blocks",
-      &omlx::glm_kernels::deepseek_affine_gather_qmm_pair_concat_blocks,
-      "x"_a,
-      "weight0"_a,
-      "scales0"_a,
-      "biases0"_a,
-      "weight1"_a,
-      "scales1"_a,
-      "biases1"_a,
-      "block_meta"_a,
-      "block_count"_a,
-      "group_size"_a,
-      "bits"_a,
-      "variant"_a = 0,
-      "stream"_a = nb::none());
-  m.def(
-      "deepseek_mxfp4_gather_qmm_expert",
-      &omlx::glm_kernels::deepseek_mxfp4_gather_qmm_expert,
-      "x"_a,
-      "weight"_a,
-      "scales"_a,
-      "indices"_a,
-      "variant"_a = 0,
+      "sdpa_decode",
+      &omlx::attention::sdpa_decode,
+      "q"_a,
+      "k"_a,
+      "v"_a,
+      "scale"_a,
+      "causal"_a,
+      "mask"_a = nb::none(),
+      "sinks"_a = nb::none(),
       "stream"_a = nb::none());
 }
