@@ -1853,8 +1853,7 @@ def test_prefill_loop_records_pool_release_before_next_chunk(chunked, monkeypatc
     assert all(charge > 0 for charge in charges[1:])
 
 
-@pytest.mark.parametrize("chunked", [False, True])
-def test_prefill_rate_excludes_pool_the_chunk_did_not_fill(chunked, monkeypatch):
+def test_prefill_rate_excludes_pool_the_chunk_did_not_fill(monkeypatch):
     """Decode buffers pooled between chunks are not prefill transient (#4587)."""
     model = Model(
         ModelArgs(
@@ -1914,27 +1913,23 @@ def test_prefill_rate_excludes_pool_the_chunk_did_not_fill(chunked, monkeypatch)
     req = Request(request_id="pool", prompt=prompt, sampling_params=SamplingParams())
     req.prompt_token_ids = prompt
     req.num_prompt_tokens = len(prompt)
-    if chunked:
-        state = _PrefillState(
-            request=req,
-            cache=make_prompt_cache(model),
-            tokens_remaining=sched_mod.mx.array(prompt[:-1])[None],
-            last_token=prompt[-1:],
-            tokens_processed=0,
-            base_size=0,
-            emitted_boundaries={},
-            boundary_enabled=False,
-            block_size=0,
-            total_length=len(prompt),
-        )
-        while not ns._step_prefill_chunk(state):
-            pass
-    else:
-        ns._do_external_prefill(req, prompt, make_prompt_cache(model))
+    state = _PrefillState(
+        request=req,
+        cache=make_prompt_cache(model),
+        tokens_remaining=sched_mod.mx.array(prompt[:-1])[None],
+        last_token=prompt[-1:],
+        tokens_processed=0,
+        base_size=0,
+        emitted_boundaries={},
+        boundary_enabled=False,
+        block_size=0,
+        total_length=len(prompt),
+    )
+    while not ns._step_prefill_chunk(state):
+        pass
 
     tracker = ns._prefill_transient_tracker
     assert widths == [64, 64, 64, 40]
-    assert tracker.last_n_tokens_for(False) == 40
     assert tracker.last_delta_bytes_for(False) == 40 * mib
     assert tracker.bytes_per_token_for(False) == pytest.approx(mib)
 

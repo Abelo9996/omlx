@@ -4405,7 +4405,7 @@ class Scheduler:
                 request.benchmark_prefill_chunks.append(int(n_to_process))
                 request.benchmark_requested_steps.append(int(prefill_step_size))
 
-            _pre_active, _pre_total, _pre_cpu = Scheduler._chunk_memory_sample()
+            _pre_active, _, _pre_cpu = Scheduler._chunk_memory_sample()
             # External prefill bypasses BatchGenerator, so it must establish
             # the per-engine stream context itself. Native lazy primitives
             # otherwise bind to the worker's unrelated default stream and can
@@ -4478,17 +4478,11 @@ class Scheduler:
                     if extra_kwargs:
                         extra_kwargs = _advance_vlm_extra(extra_kwargs, n_to_process)
             _trace_model_ms = (time.perf_counter() - _trace_model_start) * 1000.0
-            _post_active, _post_total, _post_cpu = Scheduler._chunk_memory_sample()
+            _, _post_total, _post_cpu = Scheduler._chunk_memory_sample()
             # Charge the chunk everything it grew above live arrays, including
             # the pool it filled, so the next chunk after a clear is priced.
             _throttle_pre = _pre_active + _pre_cpu
             _throttle_post = _post_total + max(_pre_cpu, _post_cpu)
-            _unowned_pool = Scheduler._unowned_pool_bytes(
-                self,
-                n_to_process,
-                _pre_total - _pre_active,
-                _post_total - _post_active,
-            )
             if Scheduler._qwen4_prefill_accounting_enabled(self):
                 actual_gathered_core = Scheduler._qwen4_actual_gathered_pricing(
                     prompt_cache, gathered_core
@@ -4513,7 +4507,6 @@ class Scheduler:
                 kv_len=base_size + processed_tokens,
                 requested_step=prefill_step_size,
                 gathered_core=gathered_core,
-                unowned_pool_bytes=_unowned_pool,
             )
             self._maybe_record_fixed_state_bytes(prompt_cache)
             # Enforcer-requested hard-pressure drain. The flag's normal
@@ -5889,12 +5882,10 @@ class Scheduler:
         return active, active + pooled, cpu
 
     def _unowned_pool_bytes(self, n_tokens: int, pre_pool: int, post_pool: int) -> int:
-        """Pool bytes present before a chunk that the chunk did not fill.
+        """Return pre-chunk pool this chunk did not fill, and record what it owns.
 
-        Only the pool left by a previous prefill chunk of the same width is
-        reusable by this chunk. Decode buffers, another engine's buffers, and
-        a wider chunk's pool are already in current usage and are not part of
-        this chunk's transient. Records this chunk's pool for the next chunk.
+        Only a previous chunk of the same width leaves reusable buffers.
+        Decode buffers and a wider chunk's pool are already in current usage.
         """
         owned = 0
         last = getattr(self, "_prefill_chunk_pool", None)
@@ -5921,10 +5912,9 @@ class Scheduler:
 
         Qwen4 subtracts static work and records residual allocator overhead
         without scaling it by token count. Other models retain token-linear
-        observations without ``unowned_pool_bytes``. Negative deltas record
-        released buffers; positive deltas repay reallocation charges. Partial
-        speed-priority chunks do not replace representative overhead or
-        full-step measurements.
+        observations. Negative deltas record released buffers; positive deltas
+        repay reallocation charges. Partial speed-priority chunks do not
+        replace representative overhead or full-step measurements.
         """
         delta = post_bytes - pre_bytes
         monitor = getattr(self, "memory_monitor", None)
