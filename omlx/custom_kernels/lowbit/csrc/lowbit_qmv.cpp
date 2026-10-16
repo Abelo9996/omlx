@@ -3,8 +3,8 @@
 //
 // Bonsai 1-bit / 2-bit Metal kernel dispatch.
 //
-// Metal kernel sources live in lowbit_qmv.metal (qmv_fast / qmv_wide)
-// and spec_decode.metal, compiled into omlx_lowbit_kernels.metallib by CMake.
+// Metal kernel sources live in lowbit_qmv.metal (qmv_fast / qmv_wide),
+// compiled into omlx_lowbit_kernels.metallib.
 // The metallib is loaded lazily on the first dispatch call and cached.
 //
 // MLX 0.32+ requires Metal dispatch to occur inside Primitive::eval_gpu.
@@ -401,58 +401,6 @@ class LowbitQmvPrimitive : public Primitive {
     DEFINE_NAME(LowbitQmvPrimitive)
 };
 
-// SpecDecodeVerifyPrimitive: wraps spec_decode_verify kernel.
-//   inputs[0] = draft  [B, K] int32
-//   inputs[1] = target [B, K+1] int32 (argmax token ids; caller argmaxes logits)
-//   outputs[0] = n_accepted [B] int32
-//   outputs[1] = committed  [B, K+1] int32
-class SpecDecodeVerifyPrimitive : public Primitive {
- public:
-    explicit SpecDecodeVerifyPrimitive(Stream s) : Primitive(s) {}
-
-    void eval_cpu(
-        const std::vector<array>& /* inputs */,
-        std::vector<array>& /* outputs */) override {
-        throw std::runtime_error("SpecDecodeVerifyPrimitive has no CPU path.");
-    }
-
-    void eval_gpu(
-        const std::vector<array>& inputs,
-        std::vector<array>& outputs) override {
-        auto& s = stream();
-        auto& d = metal::device(s.device);
-
-        auto& n_accepted = outputs[0];
-        auto& committed  = outputs[1];
-        n_accepted.set_data(mlx::core::allocator::malloc(n_accepted.nbytes()));
-        committed.set_data(mlx::core::allocator::malloc(committed.nbytes()));
-
-        const auto& draft  = inputs[0];
-        const auto& target = inputs[1];
-
-        int B = draft.shape(0);
-        int K = draft.shape(1);
-
-        auto kernel = get_lowbit_kernel(d, "spec_decode_verify");
-        auto& enc = metal::get_command_encoder(s);
-        enc.set_compute_pipeline_state(kernel);
-
-        enc.set_input_array(draft,       0);
-        enc.set_input_array(target,      1);
-        enc.set_output_array(n_accepted, 2);
-        enc.set_output_array(committed,  3);
-        enc.set_bytes(K, 4);
-        enc.set_bytes(B, 5);
-
-        int tgroup = std::min(B, 256);
-        MTL::Size grid_dims(B, 1, 1);
-        MTL::Size group_dims(tgroup, 1, 1);
-        enc.dispatch_threads(grid_dims, group_dims);
-    }
-
-    DEFINE_NAME(SpecDecodeVerifyPrimitive)
-};
-
 // T5QmvPrimitive: t5 base-3 ternary decode (Identity I-D).
 //   inputs[0] = x      (row-contiguous activations)
 //   inputs[1] = w      (uint8 t5 weight bytes, (N, n_groups*bytes_per_group))
@@ -781,35 +729,6 @@ array t5_qmm(
     return array(out_shape, x_c.dtype(),
         std::make_shared<T5QmmPrimitive>(s),
         {x_c, w, sc});
-}
-
-std::pair<array, array> spec_decode_verify(
-    const array& draft,
-    const array& target,
-    StreamOrDevice s_) {
-    auto s = to_stream(s_);
-    int B = draft.shape(0);
-    int K = draft.shape(1);
-
-    if (draft.dtype() != mlx::core::int32 || target.dtype() != mlx::core::int32) {
-        throw std::invalid_argument(
-            "[lowbit.spec_decode_verify] draft and target must be int32 token ids "
-            "(argmax target logits before calling).");
-    }
-    if (target.ndim() != 2 || target.shape(0) != B || target.shape(1) != K + 1) {
-        throw std::invalid_argument(
-            "[lowbit.spec_decode_verify] target must have shape [B, K+1].");
-    }
-
-    // Sibling outputs must be created through make_arrays so eval_gpu
-    // receives both in one outputs vector.
-    auto primitive = std::make_shared<SpecDecodeVerifyPrimitive>(s);
-    auto outs = array::make_arrays(
-        {{B}, {B, K + 1}},
-        {mlx::core::int32, mlx::core::int32},
-        primitive,
-        {draft, target});
-    return {outs[0], outs[1]};
 }
 
 } // namespace omlx::lowbit

@@ -1,5 +1,4 @@
 #include <nanobind/nanobind.h>
-#include <nanobind/stl/pair.h>
 #include <nanobind/stl/variant.h>
 
 #include "lowbit_qmv.h"
@@ -75,10 +74,5 @@ NB_MODULE(_ext, m) {
       "t5_qmm",
       &omlx::lowbit::t5_qmm,
       "x"_a, "w"_a, "scales"_a,
-      "stream"_a = nb::none());
-  m.def(
-      "spec_decode_verify",
-      &omlx::lowbit::spec_decode_verify,
-      "draft"_a, "target"_a,
       "stream"_a = nb::none());
 }

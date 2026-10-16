@@ -115,7 +115,6 @@ def _custom_kernel_build_kwargs() -> dict:
                         "omlx_lowbit_kernels",
                         sources=[
                             f"{lowbit}/lowbit_qmv.metal",
-                            f"{lowbit}/spec_decode.metal",
                         ],
                     ),
                 ],

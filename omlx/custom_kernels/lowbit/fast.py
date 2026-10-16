@@ -16,11 +16,6 @@ qmv_wide(x, w, scales, biases, bits, stream=None) -> mx.array
     Small-batch affine decode (M = 1..5, bits = 1 or 2).  Falls back to
     mx.quantized_matmul.  Routing: 1/2-bit M>=2 use qmv_wide on gen-15+
     for weight reuse; 1-bit M=1 uses qmv_fast; 2-bit M=1 uses qmv_fast.
-
-spec_decode_verify(draft_tokens, target_logits, stream=None)
-    -> (n_accepted [B], committed [B, K+1])
-    Fused greedy speculative-decode verify.  Uses the native Metal kernel when
-    available; otherwise falls back to a pure-mlx op composition.
 """
 
 from __future__ import annotations
@@ -380,75 +375,3 @@ def t5_qmm(
         "t5_qmm: native extension unavailable. "
         "Rebuild the bonsai extension."
     )
-
-
-# ---------------------------------------------------------------------------
-# spec_decode_verify
-# ---------------------------------------------------------------------------
-
-
-def spec_decode_verify(
-    draft_tokens: mx.array,
-    target_logits: mx.array,
-    stream=None,
-) -> tuple[mx.array, mx.array]:
-    """Greedy speculative-decoding verify.
-
-    Parameters
-    ----------
-    draft_tokens  : [B, K] int32   — K drafted token ids
-    target_logits : [B, K+1, V] float — target-model logits over last+draft
-
-    Returns
-    -------
-    n_accepted : [B] int32        — accepted prefix length (0..K)
-    committed  : [B, K+1] int32   — accepted draft prefix + corrected token
-    """
-    s = stream
-
-    dft = draft_tokens.astype(mx.int32, stream=s) if draft_tokens.dtype != mx.int32 else draft_tokens
-    tgt = mx.argmax(target_logits, axis=-1, stream=s)  # [B, K+1]
-    tgt = tgt.astype(mx.int32, stream=s) if tgt.dtype != mx.int32 else tgt
-
-    if _ext is not None and has_symbol("spec_decode_verify"):
-        return _ext.spec_decode_verify(dft, tgt, stream=s)
-
-    # Pure-mlx fallback — exactly the oracle from the Bonsai MLX fork
-    # (mlx/fast.cpp::spec_decode_verify fallback lambda).
-
-    B, K = dft.shape[0], dft.shape[1]
-
-    t_pref = tgt[:, :K]                                         # [B, K]
-    mism = mx.not_equal(dft, t_pref, stream=s)                  # [B, K] bool
-    j = mx.broadcast_to(
-        mx.reshape(mx.arange(K, dtype=mx.int32, stream=s), (1, K), stream=s),
-        (B, K), stream=s
-    )
-    n_acc = mx.min(
-        mx.where(mism, j, mx.full((B, K), K, mx.int32, stream=s), stream=s),
-        axis=1, keepdims=False, stream=s
-    )  # [B]
-
-    n_acc2 = mx.reshape(n_acc, (B, 1), stream=s)                # [B, 1]
-    corrected = mx.take_along_axis(tgt, n_acc2, axis=1, stream=s)  # [B, 1]
-    j1 = mx.broadcast_to(
-        mx.reshape(mx.arange(K + 1, dtype=mx.int32, stream=s), (1, K + 1), stream=s),
-        (B, K + 1), stream=s
-    )
-    nacc_b = mx.broadcast_to(n_acc2, (B, K + 1), stream=s)
-    d_ext = mx.concatenate(
-        [dft, mx.zeros((B, 1), dtype=mx.int32, stream=s)], axis=1, stream=s
-    )
-    corr_b = mx.broadcast_to(corrected, (B, K + 1), stream=s)
-    committed = mx.where(
-        mx.less(j1, nacc_b, stream=s),
-        d_ext,
-        mx.where(
-            mx.equal(j1, nacc_b, stream=s),
-            corr_b,
-            mx.zeros((B, K + 1), dtype=mx.int32, stream=s),
-            stream=s
-        ),
-        stream=s
-    )
-    return n_acc, committed

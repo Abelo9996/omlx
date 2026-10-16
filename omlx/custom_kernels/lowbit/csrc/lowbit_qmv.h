@@ -7,7 +7,6 @@
 // (github.com/PrismML-Eng/Bonsai-demo) which added:
 //   - 1-bit qmv_fast support to mlx's quantized.h
 //   - qmv_wide: small-batch (M=2..5) reuse kernel for 1/2-bit affine
-//   - spec_decode_verify: fused greedy speculative-decode verify
 
 #pragma once
 
@@ -73,12 +72,6 @@ array q2_affine_qmv_wide(
     const array& biases,
     StreamOrDevice s = {});
 
-// ---------------------------------------------------------------------------
-// spec_decode_verify
-// ---------------------------------------------------------------------------
-// draft  : [B, K]     int32 — drafted token ids
-// target : [B, K+1]   int32 — target argmax tokens (caller runs argmax first)
-// Returns {n_accepted [B], committed [B, K+1]}.
 array q1_affine_qmv_sym(
     const array& x,
     const array& w,
@@ -137,11 +130,6 @@ array t5_qmm(
     const array& x,
     const array& w,
     const array& scales,
-    StreamOrDevice s = {});
-
-std::pair<array, array> spec_decode_verify(
-    const array& draft,
-    const array& target,
     StreamOrDevice s = {});
 
 } // namespace omlx::lowbit
