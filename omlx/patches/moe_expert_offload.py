@@ -50,6 +50,8 @@ from mlx_lm.models.switch_layers import (
     _scatter_unsort,
 )
 
+from ..custom_kernels.moe_staging import EXPERTS, MAX_BYTES, Staging
+from ..custom_kernels.moe_staging import NATIVE_AVAILABLE as STAGING_AVAILABLE
 from ..scheduler import _sync_and_clear_cache
 
 logger = logging.getLogger(__name__)
@@ -471,10 +473,7 @@ class ExpertCache:
     ) -> int:
         if payload is None:
             read = self._staging.read if self._staging else CheckpointExpertStore.read
-            payload = [
-                (n, f, pl, read(pl))
-                for n, f, pl in self._plans(e)
-            ]
+            payload = [(n, f, pl, read(pl)) for n, f, pl in self._plans(e)]
         slot = self._reserve(protected)
         try:
             self._write(slot, payload)
@@ -1093,7 +1092,7 @@ def apply_moe_expert_offload(
         kind == "qwen4_exp"
         and not mtp_resident
         and resident_fraction < 1
-        and os.environ.get("OMLX_MOE_OFFLOAD_STAGING", "0") == "1"
+        and STAGING_AVAILABLE
     )
     for parent, key, glu, path in list(_iter_switch_glus(model)):
         if mtp_resident and _is_mtp_path(path):
@@ -1139,8 +1138,6 @@ def apply_moe_expert_offload(
         _sync_and_clear_cache()
 
     if staging_sizes:
-        from ..custom_kernels.moe_staging import EXPERTS, MAX_BYTES, Staging
-
         sizes = [
             size
             for size, count in sorted(staging_sizes.items())

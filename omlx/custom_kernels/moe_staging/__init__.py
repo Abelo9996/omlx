@@ -8,7 +8,12 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 
+from ..qwen35_prefill.fast import _ext as _qwen35_ext
+
 logger = logging.getLogger(__name__)
+
+_native = getattr(_qwen35_ext, "moe_staging", None)
+NATIVE_AVAILABLE = _native is not None
 
 # Match the qualified 40-expert pool, independent of IO batch size. Refuse
 # oversized layouts rather than silently increasing model memory admission.
@@ -29,9 +34,6 @@ class StagedRead:
     plan: object
     lease: object
 
-    def __len__(self):
-        return len(self.lease)
-
 
 class Staging:
     """One shared pool per model. Initialize lazily on the inference owner.
@@ -46,7 +48,7 @@ class Staging:
         self.sizes = sizes
         self.original_read = read
         self.original_to_mx = to_mx
-        self.pool = self.native = self.owner = None
+        self.pool = self.owner = None
         self.disabled = False
         self.lock = threading.Lock()
 
@@ -57,10 +59,7 @@ class Staging:
             if self.owner is not None:
                 return self if self.owner == threading.get_ident() else None
             try:
-                from . import _ext
-
-                self.pool = _ext.Pool(self.sizes)
-                self.native = _ext
+                self.pool = _native.Pool(self.sizes)
                 self.owner = threading.get_ident()
             except Exception:
                 self.disabled = True
@@ -83,7 +82,7 @@ class Staging:
             return self.original_to_mx(plan, payload)
         if payload.plan is not plan:
             raise ValueError("Staged payload belongs to a different plan")
-        out = self.native.to_array(
+        out = _native.to_array(
             payload.lease, list(plan.shape), _DTYPES[np.dtype(plan.np_dtype)]
         )
         return out.view(plan.mx_view) if plan.mx_view is not None else out

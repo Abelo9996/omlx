@@ -16,6 +16,9 @@
 namespace nb = nanobind;
 namespace mx = mlx::core;
 
+namespace omlx::moe_staging {
+namespace {
+
 struct Slot {
   mx::allocator::Buffer buffer;
   void* address;
@@ -104,12 +107,11 @@ struct Pool {
   }
 };
 
-NB_MODULE(_ext, m) {
-  nb::class_<Lease>(m, "Lease")
-      .def("__len__", [](const Lease& l) { return l.state->slots[l.index].size; })
-      .def_prop_ro("address", [](const Lease& l) {
-        return reinterpret_cast<uintptr_t>(l.state->slots[l.index].address);
-      });
+} // namespace
+
+void register_bindings(nb::module_& parent) {
+  auto m = parent.def_submodule("moe_staging", "Bounded expert read buffers");
+  nb::class_<Lease>(m, "Lease");
   nb::class_<Pool>(m, "Pool")
       .def(nb::init<const std::vector<size_t>&>())
       .def("read", &Pool::read, nb::call_guard<nb::gil_scoped_release>())
@@ -148,9 +150,7 @@ NB_MODULE(_ext, m) {
         mx::allocator::Data(buffer, [lease = std::move(lease)](mx::allocator::Buffer) {}),
         mx::Shape(shape.begin(), shape.end()), dtype);
   });
-  m.def("address", [](mx::array& a) {
-    if (!a.is_available())
-      throw std::invalid_argument("Evaluate array before inspecting its address");
-    return reinterpret_cast<uintptr_t>(a.data<void>());
-  });
 }
+
+} // namespace omlx::moe_staging
+

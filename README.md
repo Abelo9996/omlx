@@ -80,9 +80,6 @@ make install                # Editable install with the web UI and native custom
 make mcp                    # Optional: MCP support, restart `omlx serve` to load it
 ```
 
-Flash Next expert offload also has an optional shared-buffer read transport.
-See [staging setup, kill switch and qualification](docs/moe-offload-staging.md).
-
 Requires macOS 15.0+ (Sequoia), Python 3.11–3.13, and Apple Silicon (M1/M2/M3/M4/M5).
 
 > **Note on native custom kernels:** GLM-5.2, MiniMax M3, and Qwen3.5 need them.
