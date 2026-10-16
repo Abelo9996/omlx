@@ -23,6 +23,7 @@ omlx/custom_kernels/
   sparse_index/    indexer and top-k kernels
   quant_matmul/    quantized matmul kernels, ANE offload
   lowbit/          1-bit, 2-bit and T5 kernels
+  moe_staging/     MoE offload read buffers (native part is in quant_matmul)
   include/omlx/    shared C++ helpers
   _loader.py       loads each extension
   nax.py           M5 tensor unit (NAX) check

@@ -128,6 +128,7 @@ def _custom_kernel_build_kwargs() -> dict:
                     f"{quant}/gather_qmm.cpp",
                     f"{quant}/grouped_expert.cpp",
                     f"{quant}/head_flat_qmm.cpp",
+                    f"{quant}/moe_staging.cpp",
                     f"{quant}/moe_weighted_sum.cpp",
                     f"{quant}/mxfp8_qmv.cpp",
                     f"{quant}/oq_a8.cpp",

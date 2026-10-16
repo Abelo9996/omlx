@@ -20,6 +20,10 @@
 namespace nb = nanobind;
 using namespace nb::literals;
 
+namespace omlx::moe_staging {
+void register_bindings(nb::module_& m);
+}
+
 NB_MODULE(_ext, m) {
   m.doc() = "Native quantized matmul and ANE offload kernels for oMLX";
 
@@ -120,6 +124,9 @@ NB_MODULE(_ext, m) {
   m.def(
       "is_nax_available",
       &omlx::quant_matmul::is_nax_available);
+
+  omlx::moe_staging::register_bindings(m);
+
   m.def(
       "set_command_buffer_caps",
       &omlx::quant_matmul::set_command_buffer_caps,
