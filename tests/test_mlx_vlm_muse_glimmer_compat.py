@@ -744,6 +744,178 @@ def test_muse_spark_vlm_loads_checkpoint_names(spark_applied):
         model.get_input_embeddings(mx.array([[1]]), pixel_values_videos=pixels)
 
 
+def _spark_randomize(model):
+    """Random routers, residual gates and norm weights.
+
+    Norm weights far from zero (gains below 0.5 included) make the layout's
+    value transforms visible in the logits.
+    """
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    mx.random.seed(2)
+    updates = []
+    for key, value in tree_flatten(model.parameters()):
+        if "vision" in key:
+            continue
+        if key.endswith(("residual_gate.gate", "mlp.gate.weight")):
+            updates.append((key, mx.random.normal(value.shape)))
+        elif key.endswith(("norm.weight", "layernorm.weight")):
+            weight = mx.random.normal(value.shape) * 0.5
+            updates.append((key, weight.astype(mx.bfloat16)))
+    model.update(tree_unflatten(updates))
+
+
+def _spark_quantize(model, prefix):
+    """Per-layer bits as oQ assigns them: one format per fused attention group."""
+    import mlx.nn as nn
+
+    def predicate(path, module):
+        if not (hasattr(module, "to_quantized") and path.startswith(prefix)):
+            return False
+        if ".self_attn." in path and not path.endswith("o_proj"):
+            bits = 4 if ".layers.0." in path else 8
+            return {"group_size": 32, "bits": bits, "mode": "affine"}
+        if path.endswith("lm_head"):
+            return {"group_size": 32, "bits": 8, "mode": "affine"}
+        return True
+
+    nn.quantize(model, group_size=32, bits=3, class_predicate=predicate)
+
+
+def _spark_save_upstream(model, path, config):
+    """Save ``model`` in the upstream layout, one tensor at a time like oQ."""
+    import json
+
+    from mlx.utils import tree_flatten
+
+    from omlx.patches.muse_spark.upstream_layout import UpstreamWriter
+
+    writer = UpstreamWriter(config)
+    weights = {}
+    for key, value in tree_flatten(model.parameters()):
+        weights.update(writer({key: value}))
+    writer.finish()
+    per_layer = {
+        name: {"group_size": m.group_size, "bits": m.bits, "mode": m.mode}
+        for name, m in model.named_modules()
+        if hasattr(m, "bits") and m.bits != 3
+    }
+    quantization = {"group_size": 32, "bits": 3, "mode": "affine"}
+    quantization.update(writer.quantization(per_layer))
+    mx.save_safetensors(str(path / "model.safetensors"), weights)
+    (path / "config.json").write_text(
+        json.dumps({**config, "quantization": quantization})
+    )
+    return weights
+
+
+def test_muse_spark_loads_upstream_layout(spark_applied, tmp_path):
+    from mlx_lm.utils import load_model
+
+    from omlx.patches.muse_spark.muse_spark_model import Model, ModelArgs
+
+    config = {"model_type": "muse_spark", "text_config": _spark_text_kwargs()}
+    model = Model(ModelArgs.from_dict(config))
+    _spark_randomize(model)
+    _spark_quantize(model, "")
+    weights = _spark_save_upstream(model, tmp_path, config)
+    assert "model.language_model.layers.1.self_attn.qkvg_proj.scales" in weights
+    assert (
+        "model.language_model.layers.0.mlp.experts.post_expert_norm.weight" in weights
+    )
+    assert "model.language_model.layers.0.add_ffn_beta" in weights
+    assert not any("residual_gate" in key or "switch_mlp" in key for key in weights)
+
+    # The per-module map uses upstream paths; the loader infers the bits.
+    loaded, _ = load_model(tmp_path)
+    assert loaded.model.layers[1].self_attn.q_proj.bits == 8
+    ids = mx.array([[1, 5, 9, 2, 33, 60, 4]])
+    expected, actual = model(ids), loaded(ids)
+    mx.eval(expected, actual)
+    assert mx.array_equal(expected, actual).item()
+
+
+def test_muse_spark_vlm_loads_upstream_layout(spark_applied, tmp_path):
+    from mlx_vlm.models.muse_spark import Model
+    from mlx_vlm.utils import load_model
+
+    config = {
+        "model_type": "muse_spark",
+        "text_config": _spark_text_kwargs(model_type="muse_spark_text"),
+        "vision_config": vars(_tiny_config().vision_config),
+        "image_token_id": 7,
+        "out_hidden_size": 32,
+        "projector_hidden_size": 16,
+    }
+    mx.random.seed(0)
+    model = Model(_spark_vlm_config())
+    _spark_randomize(model)
+    _spark_quantize(model, "language_model.")
+    weights = _spark_save_upstream(model, tmp_path, config)
+    assert "model.vision_tower.layers.0.attn.qkv_proj.bias" in weights
+
+    # mlx-vlm finds the per-module bits through the model's path aliases.
+    loaded = load_model(tmp_path)
+    assert loaded.language_model.model.layers[1].self_attn.gate_proj.bits == 8
+    pixels = mx.random.normal((4, 2 * 3 * 2 * 2))
+    grid = mx.array([[1, 2, 2]])
+    ids = mx.array([[1, 7, 2, 9]])
+    expected = model(ids, pixel_values=pixels, image_grid_thw=grid).logits
+    actual = loaded(ids, pixel_values=pixels, image_grid_thw=grid).logits
+    mx.eval(expected, actual)
+    assert mx.array_equal(expected, actual).item()
+
+
+def test_muse_spark_oq_writes_upstream_layout(spark_applied, tmp_path):
+    import json
+
+    import mlx.nn as nn
+    from mlx_lm.utils import load_model
+
+    from omlx.oq import quantize_oq_streaming
+    from omlx.patches.muse_spark.muse_spark_model import Model, ModelArgs
+
+    text = _spark_text_kwargs(
+        hidden_size=64,
+        intermediate_size=128,
+        head_dim=16,
+        moe_hidden_size=64,
+        moe_intermediate_size=64,
+    )
+    config = {"model_type": "muse_spark", "text_config": text}
+    mx.random.seed(0)
+    model = Model(ModelArgs.from_dict(config))
+    _spark_randomize(model)
+    src = tmp_path / "src"
+    src.mkdir()
+    weights = {k: v.astype(mx.bfloat16) for k, v in _spark_hf_weights(model).items()}
+    mx.save_safetensors(str(src / "model.safetensors"), weights)
+    (src / "config.json").write_text(json.dumps(config))
+
+    out = tmp_path / "oq"
+    quantize_oq_streaming(
+        str(src), str(out), 4, sensitivity_map_override={0: 1.0, 1: 0.5}
+    )
+
+    saved = mx.load(str(out / "model.safetensors"))
+    attn = "model.language_model.layers.0.self_attn."
+    assert attn + "qkvg_proj.scales" in saved and attn + "q_proj.weight" not in saved
+    assert "model.language_model.layers.1.add_attn_alpha" in saved
+    # mlx-lm's Muse Spark needs a full-precision lm_head.
+    assert "lm_head.scales" not in saved
+    quantization = json.loads((out / "config.json").read_text())["quantization"]
+    assert not any(".q_proj" in key or "switch_mlp" in key for key in quantization)
+
+    loaded, _ = load_model(out)
+    for layer in loaded.model.layers:
+        attn = layer.self_attn
+        bits = {p.bits for p in (attn.q_proj, attn.k_proj, attn.v_proj, attn.gate_proj)}
+        assert len(bits) == 1
+    assert isinstance(loaded.lm_head, nn.Linear)
+    logits = loaded(mx.array([[1, 5, 9, 2, 33]]))
+    assert bool(mx.isfinite(logits).all().item())
+
+
 @pytest.mark.skipif(
     not _CHECKPOINT.exists(), reason="Muse Glimmer checkpoint not available"
 )
