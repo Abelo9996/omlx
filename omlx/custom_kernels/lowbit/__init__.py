@@ -1,4 +1,4 @@
-"""Bonsai 1-bit / 2-bit decode kernels for oMLX.
+"""Low-bit decode kernels for the Bonsai 1-bit / 2-bit formats.
 
 Provides two primitives used by Bonsai (1-bit) and Ternary-Bonsai (2-bit) models:
 

@@ -2254,7 +2254,7 @@ class TestSchedulerStatistics:
         self, mock_model, mock_tokenizer, offload
     ):
         """On a 24 GB host without NAX, the wide qwen4 step needs offload."""
-        from omlx.custom_kernels.glm_moe_dsa import fast
+        from omlx.custom_kernels.attention import fast
 
         mock_model.config.model_type = "qwen4_exp_text"
         with (
@@ -4458,11 +4458,11 @@ class TestSchedulerArraysCacheBlockAlignment:
             patch("omlx.settings.get_system_memory", return_value=256 * 1024**3),
             patch("omlx.custom_kernels.nax.is_nax_available", return_value=False),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.is_native_available",
+                "omlx.custom_kernels.attention.fast.is_native_available",
                 return_value=True,
             ),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.has_symbol",
+                "omlx.custom_kernels.attention.fast.has_symbol",
                 return_value=True,
             ),
         ):
@@ -4502,11 +4502,11 @@ class TestSchedulerArraysCacheBlockAlignment:
             ),
             patch("omlx.custom_kernels.nax.is_nax_available", return_value=True),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.is_native_available",
+                "omlx.custom_kernels.attention.fast.is_native_available",
                 return_value=True,
             ),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.has_symbol",
+                "omlx.custom_kernels.attention.fast.has_symbol",
                 return_value=True,
             ),
         ):
@@ -4544,11 +4544,11 @@ class TestSchedulerArraysCacheBlockAlignment:
             patch("omlx.settings.get_system_memory", return_value=256 * 1024**3),
             patch("omlx.custom_kernels.nax.is_nax_available", return_value=False),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.is_native_available",
+                "omlx.custom_kernels.attention.fast.is_native_available",
                 return_value=native_available,
             ),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.has_symbol",
+                "omlx.custom_kernels.attention.fast.has_symbol",
                 return_value=symbol_available,
             ),
         ):
@@ -4576,11 +4576,11 @@ class TestSchedulerArraysCacheBlockAlignment:
             patch("omlx.settings.get_system_memory", return_value=128 * 1024**3),
             patch("omlx.custom_kernels.nax.is_nax_available", return_value=True),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.is_native_available",
+                "omlx.custom_kernels.attention.fast.is_native_available",
                 return_value=True,
             ),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.has_symbol",
+                "omlx.custom_kernels.attention.fast.has_symbol",
                 return_value=True,
             ),
         ):
@@ -4628,11 +4628,11 @@ class TestSchedulerArraysCacheBlockAlignment:
             patch("omlx.settings.get_system_memory", return_value=128 * 1024**3),
             patch("omlx.custom_kernels.nax.is_nax_available", return_value=True),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.is_native_available",
+                "omlx.custom_kernels.attention.fast.is_native_available",
                 return_value=True,
             ),
             patch(
-                "omlx.custom_kernels.glm_moe_dsa.fast.has_symbol",
+                "omlx.custom_kernels.attention.fast.has_symbol",
                 return_value=True,
             ),
         ):

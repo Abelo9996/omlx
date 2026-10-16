@@ -1,4 +1,5 @@
-"""Native MiniMax M3 kernel extensions used by oMLX monkey patches."""
+# SPDX-License-Identifier: Apache-2.0
+"""Sparse-attention index kernels: indexer scores and top-k selection."""
 
 from . import fast
 

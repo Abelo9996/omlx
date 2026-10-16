@@ -6110,7 +6110,7 @@ def test_coarse_draft_head_splits_qwen4_logits_source_from_chain_hidden():
 @pytest.mark.parametrize("raised", [True, False])
 def test_spec_command_buffers_restore_caps_after_the_step(monkeypatch, raised):
     """Speculative steps raise MLX's buffer caps where measured and always restore them."""
-    from omlx.custom_kernels.qwen35_prefill import fast
+    from omlx.custom_kernels.quant_matmul import fast
 
     caps = [(50, 50)]
 
@@ -6139,7 +6139,7 @@ def test_spec_command_buffers_restore_caps_after_the_step(monkeypatch, raised):
     ],
 )
 def test_spec_caps_target(monkeypatch, model_type, gpu, enabled, detected):
-    from omlx.custom_kernels.qwen35_prefill import fast
+    from omlx.custom_kernels.quant_matmul import fast
 
     target = SimpleNamespace(model_type=model_type)
     calls, detections = [], []

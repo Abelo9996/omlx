@@ -1,128 +1,20 @@
-"""Fast GLM kernels with a fallback to patched ``mlx.core.fast`` symbols."""
+"""Quantized matmul kernels, the MoE weighted sum and the NAX probes."""
 
 from __future__ import annotations
 
 import logging
+import platform
+import re
 from pathlib import Path
 from typing import Any
 
 import mlx.core as mx
 
+from .._loader import load_extension
+from .._loader import native_stream_kwargs as _native_stream_kwargs
+
 logger = logging.getLogger(__name__)
-
-
-def _detach_import_error(exc: Exception) -> Exception:
-    """Keep the diagnostic message without retaining import caller frames."""
-    exc.__traceback__ = None
-    exc.__cause__ = None
-    exc.__context__ = None
-    return exc
-
-
-try:
-    from . import _ext
-except Exception as exc:  # pragma: no cover - depends on local native build
-    _ext = None
-    _IMPORT_ERROR = _detach_import_error(exc)
-    # Default installs ship no extension; warn only when a built _ext fails
-    # to load (e.g. unresolved @rpath/libmlx.dylib, issue #2233) so the
-    # silent-slow-path fallback leaves a trace in the server log.
-    if any(Path(__file__).parent.glob("_ext*.so")):
-        logger.warning(
-            "%s: native extension is present but failed to load; falling "
-            "back to the slow path: %s",
-            __name__,
-            _IMPORT_ERROR,
-        )
-else:
-    _IMPORT_ERROR = None
-
-
-def _verify_abi(ext, import_error):
-    """Disable the native symbols when the extension rejects mlx arrays.
-
-    An extension built with a nanobind whose ABI tag differs from the mlx
-    wheel's imports cleanly and lists every symbol, but its type casters
-    live in an isolated NB_DOMAIN, so every call raises ``TypeError:
-    incompatible function arguments`` (issue #2139). Probe once at import
-    and degrade with a single warning instead of failing per call; builds
-    predating the ``abi_probe`` binding are assumed compatible.
-    """
-    if ext is None:
-        return ext, import_error
-    probe = getattr(ext, "abi_probe", None)
-    if probe is None:
-        return ext, import_error
-    try:
-        probe(mx.zeros((1,)))
-    except TypeError as exc:
-        logger.warning(
-            "%s: native kernels disabled — the extension was built with a "
-            "nanobind ABI that does not match this mlx wheel; rebuild it "
-            "against the installed mlx (see pyproject build-system pins).",
-            __name__,
-        )
-        return None, _detach_import_error(exc)
-    return ext, import_error
-
-
-_ext, _IMPORT_ERROR = _verify_abi(_ext, _IMPORT_ERROR)
-
-
-def _probe_mask_fold(ext) -> bool:
-    """True iff the built extension accepts the mask-fold kwargs.
-
-    ``dsa_indexer_scores`` grew ``mask_ratio``/``mask_q_offset`` after the
-    first native builds shipped. An older ``_ext`` parses no such kwargs, so
-    passing them unconditionally raises ``TypeError`` for every caller —
-    including GLM-5.2's historical unmasked path. Nanobind renders named
-    args into ``__doc__``, so probe the signature once at import; callers
-    on older builds keep the historical call signature and the mask is
-    applied in a second pass with identical sentinel semantics.
-    """
-    fn = getattr(ext, "dsa_indexer_scores", None)
-    if fn is None:
-        return False
-    doc = getattr(fn, "__doc__", None) or ""
-    return "mask_ratio" in doc and "mask_q_offset" in doc
-
-
-_EXT_MASK_FOLD = _probe_mask_fold(_ext)
-
-
-def _probe_mma_score(ext) -> bool:
-    """True iff the built extension exposes the v25 M2 MMA score kernel."""
-    return getattr(ext, "dsa_indexer_scores_mma", None) is not None
-
-
-_EXT_MMA_SCORE = _probe_mma_score(_ext)
-
-
-NATIVE_SYMBOLS = (
-    "dsa_decode_scores",
-    "dsa_indexer_scores",
-    "qwen4_qsa_indexer_scores",
-    "qwen4_qsa_topk_indices",
-    "qwen4_qsa_sparse_gqa_attention",
-    "dsa_topk_indices",
-    "dspark_fp32_topk_indices",
-    "dspark_exact_mxfp8_qmv_pair",
-    "glm_dsa_sparse_mla_attention",
-    "glm_dsa_exact_block_attention",
-    "deepseek_v4_sparse_attention",
-    "deepseek_v41_packed_attention",
-    "deepseek_v41_grouped_expert",
-    "dspark_ring_gemm",
-    "dspark_rowwise_gemm",
-    "glm_dsa_q8_vup_flat",
-    "glm_moe_weighted_sum",
-    "deepseek_mxfp4_gather_qmm_blocks",
-    "deepseek_mxfp4_gather_qmm_pair_blocks",
-    "deepseek_mxfp4_gather_qmm_pair_concat_blocks",
-    "deepseek_mxfp4_gather_qmm_expert",
-    "deepseek_affine_gather_qmm_blocks",
-    "deepseek_affine_gather_qmm_pair_concat_blocks",
-)
+_ext, _IMPORT_ERROR = load_extension(__package__, Path(__file__).parent)
 
 
 def is_native_available() -> bool:
@@ -134,480 +26,494 @@ def import_error() -> Exception | None:
 
 
 def has_symbol(name: str) -> bool:
-    return hasattr(_ext, name) or hasattr(mx.fast, name)
+    return hasattr(_ext, name)
 
 
-def native_symbols() -> tuple[str, ...]:
-    if _ext is None:
-        return ()
-    return tuple(name for name in NATIVE_SYMBOLS if hasattr(_ext, name))
+def set_command_buffer_caps(ops: int, mb: int) -> tuple[int, int] | None:
+    """Set MLX's per-command-buffer caps and return the previous pair.
 
-
-def missing_symbols(required: tuple[str, ...]) -> list[str]:
-    return [name for name in required if not has_symbol(name)]
-
-
-def _native_stream_kwargs(stream) -> dict[str, object]:
-    """Accept the same stream shorthand that mlx.fast kernels accept."""
-    if isinstance(stream, mx.DeviceType):
-        stream = None
-    return {"stream": stream}
-
-
-def dsa_indexer_scores_mma(
-    queries: mx.array,
-    keys: mx.array,
-    weights: mx.array,
-    mask_ratio: int = 0,
-    mask_q_offset: int = 0,
-    *,
-    stream=None,
-) -> mx.array:
-    """v25 M2 from-scratch MMA indexer scores (~1.37x over the Steel kernel).
-
-    Serves ONLY bf16, H=64, D=128, weights rank 3 ([B, L, H]), non-causal;
-    the extension raises on anything else — callers gate and fall back to
-    ``dsa_indexer_scores``. Same fused pooled-ratio mask semantics
-    (``mask_ratio``/``mask_q_offset``) and bit-exact output vs the Steel
-    kernel. No slow-path fallback: requires a local extension build that
-    exposes the symbol (probe with ``_EXT_MMA_SCORE``).
+    Returns None when the native extension is unavailable; MLX keeps its caps.
     """
-    if not (_ext is not None and _EXT_MMA_SCORE):
-        raise RuntimeError(
-            "dsa_indexer_scores_mma requires a local extension build that "
-            "exposes the v25 MMA score kernel"
+    setter = getattr(_ext, "set_command_buffer_caps", None)
+    if setter is None:
+        return None
+    return tuple(setter(int(ops), int(mb)))
+
+
+# Extensions built before the NAX split reject the use_nax/nax_variant kwargs,
+# so only pass them when the rebuilt binding is present.
+_EXT_HAS_NAX = _ext is not None and hasattr(_ext, "is_nax_available")
+
+
+# Extensions built before the Bonsai group_size=128 support reject the
+# group_size kwarg on the qmm bindings, so only forward it when the rebuilt
+# binding is present.  The q2 binding ships in the same rebuild, so its
+# presence marks the new ABI.  Older builds only carry gs=64 kernels; callers
+# must keep gs!=64 layers on stock mlx (see qmm_supports_group_size).
+_EXT_HAS_QMM_GROUP_SIZE = _ext is not None and hasattr(_ext, "affine_q2_qmm_t")
+
+
+def _qmm_group_size_kwargs(group_size: int) -> dict:
+    if _EXT_HAS_QMM_GROUP_SIZE:
+        return {"group_size": group_size}
+    return {}
+
+
+def qmm_supports_group_size(group_size: int) -> bool:
+    """True if the compiled extension can run qmm at this group size.
+
+    gs=64 always works (the pre-group_size builds are gs=64-only).  Other
+    group sizes require the rebuilt binding; routing a gs=128 layer through
+    an old build would silently run the gs=64 kernel on gs=128 data.
+    """
+    return group_size == 64 or _EXT_HAS_QMM_GROUP_SIZE
+
+
+_NAX_ARCH_RE = re.compile(r"applegpu_g(\d+)([a-z])")
+
+
+_NAX_KERNEL_NEEDLE = b"affine_qmm_t_nax"
+
+
+_nax_available_cache: bool | None = None
+
+
+_stock_nax_cache: bool | None = None
+
+
+_qmm_nax_cache: bool | None = None
+
+
+# Bundled NAX tiles (must match affine_qmm_nax_variant in affine_qmm.cpp):
+#   0: 64x64x64 wm2 wn2 (stock MLX tile, default)   1: bm 32   2: bm 128
+#   3: bn 128   4: bk 32   5: wm4 wn1
+NAX_QMM_VARIANTS = range(6)
+
+
+QMM_NAX_VARIANT = 0
+
+
+def _nax_available_fallback(
+    version: str | None = None, arch: str | None = None
+) -> bool:
+    """Python mirror of mlx metal::is_nax_available() for pre-NAX extensions."""
+    if version is None or arch is None:
+        if not mx.metal.is_available():
+            return False
+        if version is None:
+            version = platform.mac_ver()[0]
+        if arch is None:
+            arch = str(mx.device_info().get("architecture", ""))
+    try:
+        release = tuple(int(part) for part in version.split(".")[:2])
+    except ValueError:
+        return False
+    if len(release) < 2 or release < (26, 2):
+        return False
+    match = _NAX_ARCH_RE.fullmatch(arch)
+    if match is None:
+        return False
+    gen = int(match.group(1))
+    suffix = match.group(2)
+    return gen >= (18 if suffix == "p" else 17)
+
+
+def _stock_mlx_has_nax(lib_path: Path | None = None) -> bool:
+    """True when the installed mlx wheel ships the NAX kernels.
+
+    Wheels built for macOS < 26.2 are compiled with MLX_METAL_NO_NAX (e.g.
+    the macosx_15 wheel in the sequoia app bundle): on those installs stock
+    stays on the classic kernels even on M5 hardware, so route-to-stock
+    decisions must not fire. Unreadable/absent metallibs (JIT builds) fall
+    back to True, which reduces to the hardware-only gate.
+    """
+    global _stock_nax_cache
+    if lib_path is None and _stock_nax_cache is not None:
+        return _stock_nax_cache
+    path = lib_path
+    if path is None:
+        core_file = getattr(mx, "__file__", None)
+        if core_file is None:
+            return True
+        path = Path(core_file).parent / "lib" / "mlx.metallib"
+    found = True
+    try:
+        if path.is_file():
+            overlap = len(_NAX_KERNEL_NEEDLE) - 1
+            tail = b""
+            found = False
+            with open(path, "rb") as f:
+                while chunk := f.read(1 << 23):
+                    if _NAX_KERNEL_NEEDLE in tail + chunk:
+                        found = True
+                        break
+                    tail = chunk[-overlap:]
+    except OSError:
+        found = True
+    if lib_path is None:
+        _stock_nax_cache = found
+    return found
+
+
+def is_nax_available() -> bool:
+    """True when stock MLX will dispatch to the M5 tensor-unit (NAX) kernels.
+
+    Requires both NAX hardware (mirroring mlx metal::is_nax_available) and an
+    mlx install whose metallib actually ships the NAX kernels.
+    """
+    global _nax_available_cache
+    if _nax_available_cache is None:
+        if _EXT_HAS_NAX:
+            hardware = bool(_ext.is_nax_available())
+        else:
+            hardware = _nax_available_fallback()
+        _nax_available_cache = hardware and _stock_mlx_has_nax()
+    return _nax_available_cache
+
+
+def nax_qmm_kernels_built() -> bool:
+    if not _EXT_HAS_NAX:
+        return False
+    return bool(_ext.nax_qmm_kernels_built())
+
+
+def _qmm_use_nax() -> bool:
+    global _qmm_nax_cache
+    if _qmm_nax_cache is None:
+        _qmm_nax_cache = (
+            _EXT_HAS_NAX
+            and bool(_ext.is_nax_available())
+            and bool(_ext.nax_qmm_kernels_built())
         )
-    return _ext.dsa_indexer_scores_mma(
-        queries,
-        keys,
-        weights,
-        mask_ratio=mask_ratio,
-        mask_q_offset=mask_q_offset,
-        **_native_stream_kwargs(stream),
-    )
+        if _qmm_nax_cache:
+            logger.info(
+                "Affine qmm NAX dispatch enabled (nax_variant=%d)",
+                QMM_NAX_VARIANT,
+            )
+    return _qmm_nax_cache
 
 
-def dsa_indexer_scores(
-    queries: mx.array,
-    keys: mx.array,
-    weights: mx.array,
-    causal: bool = True,
-    unused_causal_prefix_topk: int = 0,
-    skip_causal_future_store: bool = False,
-    causal_q_offset: int = -1,
-    mask_ratio: int = 0,
-    mask_q_offset: int = 0,
+def _qmm_nax_kwargs(bits: int) -> dict[str, object]:
+    # The NAX metal kernel only defines bits 4/5/6/8 (affine_qmm_nax.metal).
+    # Routing a q2 call through NAX anyway hits a kernel-lookup failure that
+    # latches `nax_qmm_runtime_ok=false` process-wide, permanently demoting
+    # every q4/q5/q6/q8 layer to the classic kernel for the rest of the
+    # process. Never request NAX for bits==2.
+    if bits == 2 or not _EXT_HAS_NAX:
+        return {}
+    return {"use_nax": _qmm_use_nax(), "nax_variant": QMM_NAX_VARIANT}
+
+
+def affine_q2_qmm_t(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    variant: int = 8,
+    group_size: int = 64,
     *,
     stream=None,
 ) -> mx.array:
-    """Head-summed DSA indexer scores.
-
-    ``mask_ratio > 0`` folds the pooled-ratio causal mask into the kernel
-    epilogue: pooled column ``c`` is masked for query row ``r`` iff
-    ``c >= (mask_q_offset + r + 1) // mask_ratio`` and receives the
-    ``finfo(dtype).min`` sentinel — bit-identical to applying
-    ``mx.where(mask, scores, finfo.min)`` in a second pass. ``mask_ratio=0``
-    (default) is the historical unmasked behavior. On extension builds
-    predating the fold kwargs, the historical call signature is kept and
-    the same mask is applied in a second pass with identical semantics.
-    """
-    if _ext is not None and _EXT_MASK_FOLD:
-        return _ext.dsa_indexer_scores(
-            queries,
-            keys,
-            weights,
-            causal=causal,
-            unused_causal_prefix_topk=unused_causal_prefix_topk,
-            skip_causal_future_store=skip_causal_future_store,
-            causal_q_offset=causal_q_offset,
-            mask_ratio=mask_ratio,
-            mask_q_offset=mask_q_offset,
+    if _ext is not None and hasattr(_ext, "affine_q2_qmm_t"):
+        return _ext.affine_q2_qmm_t(
+            x,
+            weight,
+            scales,
+            biases,
+            variant,
+            **_qmm_nax_kwargs(2),
+            **_qmm_group_size_kwargs(group_size),
             **_native_stream_kwargs(stream),
         )
-    if _ext is not None:
-        # Older build without the mask-fold kwargs: keep the historical
-        # call signature; the mask is applied in a second pass below.
-        scores = _ext.dsa_indexer_scores(
-            queries,
-            keys,
-            weights,
-            causal=causal,
-            unused_causal_prefix_topk=unused_causal_prefix_topk,
-            skip_causal_future_store=skip_causal_future_store,
-            causal_q_offset=causal_q_offset,
+    raise RuntimeError("affine_q2_qmm_t native kernel is unavailable")
+
+
+def affine_q4_qmm_t(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    variant: int = 8,
+    group_size: int = 64,
+    *,
+    stream=None,
+) -> mx.array:
+    if _ext is not None and hasattr(_ext, "affine_q4_qmm_t"):
+        return _ext.affine_q4_qmm_t(
+            x,
+            weight,
+            scales,
+            biases,
+            variant,
+            **_qmm_nax_kwargs(4),
+            **_qmm_group_size_kwargs(group_size),
             **_native_stream_kwargs(stream),
         )
-    else:
-        scores = mx.fast.dsa_indexer_scores(
-            queries,
-            keys,
-            weights,
-            causal=causal,
-            unused_causal_prefix_topk=unused_causal_prefix_topk,
-            skip_causal_future_store=skip_causal_future_store,
-            causal_q_offset=causal_q_offset,
-            stream=stream or mx.gpu,
-        )
-    if mask_ratio > 0:
-        # Preserve the fused kernel's exact sentinel semantics on the
-        # non-fused paths (same validity rule, same finfo.min sentinel).
-        L = queries.shape[2]
-        P = keys.shape[2]
-        pool_idx = mx.arange(P)
-        query_idx = mx.arange(mask_q_offset + 1, mask_q_offset + L + 1)
-        mask = pool_idx < query_idx[:, None] // mask_ratio
-        scores = mx.where(
-            mask[None, None], scores, mx.finfo(scores.dtype).min
-        )
-    return scores
+    raise RuntimeError("affine_q4_qmm_t native kernel is unavailable")
 
 
-def qwen4_qsa_indexer_scores(
-    queries: mx.array,
-    pooled_keys: mx.array,
-    mask_ratio: int = 4,
-    mask_q_offset: int = 0,
+def affine_q5_qmm_t(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    variant: int = 8,
+    group_size: int = 64,
     *,
     stream=None,
 ) -> mx.array:
-    """Fused, fp32 Qwen4 QSA block scores for the M3 prefill geometry.
-
-    ``queries`` is ``[1, 4, M, 128]`` and ``pooled_keys`` is
-    ``[1, 1, N, 128]`` in matching bf16/fp16. The result is fp32
-    ``[1, M, N]`` after head-summed ReLU, ``1/sqrt(128)`` scaling, and the
-    pooled-causal mask. The dedicated ABI intentionally has no implicit
-    fallback; ``qsa_fast`` owns the portable float32 fallback.
-    """
-    if _ext is None or not hasattr(_ext, "qwen4_qsa_indexer_scores"):
-        raise RuntimeError(
-            "qwen4_qsa_indexer_scores requires a local extension build that "
-            "exposes the Qwen4 QSA score kernel"
+    if _ext is not None and hasattr(_ext, "affine_q5_qmm_t"):
+        return _ext.affine_q5_qmm_t(
+            x,
+            weight,
+            scales,
+            biases,
+            variant,
+            **_qmm_nax_kwargs(5),
+            **_qmm_group_size_kwargs(group_size),
+            **_native_stream_kwargs(stream),
         )
-    return _ext.qwen4_qsa_indexer_scores(
-        queries,
-        pooled_keys,
-        mask_ratio=mask_ratio,
-        mask_q_offset=mask_q_offset,
-        **_native_stream_kwargs(stream),
-    )
+    raise RuntimeError("affine_q5_qmm_t native kernel is unavailable")
 
 
-def qwen4_qsa_topk_indices(
+def affine_q6_qmm_t(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    variant: int = 8,
+    group_size: int = 64,
+    *,
+    stream=None,
+) -> mx.array:
+    if _ext is not None and hasattr(_ext, "affine_q6_qmm_t"):
+        return _ext.affine_q6_qmm_t(
+            x,
+            weight,
+            scales,
+            biases,
+            variant,
+            **_qmm_nax_kwargs(6),
+            **_qmm_group_size_kwargs(group_size),
+            **_native_stream_kwargs(stream),
+        )
+    raise RuntimeError("affine_q6_qmm_t native kernel is unavailable")
+
+
+def affine_q8_qmm_t(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    variant: int = 8,
+    group_size: int = 64,
+    *,
+    stream=None,
+) -> mx.array:
+    if _ext is not None and hasattr(_ext, "affine_q8_qmm_t"):
+        return _ext.affine_q8_qmm_t(
+            x,
+            weight,
+            scales,
+            biases,
+            variant,
+            **_qmm_nax_kwargs(8),
+            **_qmm_group_size_kwargs(group_size),
+            **_native_stream_kwargs(stream),
+        )
+    raise RuntimeError("affine_q8_qmm_t native kernel is unavailable")
+
+
+def moe_weighted_sum(
+    x_sorted: mx.array,
+    inv_order: mx.array,
     scores: mx.array,
-    topk: int = 512,
     *,
     stream=None,
 ) -> mx.array:
-    """Select Qwen4's top 512 block indices from fp32 ``[1, M, N]`` scores.
-
-    The native radix path returns only ``[1, M, 512]`` uint32 indices, avoiding
-    the full-width index allocation made by ``mx.argpartition``. Exact cutoff
-    ties retain their highest-index members, matching the set selected by the
-    portable QSA expression. The ABI is deliberately fixed to ``topk=512`` and
-    fails closed when the rebuilt extension or production geometry is absent.
-    """
-    if _ext is None or not hasattr(_ext, "qwen4_qsa_topk_indices"):
-        raise RuntimeError("Qwen4 QSA FP32 top-k kernel is unavailable")
-    return _ext.qwen4_qsa_topk_indices(
-        scores,
-        topk,
-        **_native_stream_kwargs(stream),
-    )
-
-
-def qwen4_qsa_sparse_gqa_attention(
-    queries: mx.array,
-    keys: mx.array,
-    values: mx.array,
-    selected_blocks: mx.array,
-    scale: float,
-    q_offset: int,
-    *,
-    key_tile: int = 128,
-    dimension_tile: int = 32,
-    stream=None,
-) -> mx.array:
-    """Exact Qwen4 main GQA over query-specific selected cache rows.
-
-    The narrow native ABI consumes 512 chronological uint32 block IDs directly,
-    expands each to four tokens, appends the causal tail in-kernel, and
-    keeps QK scores, online softmax state, and the weighted output in fp32.
-    It supports only Qwen3.8-Flash-Next's batch-one ``24q/2kv/D256`` geometry;
-    callers own the portable gathered fallback for every other shape.
-    """
-
-    if _ext is None or not hasattr(_ext, "qwen4_qsa_sparse_gqa_attention"):
-        raise RuntimeError("Qwen4 QSA sparse GQA kernel is unavailable")
-    return _ext.qwen4_qsa_sparse_gqa_attention(
-        queries,
-        keys,
-        values,
-        selected_blocks,
-        scale,
-        q_offset,
-        key_tile,
-        dimension_tile,
-        **_native_stream_kwargs(stream),
-    )
-
-
-def dsa_decode_scores(
-    queries: mx.array,
-    keys: mx.array,
-    weights: mx.array,
-    fp32_scores: bool = False,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is None:
-        raise RuntimeError(
-            "dsa_decode_scores requires the native glm_moe_dsa extension"
-        )
-    return _ext.dsa_decode_scores(
-        queries,
-        keys,
-        weights,
-        fp32_scores=fp32_scores,
-        **_native_stream_kwargs(stream),
-    )
-
-
-def dsa_topk_indices(
-    scores: mx.array,
-    topk: int,
-    bucketed: bool = False,
-    causal_valid_prefix: bool = False,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is not None:
-        return _ext.dsa_topk_indices(
+    if _ext is not None and hasattr(_ext, "moe_weighted_sum"):
+        return _ext.moe_weighted_sum(
+            x_sorted,
+            inv_order,
             scores,
-            topk,
-            bucketed=bucketed,
-            causal_valid_prefix=causal_valid_prefix,
             **_native_stream_kwargs(stream),
         )
-    return mx.fast.dsa_topk_indices(
-        scores,
-        topk,
-        bucketed=bucketed,
-        causal_valid_prefix=causal_valid_prefix,
-        stream=stream or mx.gpu,
-    )
+    raise RuntimeError("moe_weighted_sum native kernel is unavailable")
 
 
-def dspark_fp32_topk_indices(
-    scores: mx.array,
-    topk: int = 512,
+def oq_a8_available() -> bool:
+    """True when the INT8 NAX GEMM can actually run on this machine.
+
+    Distinct from ``has_symbol``: the binding can exist in a build whose NAX
+    metallib was skipped (SDK < 26.2) or on hardware without tensor units.
+    """
+    if _ext is None or not hasattr(_ext, "oq_a8_kernels_available"):
+        return False
+    try:
+        return bool(_ext.oq_a8_kernels_available())
+    except Exception:
+        return False
+
+
+def oq_a8_quantize(
+    x: mx.array,
+    act_mode: int = 0,
     *,
     stream=None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Stage A: BF16/FP16 activations -> (Qa int8, Sa float32, Ra int16).
+
+    Run this once per shared activation and feed the result to every
+    projection that consumes it, whatever their bit widths.
+    """
+    if _ext is None or not hasattr(_ext, "oq_a8_quantize"):
+        raise RuntimeError("oq_a8_quantize native kernel is unavailable")
+    qa, sa, ra = _ext.oq_a8_quantize(
+        x,
+        act_mode,
+        **_native_stream_kwargs(stream),
+    )
+    return qa, sa, ra
+
+
+def oq_a8_qmm_t(
+    qa: mx.array,
+    sa: mx.array,
+    ra: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    bits: int,
+    act_mode: int = 0,
+    variant: int = 800,
+    *,
+    packed: bool = False,
+    stream=None,
 ) -> mx.array:
-    if _ext is None or not hasattr(_ext, "dspark_fp32_topk_indices"):
-        raise RuntimeError("DSpark FP32 top-k kernel is unavailable")
-    return _ext.dspark_fp32_topk_indices(
-        scores,
-        topk,
+    if _ext is None or not hasattr(_ext, "oq_a8_qmm_t"):
+        raise RuntimeError("oq_a8_qmm_t native kernel is unavailable")
+    return _ext.oq_a8_qmm_t(
+        qa,
+        sa,
+        ra,
+        weight,
+        scales,
+        biases,
+        bits,
+        act_mode,
+        variant,
+        packed=packed,
         **_native_stream_kwargs(stream),
     )
 
 
-def glm_dsa_sparse_mla_attention(
-    q_latent: mx.array,
-    q_pe: mx.array,
-    kv_latent: mx.array,
-    k_pe: mx.array,
-    topk_indices: mx.array,
-    scale: float,
-    causal: bool = True,
-    topk_valid_prefix: bool = False,
-    causal_prefix_indices: bool = False,
-    topk_length: mx.array | None = None,
-    causal_prefix_rows: int = 0,
+def oq_a8_linear(
+    x: mx.array,
+    weight: mx.array,
+    scales: mx.array,
+    biases: mx.array,
+    bits: int,
+    act_mode: int = 0,
+    variant: int = 800,
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None:
-        return _ext.glm_dsa_sparse_mla_attention(
-            q_latent,
-            q_pe,
-            kv_latent,
-            k_pe,
-            topk_indices,
-            scale,
-            causal=causal,
-            topk_valid_prefix=topk_valid_prefix,
-            causal_prefix_indices=causal_prefix_indices,
-            topk_length=topk_length,
-            causal_prefix_rows=causal_prefix_rows,
-            **_native_stream_kwargs(stream),
-        )
-    return mx.fast.glm_dsa_sparse_mla_attention(
-        q_latent,
-        q_pe,
-        kv_latent,
-        k_pe,
-        topk_indices,
-        scale,
-        causal=causal,
-        topk_valid_prefix=topk_valid_prefix,
-        causal_prefix_indices=causal_prefix_indices,
-        topk_length=topk_length,
-        causal_prefix_rows=causal_prefix_rows,
-        stream=stream or mx.gpu,
+    """Convenience Stage-A + GEMM for a projection with no shared activation."""
+    if bits == 8:
+        qa, sa, ra = oq_a8_stage_a_natural(x, act_mode, stream=stream)
+    else:
+        qa, sa, ra = oq_a8_stage_a_v8(x, act_mode, stream=stream)
+        scales, biases = mx.contiguous(scales.T), mx.contiguous(biases.T)
+    return oq_a8_qmm_t(
+        qa,
+        sa,
+        ra,
+        weight,
+        scales,
+        biases,
+        bits,
+        act_mode,
+        variant,
+        stream=stream,
     )
 
 
-def glm_dsa_exact_block_attention(
-    q: mx.array,
-    k: mx.array,
-    v: mx.array,
-    block_mask: mx.array,
-    block_token_mask: mx.array,
-    scale: float,
-    causal: bool = True,
+def oq_a8_stage_a_v8(
+    x: mx.array,
+    act_mode: int = 0,
     *,
     stream=None,
-) -> mx.array:
-    if _ext is not None and hasattr(_ext, "glm_dsa_exact_block_attention"):
-        return _ext.glm_dsa_exact_block_attention(
-            q,
-            k,
-            v,
-            block_mask,
-            block_token_mask,
-            scale,
-            causal=causal,
-            **_native_stream_kwargs(stream),
-        )
-    return mx.fast.glm_dsa_exact_block_attention(
-        q,
-        k,
-        v,
-        block_mask,
-        block_token_mask,
-        scale,
-        causal=causal,
-        stream=stream or mx.gpu,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Reorder activations for the native GEMM and transpose group metadata.
+
+    Within each GS64 group, slot ``16c + 4t + j`` holds
+    ``k = 16c + 8*(t>>1) + 2j + (t&1)``. This permutation preserves the
+    group sum and requires a temporary contiguous INT8 activation copy.
+    """
+    qa, sa, ra = oq_a8_quantize(x, act_mode, stream=stream)
+    shape = qa.shape
+    k = shape[-1]
+    m = qa.size // k
+    # Reshaped back to the input's own rank, not to [M, K]: the op derives the
+    # output shape from Qa, so flattening a [B, S, K] activation here would
+    # hand the caller a [B*S, N] result. With B == 1 that broadcasts against
+    # the residual and hides; with B > 1 it is silently wrong.
+    qa = mx.contiguous(
+        qa.reshape(m, k // 64, 4, 2, 4, 2).transpose(0, 1, 2, 3, 5, 4).reshape(shape)
     )
+    # Flattened to [M, groups] before transposing, not transposed in place:
+    # mx.transpose reverses *every* axis, so a [B, S, groups] Ra would come
+    # back as [groups, S, B] -- which is the layout the kernel wants only when
+    # B == 1, and silently interleaves the sequences when it is not.
+    ra = mx.contiguous(ra.reshape(m, -1).T)
+    if act_mode != 0:
+        sa = mx.contiguous(sa.reshape(m, -1).T)
+    return qa, sa, ra
 
 
-def dspark_rowwise_gemm(
-    lhs: mx.array,
-    rhs: mx.array,
-    transpose_rhs: bool,
+def oq_a8_stage_a_natural(
+    x: mx.array,
+    act_mode: int = 0,
+    *,
+    stream=None,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """Stage A for the Q8 kernel: activations stay in checkpoint K order.
+
+    Q4/Q5 use :func:`oq_a8_stage_a_v8`. Only the group metadata is
+    transposed here, so there is no INT8 activation copy.
+    """
+    qa, sa, ra = oq_a8_quantize(x, act_mode, stream=stream)
+    ra = mx.contiguous(ra.reshape(qa.size // qa.shape[-1], -1).T)
+    if act_mode != 0:
+        sa = mx.contiguous(sa.reshape(qa.size // qa.shape[-1], -1).T)
+    return qa, sa, ra
+
+
+def oq_a8_decode_weights(
+    weight: mx.array,
+    bits: int,
+    group_count: int,
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is None or not hasattr(_ext, "dspark_rowwise_gemm"):
-        raise RuntimeError("DSpark rowwise NAX GEMM is unavailable")
-    return _ext.dspark_rowwise_gemm(
-        lhs,
-        rhs,
-        transpose_rhs,
+    """Unpack Q4/Q5/Q8 codes to INT8 (Q8 centered to q - 128).
+
+    Test helper only: the production path never materializes unpacked weights
+    in device memory.
+    """
+    if _ext is None or not hasattr(_ext, "oq_a8_decode_weights"):
+        raise RuntimeError(
+            "oq_a8_decode_weights native kernel is unavailable"
+        )
+    return _ext.oq_a8_decode_weights(
+        weight,
+        bits,
+        group_count,
         **_native_stream_kwargs(stream),
     )
 
 
-def dspark_ring_gemm(
-    lhs: mx.array,
-    source: mx.array,
-    indices: mx.array,
-    transpose_rhs: bool,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is None or not hasattr(_ext, "dspark_ring_gemm"):
-        raise RuntimeError("DSpark physical-ring GEMM is unavailable")
-    return _ext.dspark_ring_gemm(
-        lhs,
-        source,
-        indices,
-        transpose_rhs,
-        **_native_stream_kwargs(stream),
-    )
-
-
-def dspark_exact_mxfp8_qmv_pair(
-    input: mx.array,
-    weight_a: mx.array,
-    scales_a: mx.array,
-    weight_b: mx.array,
-    scales_b: mx.array,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is None or not hasattr(_ext, "dspark_exact_mxfp8_qmv_pair"):
-        raise RuntimeError("DSpark exact MXFP8 QMV pair kernel is unavailable")
-    return _ext.dspark_exact_mxfp8_qmv_pair(
-        input,
-        weight_a,
-        scales_a,
-        weight_b,
-        scales_b,
-        **_native_stream_kwargs(stream),
-    )
-
-
-def deepseek_v4_sparse_attention(
-    q: mx.array,
-    local_kv: mx.array,
-    pooled: mx.array,
-    topk_indices: mx.array,
-    sinks: mx.array,
-    scale: float,
-    q_offset: int,
-    compress_ratio: int,
-    local_window: int,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_v4_sparse_attention"):
-        return _ext.deepseek_v4_sparse_attention(
-            q,
-            local_kv,
-            pooled,
-            topk_indices,
-            sinks,
-            scale,
-            q_offset,
-            compress_ratio,
-            local_window,
-            **_native_stream_kwargs(stream),
-        )
-    raise RuntimeError("deepseek_v4_sparse_attention native kernel is unavailable")
-
-
-def deepseek_v41_packed_attention(
-    q: mx.array,
-    local_kv: mx.array,
-    pooled: mx.array,
-    topk_indices: mx.array,
-    sinks: mx.array,
-    scale: float,
-    q_offset: int,
-    compress_ratio: int,
-    local_window: int,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_v41_packed_attention"):
-        return _ext.deepseek_v41_packed_attention(
-            q,
-            local_kv,
-            pooled,
-            topk_indices,
-            sinks,
-            scale,
-            q_offset,
-            compress_ratio,
-            local_window,
-            **_native_stream_kwargs(stream),
-        )
-    raise RuntimeError("deepseek_v41_packed_attention native kernel is unavailable")
-
-
-def glm_dsa_q8_vup_flat(
+def q8_head_flat_qmm(
     x: mx.array,
     weight: mx.array,
     scales: mx.array,
@@ -615,46 +521,18 @@ def glm_dsa_q8_vup_flat(
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None and hasattr(_ext, "glm_dsa_q8_vup_flat"):
-        return _ext.glm_dsa_q8_vup_flat(
+    if _ext is not None and hasattr(_ext, "q8_head_flat_qmm"):
+        return _ext.q8_head_flat_qmm(
             x,
             weight,
             scales,
             biases,
             **_native_stream_kwargs(stream),
         )
-    return mx.fast.glm_dsa_q8_vup_flat(
-        x,
-        weight,
-        scales,
-        biases,
-        stream=stream or mx.gpu,
-    )
+    raise RuntimeError("q8_head_flat_qmm native kernel is unavailable")
 
 
-def glm_moe_weighted_sum(
-    x_sorted: mx.array,
-    inv_order: mx.array,
-    scores: mx.array,
-    *,
-    stream=None,
-) -> mx.array:
-    if _ext is not None and hasattr(_ext, "glm_moe_weighted_sum"):
-        return _ext.glm_moe_weighted_sum(
-            x_sorted,
-            inv_order,
-            scores,
-            **_native_stream_kwargs(stream),
-        )
-    return mx.fast.glm_moe_weighted_sum(
-        x_sorted,
-        inv_order,
-        scores,
-        stream=stream or mx.gpu,
-    )
-
-
-def deepseek_mxfp4_gather_qmm_blocks(
+def mxfp4_gather_qmm_blocks(
     x: mx.array,
     weight: mx.array,
     scales: mx.array,
@@ -664,8 +542,8 @@ def deepseek_mxfp4_gather_qmm_blocks(
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_mxfp4_gather_qmm_blocks"):
-        return _ext.deepseek_mxfp4_gather_qmm_blocks(
+    if _ext is not None and hasattr(_ext, "mxfp4_gather_qmm_blocks"):
+        return _ext.mxfp4_gather_qmm_blocks(
             x,
             weight,
             scales,
@@ -674,10 +552,10 @@ def deepseek_mxfp4_gather_qmm_blocks(
             variant,
             **_native_stream_kwargs(stream),
         )
-    raise RuntimeError("deepseek_mxfp4_gather_qmm_blocks native kernel is unavailable")
+    raise RuntimeError("mxfp4_gather_qmm_blocks native kernel is unavailable")
 
 
-def deepseek_mxfp4_gather_qmm_pair_blocks(
+def mxfp4_gather_qmm_pair_blocks(
     x: mx.array,
     weight0: mx.array,
     scales0: mx.array,
@@ -689,8 +567,8 @@ def deepseek_mxfp4_gather_qmm_pair_blocks(
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_mxfp4_gather_qmm_pair_blocks"):
-        return _ext.deepseek_mxfp4_gather_qmm_pair_blocks(
+    if _ext is not None and hasattr(_ext, "mxfp4_gather_qmm_pair_blocks"):
+        return _ext.mxfp4_gather_qmm_pair_blocks(
             x,
             weight0,
             scales0,
@@ -702,11 +580,11 @@ def deepseek_mxfp4_gather_qmm_pair_blocks(
             **_native_stream_kwargs(stream),
         )
     raise RuntimeError(
-        "deepseek_mxfp4_gather_qmm_pair_blocks native kernel is unavailable"
+        "mxfp4_gather_qmm_pair_blocks native kernel is unavailable"
     )
 
 
-def deepseek_mxfp4_gather_qmm_pair_concat_blocks(
+def mxfp4_gather_qmm_pair_concat_blocks(
     x: mx.array,
     weight0: mx.array,
     scales0: mx.array,
@@ -719,9 +597,9 @@ def deepseek_mxfp4_gather_qmm_pair_concat_blocks(
     stream=None,
 ) -> mx.array:
     if _ext is not None and hasattr(
-        _ext, "deepseek_mxfp4_gather_qmm_pair_concat_blocks"
+        _ext, "mxfp4_gather_qmm_pair_concat_blocks"
     ):
-        return _ext.deepseek_mxfp4_gather_qmm_pair_concat_blocks(
+        return _ext.mxfp4_gather_qmm_pair_concat_blocks(
             x,
             weight0,
             scales0,
@@ -733,11 +611,11 @@ def deepseek_mxfp4_gather_qmm_pair_concat_blocks(
             **_native_stream_kwargs(stream),
         )
     raise RuntimeError(
-        "deepseek_mxfp4_gather_qmm_pair_concat_blocks native kernel is unavailable"
+        "mxfp4_gather_qmm_pair_concat_blocks native kernel is unavailable"
     )
 
 
-def deepseek_mxfp4_gather_qmm_expert(
+def mxfp4_gather_qmm_expert(
     x: mx.array,
     weight: mx.array,
     scales: mx.array,
@@ -746,8 +624,8 @@ def deepseek_mxfp4_gather_qmm_expert(
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_mxfp4_gather_qmm_expert"):
-        return _ext.deepseek_mxfp4_gather_qmm_expert(
+    if _ext is not None and hasattr(_ext, "mxfp4_gather_qmm_expert"):
+        return _ext.mxfp4_gather_qmm_expert(
             x,
             weight,
             scales,
@@ -755,10 +633,10 @@ def deepseek_mxfp4_gather_qmm_expert(
             variant,
             **_native_stream_kwargs(stream),
         )
-    raise RuntimeError("deepseek_mxfp4_gather_qmm_expert native kernel is unavailable")
+    raise RuntimeError("mxfp4_gather_qmm_expert native kernel is unavailable")
 
 
-def deepseek_affine_gather_qmm_blocks(
+def affine_gather_qmm_blocks(
     x: mx.array,
     weight: mx.array,
     scales: mx.array,
@@ -771,8 +649,8 @@ def deepseek_affine_gather_qmm_blocks(
     *,
     stream=None,
 ) -> mx.array:
-    if _ext is not None and hasattr(_ext, "deepseek_affine_gather_qmm_blocks"):
-        return _ext.deepseek_affine_gather_qmm_blocks(
+    if _ext is not None and hasattr(_ext, "affine_gather_qmm_blocks"):
+        return _ext.affine_gather_qmm_blocks(
             x,
             weight,
             scales,
@@ -784,10 +662,10 @@ def deepseek_affine_gather_qmm_blocks(
             variant,
             **_native_stream_kwargs(stream),
         )
-    raise RuntimeError("deepseek_affine_gather_qmm_blocks native kernel is unavailable")
+    raise RuntimeError("affine_gather_qmm_blocks native kernel is unavailable")
 
 
-def deepseek_affine_gather_qmm_pair_concat_blocks(
+def affine_gather_qmm_pair_concat_blocks(
     x: mx.array,
     weight0: mx.array,
     scales0: mx.array,
@@ -804,9 +682,9 @@ def deepseek_affine_gather_qmm_pair_concat_blocks(
     stream=None,
 ) -> mx.array:
     if _ext is not None and hasattr(
-        _ext, "deepseek_affine_gather_qmm_pair_concat_blocks"
+        _ext, "affine_gather_qmm_pair_concat_blocks"
     ):
-        return _ext.deepseek_affine_gather_qmm_pair_concat_blocks(
+        return _ext.affine_gather_qmm_pair_concat_blocks(
             x,
             weight0,
             scales0,
@@ -822,27 +700,46 @@ def deepseek_affine_gather_qmm_pair_concat_blocks(
             **_native_stream_kwargs(stream),
         )
     raise RuntimeError(
-        "deepseek_affine_gather_qmm_pair_concat_blocks native kernel is unavailable"
+        "affine_gather_qmm_pair_concat_blocks native kernel is unavailable"
     )
+
+
+def mxfp8_qmv_pair(
+    input: mx.array,
+    weight_a: mx.array,
+    scales_a: mx.array,
+    weight_b: mx.array,
+    scales_b: mx.array,
+    *,
+    stream=None,
+) -> mx.array:
+    if _ext is None or not hasattr(_ext, "mxfp8_qmv_pair"):
+        raise RuntimeError("mxfp8_qmv_pair native kernel is unavailable")
+    return _ext.mxfp8_qmv_pair(
+        input,
+        weight_a,
+        scales_a,
+        weight_b,
+        scales_b,
+        **_native_stream_kwargs(stream),
+    )
+
+
+def grouped_expert(gate, up, activation, down):
+    """Submit one routed expert pipeline using its existing MLX primitives."""
+    if _ext is not None and hasattr(_ext, "grouped_expert"):
+        return _ext.grouped_expert(gate, up, activation, down)
+    raise RuntimeError("grouped_expert native kernel is unavailable")
 
 
 def __getattr__(name: str) -> Any:
     if _ext is not None and hasattr(_ext, name):
         return getattr(_ext, name)
-    return getattr(mx.fast, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
     names = set(globals())
-    names.update(NATIVE_SYMBOLS)
-    names.update(dir(mx.fast))
     if _ext is not None:
         names.update(dir(_ext))
     return sorted(names)
-
-
-def deepseek_v41_grouped_expert(gate, up, activation, down):
-    """Submit one routed expert pipeline using its existing MLX primitives."""
-    if _ext is not None and hasattr(_ext, "deepseek_v41_grouped_expert"):
-        return _ext.deepseek_v41_grouped_expert(gate, up, activation, down)
-    raise RuntimeError("DeepSeek V4.1 grouped expert native kernel is unavailable")

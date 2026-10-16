@@ -1,19 +1,18 @@
-"""Bonsai 1-bit / 2-bit decode kernel dispatch.
+"""Low-bit decode kernels for the Bonsai 1-bit, 2-bit and T5 formats.
 
 Public API
 ----------
 has_native()            -> bool     native C++ extension available
-is_nax_available()      -> bool     M5+ tensor-unit available (gen >= 18)
 
-bonsai_q1_affine_qmv(x, w, scales, biases, stream=None) -> mx.array
+q1_affine_qmv(x, w, scales, biases, stream=None) -> mx.array
     1-bit affine decode (M = 1).  Falls back to mx.quantized_matmul when
     the native extension is unavailable.
 
-bonsai_q2_affine_qmv(x, w, scales, biases, stream=None) -> mx.array
+q2_affine_qmv(x, w, scales, biases, stream=None) -> mx.array
     2-bit affine decode (M = 1).  Falls back to mx.quantized_matmul when
     the native extension is unavailable.
 
-bonsai_qmv_wide(x, w, scales, biases, bits, stream=None) -> mx.array
+qmv_wide(x, w, scales, biases, bits, stream=None) -> mx.array
     Small-batch affine decode (M = 1..5, bits = 1 or 2).  Falls back to
     mx.quantized_matmul.  Routing: 1/2-bit M>=2 use qmv_wide on gen-15+
     for weight reuse; 1-bit M=1 uses qmv_fast; 2-bit M=1 uses qmv_fast.
@@ -26,100 +25,16 @@ spec_decode_verify(draft_tokens, target_logits, stream=None)
 
 from __future__ import annotations
 
-import importlib
-import logging
 import re
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import mlx.core as mx
 
-if TYPE_CHECKING:
-    pass
+from .._loader import load_extension
 
-logger = logging.getLogger(__name__)
+_ext, _IMPORT_ERROR = load_extension(__package__, Path(__file__).parent)
 
-
-def _detach_import_error(exc: Exception) -> Exception:
-    exc.__traceback__ = None
-    exc.__cause__ = None
-    exc.__context__ = None
-    return exc
-
-
-try:
-    # Use absolute import to avoid circular import when __init__.py imports fast
-    # before _ext is registered in sys.modules.
-    _ext = importlib.import_module("omlx.custom_kernels.bonsai._ext")
-except Exception as exc:  # pragma: no cover - depends on local native build
-    _ext = None
-    _IMPORT_ERROR: Exception | None = _detach_import_error(exc)
-else:
-    _IMPORT_ERROR = None
-
-
-def _verify_abi(ext, import_error):
-    """Disable native symbols when the nanobind ABI tag does not match mlx."""
-    if ext is None:
-        return ext, import_error
-    probe = getattr(ext, "abi_probe", None)
-    if probe is None:
-        return ext, import_error
-    try:
-        probe(mx.zeros((1,)))
-    except TypeError as exc:
-        logger.warning(
-            "%s: native kernels disabled — nanobind ABI mismatch "
-            "(rebuild against the installed mlx).",
-            __name__,
-        )
-        return None, _detach_import_error(exc)
-    return ext, import_error
-
-
-_ext, _IMPORT_ERROR = _verify_abi(_ext, _IMPORT_ERROR)
-
-# ---------------------------------------------------------------------------
-# NAX (M5 tensor-unit) detection
-# ---------------------------------------------------------------------------
-
-_NAX_ARCH_RE = re.compile(r"applegpu_g(\d+)([a-z])")
-_nax_available_cache: bool | None = None
-
-
-def is_nax_available() -> bool:
-    """True when the GPU is M5-class or later (gen >= 18, NAX tensor unit).
-
-    Hardware capability probe only (informational).  This is NOT the
-    routing predicate for stock NAX dispatch — that lives in
-    omlx.custom_kernels.nax and additionally checks the installed
-    metallib and the macOS version.  Bonsai
-    kernel routing uses _arch_gen(), not this.
-    """
-    global _nax_available_cache
-    if _nax_available_cache is not None:
-        return _nax_available_cache
-
-    # Prefer the native extension's mirror of metal::is_nax_available().
-    if _ext is not None and hasattr(_ext, "is_nax_available"):
-        _nax_available_cache = bool(_ext.is_nax_available())
-        return _nax_available_cache
-
-    # Fallback: parse device_info arch string.
-    try:
-        arch = mx.device_info().get("architecture", "")
-        m = _NAX_ARCH_RE.search(arch.lower())
-        if m:
-            gen = int(m.group(1))
-            # gen-17 (M5-class applegpu_g17s) computes wrong results with NAX
-            # qmm/gemm kernels; require gen >= 18.
-            _nax_available_cache = gen >= 18
-            return _nax_available_cache
-    except Exception:
-        pass
-
-    _nax_available_cache = False
-    return False
-
+_ARCH_RE = re.compile(r"applegpu_g(\d+)([a-z])")
 
 # ---------------------------------------------------------------------------
 # Architecture generation (for qmv_wide routing)
@@ -134,7 +49,7 @@ def _arch_gen() -> int:
         return _arch_gen_cache
     try:
         arch = mx.device_info().get("architecture", "")
-        m = _NAX_ARCH_RE.search(arch.lower())
+        m = _ARCH_RE.search(arch.lower())
         _arch_gen_cache = int(m.group(1)) if m else 0
     except Exception:
         _arch_gen_cache = 0
@@ -169,7 +84,7 @@ def has_symbol(name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def bonsai_q2_affine_qmv(
+def q2_affine_qmv(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -177,8 +92,8 @@ def bonsai_q2_affine_qmv(
     stream=None,
 ) -> mx.array:
     """2-bit affine quantized matrix-vector multiply (decode, M=1)."""
-    if _ext is not None and has_symbol("bonsai_q2_affine_qmv"):
-        return _ext.bonsai_q2_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q2_affine_qmv"):
+        return _ext.q2_affine_qmv(x, w, scales, biases, stream=stream)
     return mx.quantized_matmul(
         x, w, scales=scales, biases=biases, transpose=True,
         group_size=_infer_group_size(w, scales, 2), bits=2, stream=stream
@@ -203,7 +118,7 @@ def _dequant_1bit(w, scales, biases, dtype, group_size=None):
     return w_fp
 
 
-def bonsai_q1_affine_qmv(
+def q1_affine_qmv(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -221,8 +136,8 @@ def bonsai_q1_affine_qmv(
 
     Returns [... N] output.
     """
-    if _ext is not None and has_symbol("bonsai_q1_affine_qmv"):
-        return _ext.bonsai_q1_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q1_affine_qmv"):
+        return _ext.q1_affine_qmv(x, w, scales, biases, stream=stream)
     # Fallback: stock mlx quantized_matmul (correct, slower for 1-bit)
     return mx.quantized_matmul(
         x, w, scales=scales, biases=biases, transpose=True,
@@ -277,7 +192,7 @@ def _use_qmv_wide(bits: int, M: int) -> bool:
     return _arch_gen() >= 15
 
 
-def bonsai_qmv_wide(
+def qmv_wide(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -297,16 +212,16 @@ def bonsai_qmv_wide(
     M = x.shape[-2] if x.ndim >= 2 else 1
 
     if bits == 1:
-        if _use_qmv_wide(bits, M) and _ext is not None and has_symbol("bonsai_q1_affine_qmv_wide"):
-            return _ext.bonsai_q1_affine_qmv_wide(x, w, scales, biases, stream=stream)
-        if _ext is not None and has_symbol("bonsai_q1_affine_qmv"):
-            return _ext.bonsai_q1_affine_qmv(x, w, scales, biases, stream=stream)
+        if _use_qmv_wide(bits, M) and _ext is not None and has_symbol("q1_affine_qmv_wide"):
+            return _ext.q1_affine_qmv_wide(x, w, scales, biases, stream=stream)
+        if _ext is not None and has_symbol("q1_affine_qmv"):
+            return _ext.q1_affine_qmv(x, w, scales, biases, stream=stream)
     else:  # bits == 2
-        if _use_qmv_wide(bits, M) and _ext is not None and has_symbol("bonsai_q2_affine_qmv_wide"):
-            return _ext.bonsai_q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
+        if _use_qmv_wide(bits, M) and _ext is not None and has_symbol("q2_affine_qmv_wide"):
+            return _ext.q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
         # M=1 (or no wide kernel): use 2-bit qmv_fast instead of falling back to stock mlx
-        if _ext is not None and has_symbol("bonsai_q2_affine_qmv"):
-            return _ext.bonsai_q2_affine_qmv(x, w, scales, biases, stream=stream)
+        if _ext is not None and has_symbol("q2_affine_qmv"):
+            return _ext.q2_affine_qmv(x, w, scales, biases, stream=stream)
 
     group_size = _infer_group_size(w, scales, bits)
     return mx.quantized_matmul(
@@ -315,7 +230,7 @@ def bonsai_qmv_wide(
     )
 
 
-def bonsai_q1_affine_qmv_wide(
+def q1_affine_qmv_wide(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -323,12 +238,12 @@ def bonsai_q1_affine_qmv_wide(
     stream=None,
 ) -> mx.array:
     """1-bit affine wide qmv (M=2..5 weight-reuse path)."""
-    if _ext is not None and has_symbol("bonsai_q1_affine_qmv_wide"):
-        return _ext.bonsai_q1_affine_qmv_wide(x, w, scales, biases, stream=stream)
-    return bonsai_q1_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q1_affine_qmv_wide"):
+        return _ext.q1_affine_qmv_wide(x, w, scales, biases, stream=stream)
+    return q1_affine_qmv(x, w, scales, biases, stream=stream)
 
 
-def bonsai_q2_affine_qmv_wide(
+def q2_affine_qmv_wide(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -336,9 +251,9 @@ def bonsai_q2_affine_qmv_wide(
     stream=None,
 ) -> mx.array:
     """2-bit affine wide qmv (M=2..5 weight-reuse path)."""
-    if _ext is not None and has_symbol("bonsai_q2_affine_qmv_wide"):
-        return _ext.bonsai_q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
-    return bonsai_q2_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q2_affine_qmv_wide"):
+        return _ext.q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
+    return q2_affine_qmv(x, w, scales, biases, stream=stream)
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +261,7 @@ def bonsai_q2_affine_qmv_wide(
 # ---------------------------------------------------------------------------
 
 
-def bonsai_q1_affine_qmv_sym(
+def q1_affine_qmv_sym(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -354,12 +269,12 @@ def bonsai_q1_affine_qmv_sym(
     stream=None,
 ) -> mx.array:
     """1-bit symmetric qmv: skips biases DRAM load (I-B: bias = -scale/2)."""
-    if _ext is not None and has_symbol("bonsai_q1_affine_qmv_sym"):
-        return _ext.bonsai_q1_affine_qmv_sym(x, w, scales, biases, stream=stream)
-    return bonsai_q1_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q1_affine_qmv_sym"):
+        return _ext.q1_affine_qmv_sym(x, w, scales, biases, stream=stream)
+    return q1_affine_qmv(x, w, scales, biases, stream=stream)
 
 
-def bonsai_q2_affine_qmv_sym(
+def q2_affine_qmv_sym(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -367,12 +282,12 @@ def bonsai_q2_affine_qmv_sym(
     stream=None,
 ) -> mx.array:
     """2-bit symmetric qmv: skips biases DRAM load (I-B: bias = -scale)."""
-    if _ext is not None and has_symbol("bonsai_q2_affine_qmv_sym"):
-        return _ext.bonsai_q2_affine_qmv_sym(x, w, scales, biases, stream=stream)
-    return bonsai_q2_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q2_affine_qmv_sym"):
+        return _ext.q2_affine_qmv_sym(x, w, scales, biases, stream=stream)
+    return q2_affine_qmv(x, w, scales, biases, stream=stream)
 
 
-def bonsai_q1_affine_qmv_wide_sym(
+def q1_affine_qmv_wide_sym(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -380,12 +295,12 @@ def bonsai_q1_affine_qmv_wide_sym(
     stream=None,
 ) -> mx.array:
     """1-bit symmetric wide qmv: skips biases DRAM load (I-B)."""
-    if _ext is not None and has_symbol("bonsai_q1_affine_qmv_wide_sym"):
-        return _ext.bonsai_q1_affine_qmv_wide_sym(x, w, scales, biases, stream=stream)
-    return bonsai_q1_affine_qmv(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q1_affine_qmv_wide_sym"):
+        return _ext.q1_affine_qmv_wide_sym(x, w, scales, biases, stream=stream)
+    return q1_affine_qmv(x, w, scales, biases, stream=stream)
 
 
-def bonsai_q2_affine_qmv_wide_sym(
+def q2_affine_qmv_wide_sym(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -393,9 +308,9 @@ def bonsai_q2_affine_qmv_wide_sym(
     stream=None,
 ) -> mx.array:
     """2-bit symmetric wide qmv: skips biases DRAM load (I-B)."""
-    if _ext is not None and has_symbol("bonsai_q2_affine_qmv_wide_sym"):
-        return _ext.bonsai_q2_affine_qmv_wide_sym(x, w, scales, biases, stream=stream)
-    return bonsai_q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
+    if _ext is not None and has_symbol("q2_affine_qmv_wide_sym"):
+        return _ext.q2_affine_qmv_wide_sym(x, w, scales, biases, stream=stream)
+    return q2_affine_qmv_wide(x, w, scales, biases, stream=stream)
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +322,7 @@ def bonsai_q2_affine_qmv_wide_sym(
 # ---------------------------------------------------------------------------
 
 
-def bonsai_t5_qmv(
+def t5_qmv(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -421,27 +336,27 @@ def bonsai_t5_qmv(
     w      : [..., N, n_groups*bpg]     uint8 t5 weight bytes
     scales : [..., N, n_groups]         scale per group (float16 or bfloat16)
     """
-    if _ext is not None and has_symbol("bonsai_t5_qmv"):
-        return _ext.bonsai_t5_qmv(x, w, scales, stream=stream)
+    if _ext is not None and has_symbol("t5_qmv"):
+        return _ext.t5_qmv(x, w, scales, stream=stream)
     raise RuntimeError(
-        "bonsai_t5_qmv: native extension unavailable. "
+        "t5_qmv: native extension unavailable. "
         "Rebuild the bonsai extension to use t5-format weights."
     )
 
 
-def bonsai_t5_qmv_wide(
+def t5_qmv_wide(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
     stream=None,
 ) -> mx.array:
     """t5 base-3 ternary wide decode (M=2..5, I-D + I-C)."""
-    if _ext is not None and has_symbol("bonsai_t5_qmv_wide"):
-        return _ext.bonsai_t5_qmv_wide(x, w, scales, stream=stream)
-    return bonsai_t5_qmv(x, w, scales, stream=stream)
+    if _ext is not None and has_symbol("t5_qmv_wide"):
+        return _ext.t5_qmv_wide(x, w, scales, stream=stream)
+    return t5_qmv(x, w, scales, stream=stream)
 
 
-def bonsai_t5_qmm(
+def t5_qmm(
     x: mx.array,
     w: mx.array,
     scales: mx.array,
@@ -459,10 +374,10 @@ def bonsai_t5_qmm(
     scales : [N, n_groups]           scale per group
     Returns [M, N].
     """
-    if _ext is not None and has_symbol("bonsai_t5_qmm"):
-        return _ext.bonsai_t5_qmm(x, w, scales, stream=stream)
+    if _ext is not None and has_symbol("t5_qmm"):
+        return _ext.t5_qmm(x, w, scales, stream=stream)
     raise RuntimeError(
-        "bonsai_t5_qmm: native extension unavailable. "
+        "t5_qmm: native extension unavailable. "
         "Rebuild the bonsai extension."
     )
 
@@ -495,8 +410,8 @@ def spec_decode_verify(
     tgt = mx.argmax(target_logits, axis=-1, stream=s)  # [B, K+1]
     tgt = tgt.astype(mx.int32, stream=s) if tgt.dtype != mx.int32 else tgt
 
-    if _ext is not None and has_symbol("bonsai_spec_decode_verify"):
-        return _ext.bonsai_spec_decode_verify(dft, tgt, stream=s)
+    if _ext is not None and has_symbol("spec_decode_verify"):
+        return _ext.spec_decode_verify(dft, tgt, stream=s)
 
     # Pure-mlx fallback — exactly the oracle from the Bonsai MLX fork
     # (mlx/fast.cpp::spec_decode_verify fallback lambda).

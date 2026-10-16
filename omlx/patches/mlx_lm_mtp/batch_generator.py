@@ -413,7 +413,7 @@ def _spec_command_buffers(model: Any = None):
         yield
         return
 
-    from omlx.custom_kernels.qwen35_prefill.fast import set_command_buffer_caps
+    from omlx.custom_kernels.quant_matmul.fast import set_command_buffer_caps
 
     previous = None
     if _raises_spec_buffer_caps():

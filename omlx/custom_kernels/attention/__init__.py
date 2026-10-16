@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional exact decode SDPA kernel used by Qwen4 QSA."""
+"""Attention kernels: sparse, block-mask, FA-256, decode SDPA and verify GEMM."""
 
-from .fast import NATIVE_AVAILABLE, sdpa_decode
+from . import fast
 
-__all__ = ["NATIVE_AVAILABLE", "sdpa_decode"]
+__all__ = ["fast"]
