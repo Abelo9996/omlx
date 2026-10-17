@@ -23,6 +23,7 @@ from mlx_lm.models.cache import KVCache, make_prompt_cache
 from mlx_vlm.speculative.drafters.dflash2.config import DFlash2Config
 from mlx_vlm.speculative.drafters.dflash2.dflash2 import DFlash2DraftModel
 
+from omlx.custom_kernels.quant_matmul import fast as quant_fast
 from omlx.model_settings import ModelSettings
 from omlx.patches import mlx_lm_mtp
 from omlx.patches.laguna import laguna_model
@@ -6126,6 +6127,28 @@ def test_spec_command_buffers_restore_caps_after_the_step(monkeypatch, raised):
         inside = caps[-1]
         raise RuntimeError("step failed")
     assert inside == (bg._SPEC_BUFFER_CAPS if raised else (50, 50))
+    assert caps[-1] == (50, 50)
+
+
+def test_spec_command_buffers_overlapping_engines_restore_mlx_caps(monkeypatch):
+    """Two engines whose cycles overlap must leave MLX's caps, not the raised ones."""
+    caps = [(50, 50)]
+
+    def fake_set(ops, mb):
+        previous = caps[-1]
+        caps.append((ops, mb))
+        return previous
+
+    target = SimpleNamespace(model_type="qwen3_5")
+    monkeypatch.setattr(quant_fast, "set_command_buffer_caps", fake_set)
+    monkeypatch.setattr(bg, "_raises_spec_buffer_caps", lambda: True)
+    monkeypatch.setattr(bg, "_spec_caps_holders", 0)
+    monkeypatch.setattr(bg, "_spec_caps_previous", None)
+    # The second cycle starts inside the first and ends after it.
+    with contextlib.ExitStack() as second_cycle:
+        with bg._spec_command_buffers(target):
+            second_cycle.enter_context(bg._spec_command_buffers(target))
+        assert caps[-1] == bg._SPEC_BUFFER_CAPS
     assert caps[-1] == (50, 50)
 
 
