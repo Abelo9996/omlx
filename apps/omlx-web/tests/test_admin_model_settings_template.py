@@ -911,7 +911,7 @@ app.statsScope = 'session';
 assert.equal(tile('generated_tokens').value, '1,234');
 assert.equal(tile('cache_efficiency').value, '50.0');
 
-// The picker publishes the choice so Usage History follows it.
+// The picker persists the choice.
 app.setStatsNumberScale('exact');
 assert.equal(context.window.omlxCount.scale(), 'exact');
 """

@@ -12,12 +12,8 @@ function usageLocale() {
 function usageHistory() {
     return {
         range: 'today', model: '', modelIds: [], data: null, error: '', disabled: false, loading: false, peak: 1, displayedQuery: '',
-        timer: null, request: null, numberScale: window.omlxCount?.scale?.() || 'compact', _scaleHandler: null,
+        timer: null, request: null,
         init() {
-            this._scaleHandler = event => {
-                this.numberScale = event.detail === 'exact' ? 'exact' : 'compact';
-            };
-            window.addEventListener?.('omlx-number-scale', this._scaleHandler);
             this.$watch('mainTab', tab => {
                 if (tab === 'status') this.load();
             });
@@ -26,11 +22,7 @@ function usageHistory() {
                 if (this.mainTab === 'status' && !document.hidden) this.load();
             }, 15000);
         },
-        destroy() {
-            clearInterval(this.timer);
-            this.request?.abort();
-            if (this._scaleHandler) window.removeEventListener?.('omlx-number-scale', this._scaleHandler);
-        },
+        destroy() { clearInterval(this.timer); this.request?.abort(); },
         async load() {
             this.request?.abort();
             const request = new AbortController();
@@ -84,7 +76,8 @@ function usageHistory() {
         },
         number(value) {
             const locale = usageLocale();
-            if (this.numberScale === 'exact') {
+            // statsNumberScale lives in the parent dashboard() scope.
+            if (this.statsNumberScale === 'exact') {
                 return window.omlxCount.exact(value, locale);
             }
             const compact = window.omlxCount?.eastAsian?.(value, locale);

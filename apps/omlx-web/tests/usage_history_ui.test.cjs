@@ -92,7 +92,7 @@ test('compact numbers follow the UI language, not the runtime locale', () => {
 
 test('exact scale applies to usage history counts', () => {
     const view = component(null, 'zh');
-    view.numberScale = 'exact';
+    view.statsNumberScale = 'exact';  // Stands in for the parent dashboard() scope.
     assert.equal(view.number(160000000), '160,000,000');
     assert.equal(view.number(97116000), '97,116,000');
 });
@@ -101,13 +101,12 @@ test('number scale survives a page reload', () => {
     const store = new Map();
     const make = () => {
         const context = vm.createContext({
-            window: {dispatchEvent: () => {}},
+            window: {},
             document: {documentElement: {lang: 'en'}},
             localStorage: {
                 getItem: key => store.has(key) ? store.get(key) : null,
                 setItem: (key, value) => store.set(key, value),
             },
-            CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
         });
         vm.runInContext(countSource, context);
         return context.window.omlxCount;

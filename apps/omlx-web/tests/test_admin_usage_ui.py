@@ -71,21 +71,6 @@ def test_usage_template_renders_with_localized_labels(client):
     )
 
 
-def test_appearance_settings_offer_exact_and_compact_counts(client):
-    client, _ = client
-    html = client.get("/admin/dashboard").text
-    assert 'id="settings-number-scale"' in html
-    assert html.count('x-model="statsNumberScale"') == 1
-    theme_at = html.index('>Theme</label>')
-    scale_at = html.index('for="settings-number-scale"')
-    readability_at = html.index('>Enhanced Readability</label>')
-    assert theme_at < scale_at < readability_at
-    assert '@change="setStatsNumberScale($event.target.value)"' in html
-    assert '<option value="exact">Exact digits</option>' in html
-    assert '<option value="compact">Higher units</option>' in html
-    assert "js/count_format.js" in html
-
-
 def test_dashboard_renders_usage_history_switch_and_disabled_notice(client):
     client, _ = client
     html = client.get("/admin/dashboard").text

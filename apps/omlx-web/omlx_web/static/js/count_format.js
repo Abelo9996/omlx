@@ -7,19 +7,14 @@
         ja: ['万', '億', '兆'],
         ko: ['만', '억', '조'],
     };
-    const EAST_ASIAN_LANGS = new Set(Object.keys(EAST_ASIAN_UNITS));
     const SCALE_STORAGE_KEY = 'omlx-number-scale';
 
     function countLocale() {
         return typeof document !== 'undefined' ? document.documentElement?.lang || 'en' : 'en';
     }
 
-    // East Asian locales group with the ASCII comma; other locales keep their
-    // own separators from Intl (for example a narrow no-break space in fr).
     function groupInteger(value, lang = countLocale()) {
-        const number = Number(value);
-        const text = Math.round(number).toLocaleString(lang);
-        return EAST_ASIAN_LANGS.has(lang) ? text.replace(/，/g, ',') : text;
+        return Math.round(Number(value)).toLocaleString(lang);
     }
 
     // The exact grouped figure, with no compact unit.
@@ -77,9 +72,6 @@
             }
         } catch (error) {
             // Storage can be unavailable in private or embedded contexts.
-        }
-        if (typeof CustomEvent !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('omlx-number-scale', {detail: scale}));
         }
     }
 
