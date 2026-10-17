@@ -413,7 +413,7 @@ def test_qwen4_wide_decode_is_a_qwen4_acceleration_setting():
     js = _dashboard_script()
     supported = js.split("qwen4_gdn_decode_wide_proj_supported:", 1)[1]
     assert "=== 'qwen4_exp'" in supported.split("\n", 2)[1]
-    assert "!!this.modelSettings.qwen4_gdn_decode_wide_proj," in js
+    assert "!!ms.qwen4_gdn_decode_wide_proj," in js
     assert "globalSettings.server.qwen4_gdn_decode_wide_proj" not in js
     global_html = (root / "omlx_web/templates/dashboard/_settings.html").read_text()
     assert "qwen4_gdn_decode_wide_proj" not in global_html
@@ -616,6 +616,26 @@ test('Focus refresh updates clean forms and preserves edits made while fetching'
     await state.refreshOpenModelSettings();
     assert.equal(state.modelSettings.temperature, 0.3);
     assert.equal(opened, 1);
+});
+
+test('Save sends only fields edited since the modal opened', async () => {
+    let body;
+    const state = setup(async (url, options) => {
+        body = JSON.parse(options.body);
+        return {ok: true, json: async () => ({})};
+    });
+    state.loadModels = async () => {};
+    state.modelSettings = state.buildModelSettingsState(state.selectedModel, {
+        temperature: 0.5, mtp_enabled: true, mtp_adaptive_max_depth: 5,
+        chat_template_kwargs: {enable_thinking: false}, forced_ct_kwargs: ['enable_thinking'],
+    });
+    state._modelSettingsBaseline = JSON.stringify(state.modelSettings);
+    state.modelSettings.temperature = 0.9;
+    state.modelSettings.ctKwargEntries = [];
+    await state.saveModelSettings();
+    assert.deepEqual(body, {
+        temperature: 0.9, chat_template_kwargs: null, forced_ct_kwargs: null, mtp_fixed_depth: null,
+    });
 });
 
 test('Apply response cannot replace another model editor', async () => {
