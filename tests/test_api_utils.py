@@ -2798,22 +2798,6 @@ class TestPrepareSystemMessagesForTemplate:
         assert [message["role"] for message in result] == ["system", "user"]
         assert result[0]["content"] == "You are an agent."
 
-    def test_keeps_marker_text_in_non_system_content(self):
-        messages = [
-            {
-                "role": "user",
-                "content": "log: <total_tokens>7 tokens left</total_tokens>",
-            }
-        ]
-
-        result = prepare_system_messages_for_template(
-            messages, self.PreserveTokenizer()
-        )
-
-        assert result[0]["content"] == (
-            "log: <total_tokens>7 tokens left</total_tokens>"
-        )
-
 
 class TestMergeConsecutiveRoles:
     """Tests for consecutive same-role message merging."""

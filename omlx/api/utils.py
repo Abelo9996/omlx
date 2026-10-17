@@ -691,12 +691,8 @@ def _rewrite_user_content_with_note(
     return rewritten
 
 
-# Claude Code appends a `<total_tokens>N tokens left</total_tokens>` budget
-# marker with a freshly decremented N on every request. The Anthropic adapter
-# sees it inside the system prompt; on the chat/Responses paths it arrives as a
-# separate system message after each tool result. The marker is informational
-# only — nothing downstream parses it — so it is stripped wholesale, like the
-# billing header in the Anthropic adapter.
+# Claude Code sends this marker with a new N on every request.
+# Nothing reads it, and it breaks prefix reuse, so it is stripped.
 _TOTAL_TOKENS_MARKER_RE = re.compile(
     r"\n{0,2}<total_tokens>\d+ tokens left</total_tokens>"
 )
@@ -711,15 +707,7 @@ def _strip_client_budget_markers(text: str) -> str:
 
 
 def _drop_client_budget_markers(messages: list[dict]) -> list[dict]:
-    """Strip budget markers from system content and drop emptied messages.
-
-    Claude Code sends one marker message after every tool result. On a template
-    that cannot keep a mid-system message in place, the fallback hoists every
-    copy into the leading system block, so the prompt diverges right after it
-    and prefix reuse is pinned at one block. Removing the markers restores the
-    append-only prompt; a marker-only message is dropped rather than turned
-    into an empty turn.
-    """
+    """Strip budget markers from system content and drop marker-only messages."""
     kept: list[dict] = []
     for msg in messages:
         if _is_system_role(msg.get("role")):
