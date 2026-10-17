@@ -83,6 +83,7 @@ from ..settings import (
     SubKeyEntry,
     burst_decode_env,
 )
+from ..utils.fatal import is_command_buffer_error
 from ..utils.hardware import (
     compute_owner_hash,
     get_chip_name,
@@ -7218,6 +7219,15 @@ async def clear_hot_cache(is_admin: bool = Depends(require_admin)):
             try:
                 await loop.run_in_executor(executor, _sync_and_clear_cache, stream)
             except RuntimeError as exc:
+                if is_command_buffer_error(exc):
+                    # Keep reclaiming the other engines.
+                    logger.warning(
+                        "Metal command buffer error while reclaiming MLX "
+                        "buffers for model '%s': %s",
+                        model_id,
+                        exc,
+                    )
+                    continue
                 if "cannot schedule new futures after shutdown" not in str(exc):
                     raise
                 logger.warning(

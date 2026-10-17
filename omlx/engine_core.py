@@ -52,6 +52,7 @@ from .utils.fatal import (
     FATAL_TEARDOWN_TIMEOUT_S,
     exit_if_gpu_submissions_ignored,
     fatal_exit,
+    is_command_buffer_error,
 )
 from .utils.hardware import format_bytes
 from .utils.metal_sync import clear_thread_streams
@@ -214,10 +215,45 @@ def _note_engine_on_own_queue(engine: "EngineCore") -> None:
     )
 
 
+def _teardown_sync_and_clear_cache(stream: Any = None) -> None:
+    """Drain and clear the Metal pool past errors a GPU reset left behind.
+
+    MLX raises an encoder's stored command-buffer error once and then clears
+    it, so the given stream and the thread's default stream need at most one
+    retry each.
+    """
+    for attempt in range(3):
+        try:
+            _sync_and_clear_cache(stream)
+            return
+        except RuntimeError as exc:
+            if attempt == 2 or not is_command_buffer_error(exc):
+                raise
+            logger.warning("Dropping a pending Metal error during teardown: %s", exc)
+
+
+def _drop_pending_gpu_errors(stream: Any) -> None:
+    """Raise and log errors a GPU reset left on this thread's streams.
+
+    Later teardown syncs then run to completion. No buffer lock is taken, so
+    this does not wait on an in-flight store worker.
+    """
+    for sync in (lambda: mx.synchronize(stream), mx.synchronize):
+        try:
+            sync()
+        except RuntimeError as exc:
+            exit_if_gpu_submissions_ignored(exc)
+            if "no Stream" in str(exc):
+                continue
+            if not is_command_buffer_error(exc):
+                raise
+            logger.warning("Dropping a pending Metal error during teardown: %s", exc)
+
+
 def _final_engine_thread_reclaim(stream: Any) -> None:
     """Drop Python cycles and reclaim MLX buffers on the engine worker thread."""
     gc.collect()
-    _sync_and_clear_cache(stream)
+    _teardown_sync_and_clear_cache(stream)
     gc.collect()
     clear_thread_streams()
 
@@ -225,7 +261,7 @@ def _final_engine_thread_reclaim(stream: Any) -> None:
 def _final_global_mlx_thread_reclaim() -> None:
     """Reclaim MLX state before the process-wide worker thread exits."""
     gc.collect()
-    _sync_and_clear_cache()
+    _teardown_sync_and_clear_cache()
     gc.collect()
     clear_thread_streams()
 
@@ -1291,17 +1327,25 @@ class EngineCore:
 
         self.scheduler._engine_teardown = teardown
 
+        def drain_gpu_errors() -> None:
+            _drop_pending_gpu_errors(self._mlx_stream)
+
         # Both shutdown() and deep_reset() touch the engine stream (directly
         # or via _drain_pending_async_removes / _do_abort_request). The
         # stream is bound to the engine's executor thread, so dispatch both
         # through the executor. Rejection cannot safely move MLX cleanup
-        # onto the close caller's thread.
-        for fn in (self.scheduler.shutdown, self.scheduler.deep_reset):
+        # onto the close caller's thread. Errors a GPU reset left on the
+        # stream are drained first so the two steps do not stop on them.
+        for fn in (
+            drain_gpu_errors,
+            self.scheduler.shutdown,
+            self.scheduler.deep_reset,
+        ):
             fn_name = getattr(fn, "__name__", repr(fn))
             try:
                 teardown.set_phase(fn_name)
                 self._mlx_executor.submit(fn).result(
-                    timeout=teardown.remaining(mlx=fn_name == "deep_reset")
+                    timeout=teardown.remaining(mlx=fn_name != "shutdown")
                 )
             except concurrent.futures.TimeoutError:
                 fatal_exit(

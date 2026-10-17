@@ -90,7 +90,11 @@ from .speculative.vlm_mtp import (
     run_vlm_mtp_decode,
     vlm_mtp_positioned_sampling_available,
 )
-from .utils.fatal import FATAL_TEARDOWN_TIMEOUT_S, fatal_exit
+from .utils.fatal import (
+    FATAL_TEARDOWN_TIMEOUT_S,
+    fatal_exit,
+    is_command_buffer_error,
+)
 from .utils.generation_config import load_generation_config_token_ids
 from .utils.hardware import format_bytes
 from .utils.metal_sync import (
@@ -2929,6 +2933,8 @@ class Scheduler:
                         if hasattr(self.model, "unregister_rope_delta"):
                             self.model.unregister_rope_delta(uid)
                     except Exception as e:
+                        if is_command_buffer_error(e):
+                            raise
                         logger.warning(
                             "Deferred batch_generator.remove(uid=%s) failed: %s",
                             uid,
@@ -8845,6 +8851,8 @@ class Scheduler:
                         return None
                     return snapshot
         except Exception as e:
+            if is_command_buffer_error(e):
+                raise
             logger.debug(
                 f"Failed to extract boundary cache snapshot for uid={uid}: {e}"
             )
@@ -11822,6 +11830,8 @@ class Scheduler:
             self._convert_dropped_prefill_cache(prompt_cache)
             return self._prepare_live_cache_store(request_id, prompt_cache, tokens)
         except Exception as e:
+            if is_command_buffer_error(e):
+                raise
             logger.debug("Cancelled prefill store skipped for %s: %s", request_id, e)
             return None
 
@@ -13011,6 +13021,8 @@ class Scheduler:
                     self._cleanup_prefill_abort_request(request)
                     continue
                 except Exception as e:
+                    if is_command_buffer_error(e):
+                        raise
                     from .patches.specprefill import cleanup_rope
 
                     logger.error(f"SpecPrefill sparse prefill failed: {e}")

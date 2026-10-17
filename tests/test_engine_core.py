@@ -705,7 +705,9 @@ class TestEngineCoreClose:
             future = MagicMock()
             future.result.side_effect = concurrent.futures.TimeoutError
             executor = MagicMock()
-            executor.submit.return_value = future
+            executor.submit.side_effect = lambda fn, *args: (
+                future if getattr(fn, "__name__", "") == "shutdown" else MagicMock()
+            )
             engine._mlx_executor = executor
 
             with (
@@ -1448,6 +1450,64 @@ class TestGlobalMLXExecutor:
         )
         future.result.assert_called_once_with(timeout=60.0)
         executor.shutdown.assert_called_once_with(wait=False)
+
+    def test_teardown_reclaim_survives_pending_command_buffer_errors(self):
+        """A victim engine's stored GPU errors must not fail its unload."""
+        error = RuntimeError(
+            "[METAL] Command buffer execution failed: Discarded (victim of GPU "
+            "error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)."
+        )
+        with (
+            patch.object(
+                engine_core, "_sync_and_clear_cache", side_effect=[error, error, None]
+            ) as sync,
+            patch.object(engine_core, "clear_thread_streams"),
+        ):
+            engine_core._final_engine_thread_reclaim("stream")
+        assert sync.call_count == 3
+
+        with (
+            patch.object(
+                engine_core,
+                "_sync_and_clear_cache",
+                side_effect=RuntimeError("[metal::malloc] out of memory"),
+            ),
+            pytest.raises(RuntimeError, match="malloc"),
+        ):
+            engine_core._final_engine_thread_reclaim("stream")
+
+    def test_close_drains_pending_gpu_error_before_scheduler_teardown(
+        self, mock_model, mock_tokenizer
+    ):
+        """Scheduler teardown must not stop on an error a GPU reset left behind."""
+        pending = [
+            RuntimeError(
+                "[METAL] Command buffer execution failed: Discarded (victim of "
+                "GPU error/recovery)"
+            )
+        ]
+        real_synchronize = mx.synchronize
+
+        def synchronize(*args):
+            if pending:
+                raise pending.pop()
+            return real_synchronize(*args)
+
+        def shutdown():
+            mx.synchronize()
+
+        with (
+            patch("omlx.engine_core.get_registry") as mock_registry,
+            patch.object(mx, "synchronize", side_effect=synchronize),
+            patch.object(engine_core, "fatal_exit", side_effect=SystemExit) as fatal,
+        ):
+            mock_registry.return_value.acquire.return_value = True
+            engine = EngineCore(model=mock_model, tokenizer=mock_tokenizer)
+            engine.scheduler.shutdown = shutdown
+            engine.close()
+
+        fatal.assert_not_called()
+        assert engine._closed
 
     def test_get_mlx_executor_returns_singleton(self):
         """get_mlx_executor() must always return the same executor instance."""
