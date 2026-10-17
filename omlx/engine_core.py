@@ -20,6 +20,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import (
@@ -36,6 +37,7 @@ from typing import (
 
 import mlx.core as mx
 
+from .custom_kernels.quant_matmul.fast import share_command_queue
 from .exceptions import (
     PrefillMemoryAbortedError,
     PrefillMemoryExceededError,
@@ -192,6 +194,24 @@ def _raise_request_output_error(output: RequestOutput) -> None:
 
 
 _global_mlx_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_engines_on_own_queues: "weakref.WeakSet[EngineCore]" = weakref.WeakSet()
+_warned_own_queues = False
+
+
+def _note_engine_on_own_queue(engine: "EngineCore") -> None:
+    """Warn once when two live engines submit on separate Metal queues."""
+    global _warned_own_queues
+    _engines_on_own_queues.add(engine)
+    live = sum(1 for e in _engines_on_own_queues if not e._closed)
+    if _warned_own_queues or live < 2:
+        return
+    _warned_own_queues = True
+    logger.warning(
+        "Loaded models submit GPU work on separate Metal command queues "
+        "because the native quant_matmul extension is missing or predates "
+        "share_command_queue. Running several models at once can then hang "
+        "the GPU (#4224). Rebuild the native kernels with `make kernels`."
+    )
 
 
 def _final_engine_thread_reclaim(stream: Any) -> None:
@@ -388,6 +408,14 @@ class EngineCore:
         model = None
         tokenizer = None
 
+        # Engine streams submit to one Metal command queue. Busy engines on
+        # separate queues can trip a GPU firmware lockup (#4224).
+        queue = self._mlx_executor.submit(
+            share_command_queue, self._mlx_stream
+        ).result()
+        if queue is None:
+            _note_engine_on_own_queue(self)
+
         logger.debug(f"Engine {self._engine_id} initialized")
 
     async def start(self) -> None:
@@ -493,8 +521,8 @@ class EngineCore:
     async def _engine_loop(self) -> None:
         """Main engine loop - runs scheduler steps on the MLX executor.
 
-        All scheduler steps run on _mlx_executor (single-worker thread) to
-        guarantee that MLX GPU operations are never concurrent.  VLM vision
+        All scheduler steps run on _mlx_executor (single-worker thread), so
+        this engine's MLX GPU operations are never concurrent.  VLM vision
         encoding also runs on the same executor, so inline scheduler.step()
         on the event loop would race with vision mx.eval() and segfault.
         """

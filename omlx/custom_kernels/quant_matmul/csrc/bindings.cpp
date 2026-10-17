@@ -9,6 +9,7 @@
 #include "affine_qmm.h"
 #include "ane/ane_hybrid.h"
 #include "command_buffer_caps.h"
+#include "command_queue.h"
 #include "gather_qmm.h"
 #include "grouped_expert.h"
 #include "head_flat_qmm.h"
@@ -132,6 +133,11 @@ NB_MODULE(_ext, m) {
       &omlx::quant_matmul::set_command_buffer_caps,
       "ops"_a,
       "mb"_a);
+  m.def(
+      "share_command_queue",
+      &omlx::quant_matmul::share_command_queue,
+      "stream"_a,
+      nb::call_guard<nb::gil_scoped_release>());
   m.def(
       "nax_qmm_kernels_built",
       &omlx::quant_matmul::nax_qmm_kernels_built);

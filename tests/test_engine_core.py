@@ -18,8 +18,11 @@ import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import mlx.core as mx
 import pytest
 
+import omlx.engine_core as engine_core
+from omlx.custom_kernels.quant_matmul import fast as quant_fast
 from omlx.engine_core import (
     AsyncEngineCore,
     EngineConfig,
@@ -1467,6 +1470,64 @@ class TestGlobalMLXExecutor:
             finally:
                 engine1.close()
                 engine2.close()
+
+    @pytest.mark.skipif(
+        not quant_fast.has_symbol("share_command_queue"),
+        reason="native quant_matmul extension not built",
+    )
+    def test_engine_streams_share_one_metal_queue(self, mock_model, mock_tokenizer):
+        """Engines keep their own threads but submit on one queue (#4224).
+
+        The thread's default stream keeps its own queue: a default-stream
+        producer feeding the engine stream in one eval would deadlock on a
+        single in-order queue.
+        """
+
+        def step(stream):
+            produced = mx.arange(1 << 16, dtype=mx.float32) * 2
+            with mx.stream(stream):
+                total = (produced + 1).sum()
+            mx.eval(total)
+            return quant_fast.share_command_queue(stream), total.item()
+
+        with patch("omlx.engine_core.get_registry") as mock_registry:
+            mock_registry.return_value.acquire.return_value = True
+            engines = [
+                EngineCore(model=mock_model, tokenizer=mock_tokenizer)
+                for _ in range(2)
+            ]
+            try:
+                results = [
+                    e._mlx_executor.submit(step, e._mlx_stream).result(timeout=30)
+                    for e in engines
+                ]
+            finally:
+                for e in engines:
+                    e.close()
+
+        assert results[0][0] == results[1][0]
+        assert [total for _, total in results] == [float(1 << 32)] * 2
+
+    def test_warns_once_when_engines_keep_own_queues(
+        self, mock_model, mock_tokenizer, caplog
+    ):
+        """Without the native extension, a second live engine logs one warning."""
+        with (
+            patch("omlx.engine_core.get_registry") as mock_registry,
+            patch.object(engine_core, "share_command_queue", return_value=None),
+            patch.object(engine_core, "_warned_own_queues", False),
+            caplog.at_level("WARNING", logger="omlx.engine_core"),
+        ):
+            mock_registry.return_value.acquire.return_value = True
+            engines = [
+                EngineCore(model=mock_model, tokenizer=mock_tokenizer)
+                for _ in range(3)
+            ]
+            for e in engines:
+                e.close()
+
+        warnings = [r for r in caplog.records if "#4224" in r.getMessage()]
+        assert len(warnings) == 1
 
     @pytest.mark.asyncio
     async def test_shared_executor_serializes_concurrent_tasks(self):

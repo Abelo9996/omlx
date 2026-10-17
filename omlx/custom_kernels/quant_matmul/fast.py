@@ -40,6 +40,18 @@ def set_command_buffer_caps(ops: int, mb: int) -> tuple[int, int] | None:
     return tuple(setter(int(ops), int(mb)))
 
 
+def share_command_queue(stream) -> int | None:
+    """Move the calling thread's encoder for ``stream`` onto the shared queue.
+
+    Returns the encoder's queue id afterward (0 for a CPU stream), or None
+    when the native extension lacks the call and the stream keeps its queue.
+    """
+    share = getattr(_ext, "share_command_queue", None)
+    if share is None:
+        return None
+    return int(share(stream))
+
+
 # Extensions built before the NAX split reject the use_nax/nax_variant kwargs,
 # so only pass them when the rebuilt binding is present.
 _EXT_HAS_NAX = _ext is not None and hasattr(_ext, "is_nax_available")
