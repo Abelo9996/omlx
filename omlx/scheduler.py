@@ -1802,13 +1802,13 @@ def _glm5_next_prefill_floor() -> int:
     the chunk, so a wider chunk feeds the MoE more rows.
     """
     try:
-        from .custom_kernels.glm_moe_dsa import fast
+        from .custom_kernels.attention import fast
         from .custom_kernels.nax import is_nax_available
         from .patches.glm_moe_dsa.sparse_mla_nax import nax_sparse_mla_available
         from .settings import get_system_memory
 
         if not fast.is_native_available() or not fast.has_symbol(
-            "glm_dsa_sparse_mla_attention"
+            "sparse_mla_attention"
         ):
             return 0
         if get_system_memory() < 64 * 1024**3:
@@ -3187,10 +3187,10 @@ class Scheduler:
             )
             is_qwen4 = model_type.startswith("qwen4_exp")
             if is_qwen4:
-                from .custom_kernels.glm_moe_dsa import fast
+                from .custom_kernels.attention import fast
 
                 if not fast.is_native_available() or not fast.has_symbol(
-                    "qwen4_qsa_sparse_gqa_attention"
+                    "sparse_gqa_attention"
                 ):
                     return 0
             if model_type.startswith("glm5_next"):
@@ -3239,13 +3239,13 @@ class Scheduler:
                 )
             if not model_type.startswith("qwen4_exp"):
                 return 0
-            from .custom_kernels.glm_moe_dsa import fast
+            from .custom_kernels.attention import fast
             from .custom_kernels.nax import is_nax_available
             from .settings import get_system_memory
 
             if not (
                 fast.is_native_available()
-                and fast.has_symbol("qwen4_qsa_sparse_gqa_attention")
+                and fast.has_symbol("sparse_gqa_attention")
             ):
                 return 0
             # Offloaded experts are streamed once per prefill forward, so a
