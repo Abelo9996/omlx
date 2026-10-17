@@ -6652,6 +6652,7 @@ class Scheduler:
 
         A single plan takes the single-request path. Several plans share one
         packed forward; each row keeps its own cache, snapshots and progress.
+        A row that stops at its generation-prompt tail also runs the rest.
         Returns, per plan, whether that request's prefill is complete.
         """
         interrupt_batch_timing(getattr(self, "batch_generator", None))
@@ -6786,7 +6787,21 @@ class Scheduler:
             if self._prefill_tps_best is None or rate > self._prefill_tps_best:
                 self._prefill_tps_best = rate
         self._accrue_decode_debt(chunk_dt)
-        return [plan.state.tokens_remaining.shape[1] == 0 for plan in plans]
+        done = [plan.state.tokens_remaining.shape[1] == 0 for plan in plans]
+        for index, plan in enumerate(plans):
+            state = plan.state
+            if done[index] or state.tail_at != state.base_size + state.tokens_processed:
+                continue
+            # The rest is the generation prompt, a few tokens. As a step of its
+            # own it would first wait for decode to repay this chunk.
+            _mtp_priming.activate_request(self.model, state.request.request_id)
+            try:
+                tail = Scheduler._plan_prefill_chunk(self, state)
+            except (_PrefillEvictionNeeded, PrefillMemoryExceededError):
+                # Its own step handles the guard outcome, outside any pack.
+                continue
+            done[index] = Scheduler._run_prefill_chunks(self, [tail])[0]
+        return done
 
     def _forward_prefill_chunk(self, plan: _PrefillChunkPlan) -> None:
         state = plan.state
@@ -13055,10 +13070,8 @@ class Scheduler:
                     if force_chunk
                     else self.config.prefill_step_size
                 )
-                # Under decode fairness, a prompt that fits one contended
-                # chunk need not become resumable unless another prefill can
-                # potentially share its forward. Explicit chunked prefill
-                # keeps its existing packing behavior.
+                # Short prompts go resumable to join other requests' forwards.
+                # Without chunked prefill, a lone one stays on the one-call path.
                 packed = (
                     vlm_embeds is None
                     and not request.packed_prefill_excluded
