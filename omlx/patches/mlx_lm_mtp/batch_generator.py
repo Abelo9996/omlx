@@ -1563,6 +1563,7 @@ def _reconcile_mtp_to_standard(gen_batch: Any, state: _MtpState) -> bool:
     tokens = gen_batch.tokens[0] if getattr(gen_batch, "tokens", None) else None
     if not tokens:
         return False
+    started = time.perf_counter()
     try:
         new_cache = _rebuild_singleton_cache(gen_batch.model)
         if new_cache is None:
@@ -1606,11 +1607,14 @@ def _reconcile_mtp_to_standard(gen_batch: Any, state: _MtpState) -> bool:
             from mlx_lm.models.cache import TokenBuffer
 
             gen_batch._token_context[0] = TokenBuffer(list(tokens))
-        logger.debug(
-            "MTP reconciled to standard on reshape (uid=%s tokens=%d queue=%d)",
+        logger.info(
+            "MTP reconciled to standard on reshape (uid=%s tokens=%d chunks=%d "
+            "queue=%d, %.2fs)",
             getattr(state, "uid", "?"),
             len(tokens),
+            -(-total // step),
             len(state.queue),
+            time.perf_counter() - started,
         )
         return True
     except Exception as exc:
