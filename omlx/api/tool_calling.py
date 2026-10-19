@@ -317,7 +317,9 @@ def _matches_union_type(value: Any, types: list) -> bool | None:
 
 def _union_admits_boolean(types: object) -> bool:
     """Whether the declared alternatives include a boolean."""
-    return isinstance(types, list) and any(t in _SCHEMA_BOOL_TYPES for t in types)
+    return isinstance(types, list) and any(
+        isinstance(t, str) and t in _SCHEMA_BOOL_TYPES for t in types
+    )
 
 
 def _union_keyword_types(spec: dict) -> list[str] | None:

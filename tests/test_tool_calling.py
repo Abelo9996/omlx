@@ -5740,7 +5740,7 @@ def test_xml_union_keyword_parameter_keeps_declared_alternatives(
     assert validate_json_schema(arguments, schema)[0]
 
 
-@pytest.mark.parametrize("types", [["unknown"], [None], []])
+@pytest.mark.parametrize("types", [["unknown"], [None], [], [{"type": "string"}]])
 def test_invalid_union_type_declarations_keep_best_effort_parsing(types):
     assert _coerce_param_value("123", "v", {"v": {"type": types}}, "f") == 123
 
