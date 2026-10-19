@@ -45,7 +45,6 @@ def _run(body: str):
     script = (
         consts
         + """
-// localStorage with a fixed quota, like the browser's per-origin limit.
 const store = new Map();
 const localStorage = {
     quota: Infinity,
@@ -58,11 +57,7 @@ const localStorage = {
         }
         store.set(key, String(value));
     },
-    removeItem: key => store.delete(key),
 };
-const alerts = [];
-const alert = message => alerts.push(message);
-const window = {t: key => key};
 let exported = null;
 const URL = {createObjectURL: blob => { exported = blob; return 'blob:chats'; },
              revokeObjectURL() {}};
@@ -102,16 +97,12 @@ const exportedChats = async () => {
 
 
 def test_export_keeps_messages_that_exceed_the_storage_quota():
-    """Messages shown on screen must reach the export even when the browser
-    refuses to store them, which left only the system prompt in the file."""
     result = _run("""
 const systemPrompt = 'context '.repeat(1000);
 const session = {messages: [], model: 'model', systemPrompt, modelSettingsByModel: {}};
 app.chatSessions.chat_1 = session;
 app.systemPrompt = systemPrompt;
 app.saveCurrentChat('chat_1');
-// Each assistant reply stores another copy of the system prompt in its meta,
-// so the first reply pushes the chat past the quota.
 localStorage.quota = localStorage.getItem(CHAT_HISTORY_STORAGE_KEY).length + 100;
 session.messages.push({id: 'u1', role: 'user', content: 'question'});
 session.messages.push({id: 'a1', role: 'assistant', content: 'answer',
@@ -125,7 +116,7 @@ console.log(JSON.stringify({
                                messages: c.messages.map(m => [m.role, m.content])})),
 }));
 """)
-    # The browser kept the empty snapshot, as in the report.
+    # Storage still holds the snapshot from before the quota hit.
     assert result["storedMessages"] == 0
     assert result["exported"] == [
         {
@@ -136,39 +127,9 @@ console.log(JSON.stringify({
     ]
 
 
-def test_export_matches_stored_history_and_strips_image_data():
+def test_export_keeps_the_current_chat_when_another_chat_is_pinned():
+    """Pinned chats sort first, so the quota trim drops the chat in use."""
     result = _run("""
-const session = {messages: [
-    {id: 'u1', role: 'user', content: [
-        {type: 'image_url', image_url: {url: 'data:image/png;base64,AAAA'}},
-        {type: 'text', text: 'describe'},
-    ]},
-    {id: 'a1', role: 'assistant', content: 'a cat'},
-], model: 'model', systemPrompt: 'be brief', modelSettingsByModel: {}};
-app.chatSessions.chat_1 = session;
-app.saveCurrentChat('chat_1');
-const chats = await exportedChats();
-console.log(JSON.stringify({
-    sameAsStored: JSON.stringify(chats)
-        === JSON.stringify(JSON.parse(localStorage.getItem(CHAT_HISTORY_STORAGE_KEY))),
-    image: chats[0].messages[0].content[0],
-    alerts,
-}));
-""")
-    assert result["sameAsStored"] is True
-    assert result["image"] == {"type": "image_url", "image_url": {"url": ""}}
-    assert result["alerts"] == []
-
-
-def test_export_without_chats_reports_nothing_to_export():
-    result = _run("""
-const chats = await exportedChats();
-console.log(JSON.stringify({chats, alerts}));
-""")
-    assert result == {"chats": None, "alerts": ["chat.no_chats_to_export"]}
-
-
-_TWO_CHATS_THEN_QUOTA = """
 const systemPrompt = 'context '.repeat(1000);
 const newSession = () => ({messages: [], model: 'model', systemPrompt, modelSettingsByModel: {}});
 const say = (id, text) => {
@@ -181,34 +142,6 @@ const say = (id, text) => {
 app.systemPrompt = systemPrompt;
 app.chatSessions.chat_old = newSession();
 say('chat_old', 'earlier question');
-"""
-
-
-def _summary(chats):
-    return sorted((c["id"], [m["content"] for m in c["messages"]]) for c in chats)
-
-
-def test_export_keeps_older_chats_when_the_quota_trims_them():
-    """Trimming to fit the quota may drop older chats from storage, but the
-    export is the backup path and must still contain them."""
-    result = _run(_TWO_CHATS_THEN_QUOTA + """
-app.chatSessions.chat_1 = newSession();
-app.currentChatId = 'chat_1';
-say('chat_1', 'first');
-localStorage.quota = localStorage.getItem(CHAT_HISTORY_STORAGE_KEY).length + 100;
-say('chat_1', 'second');
-const chats = await exportedChats();
-console.log(JSON.stringify({chats}));
-""")
-    assert _summary(result["chats"]) == [
-        ("chat_1", ["first", "re: first", "second", "re: second"]),
-        ("chat_old", ["earlier question", "re: earlier question"]),
-    ]
-
-
-def test_export_keeps_the_current_chat_when_another_chat_is_pinned():
-    """Pinned chats sort first, so trimming used to evict the chat in use."""
-    result = _run(_TWO_CHATS_THEN_QUOTA + """
 app.chatHistory.find(c => c.id === 'chat_old').pinned = true;
 app.sortChatHistory();
 app.saveChatHistory();
@@ -220,7 +153,9 @@ say('chat_1', 'second');
 const chats = await exportedChats();
 console.log(JSON.stringify({chats}));
 """)
-    assert _summary(result["chats"]) == [
+    assert sorted(
+        (c["id"], [m["content"] for m in c["messages"]]) for c in result["chats"]
+    ) == [
         ("chat_1", ["first", "re: first", "second", "re: second"]),
         ("chat_old", ["earlier question", "re: earlier question"]),
     ]

@@ -4971,9 +4971,7 @@
     },
 
     async downloadChats() {
-        // Export the chats the page holds, not the localStorage copy: when a
-        // save exceeds the storage quota, localStorage keeps an older snapshot
-        // that can lack every message shown on screen.
+        // localStorage can hold an older snapshot after a quota failure.
         const chats = this.chatHistory || [];
         if (!chats.length) {
             alert(window.t('chat.no_chats_to_export'));
@@ -5690,8 +5688,7 @@
 
     saveChatHistory() {
         const key = CHAT_HISTORY_STORAGE_KEY;
-        // Trim a copy to fit the quota; this.chatHistory keeps every chat so the
-        // sidebar and "Download chats" still have the ones storage can't hold.
+        // Trim only the stored copy; the sidebar and export keep every chat.
         const toStore = this.chatHistory.slice();
         const persist = () => localStorage.setItem(key, JSON.stringify(toStore));
         try {
