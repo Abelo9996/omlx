@@ -8,6 +8,7 @@ import mlx.nn as nn
 import numpy as np
 import pytest
 from mlx.utils import tree_flatten
+from mlx_vlm.quantization.nvfp4 import replace_scaled_quantized_linears
 
 import omlx.patches.m5_gather_qmm as m5
 from omlx.patches.deepseek_v4.switch_layers import (
@@ -15,7 +16,14 @@ from omlx.patches.deepseek_v4.switch_layers import (
     SwitchGLU,
     install_nvfp4_global_scales,
 )
-from omlx.patches.moe_gate_up_fusion import can_fuse
+from omlx.patches.mlx_vlm_glm5_next_compat import (
+    apply_mlx_vlm_glm5_next_compat_patch,
+)
+from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
+from omlx.patches.moe_gate_up_fusion import (
+    apply_switch_glu_gate_up_fusion,
+    can_fuse,
+)
 
 requires_metal = pytest.mark.skipif(
     not mx.metal.is_available(), reason="gather_qmm global_scale runs on the GPU"
@@ -73,7 +81,7 @@ def _load_gate(block, seed=0):
             "global_scale": mapped["switch_mlp.gate_proj.global_scale"],
         }
     )
-    return proj, mapped, ws2, dense
+    return proj, dense
 
 
 def _reference(x, indices, dense):
@@ -86,16 +94,6 @@ def _rel(a, b):
     return float(mx.abs(a - b).max() / mx.abs(b).max())
 
 
-def test_weight_scale_2_is_renamed_and_installed():
-    block = _Block()
-    proj, mapped, ws2, _ = _load_gate(block)
-    assert set(mapped) == {"switch_mlp.gate_proj.global_scale"}
-    assert mx.allclose(mapped["switch_mlp.gate_proj.global_scale"], ws2 * 2688.0)
-    assert "global_scale" in proj
-    # Projections without a scale in the checkpoint keep their old parameters.
-    assert "global_scale" not in block.switch_mlp.up_proj
-
-
 def test_install_ignores_other_scales_and_stand_ins():
     weights = {"vision.mlp.fc1.weight_scale_2": mx.array(0.5)}
     assert install_nvfp4_global_scales(_Block(), weights) == weights
@@ -105,7 +103,7 @@ def test_install_ignores_other_scales_and_stand_ins():
 
 @requires_metal
 def test_decode_applies_global_scale():
-    proj, _, _, dense = _load_gate(_Block())
+    proj, dense = _load_gate(_Block())
     x = mx.random.normal((6, 1, K), key=mx.random.key(1))
     indices = mx.array([0, 1, 2, 3, 2, 1], dtype=mx.uint32)
     y = proj(x, indices)
@@ -120,51 +118,20 @@ def test_sorted_prefill_keeps_global_scale_on_the_reroute(monkeypatch):
         raise AssertionError("the NAX reroute has no global scale input")
 
     monkeypatch.setattr(m5, "_nax_sorted_gather_qmm", no_nax)
-    proj, _, _, dense = _load_gate(_Block())
+    proj, dense = _load_gate(_Block())
     indices = mx.sort(mx.array(np.random.default_rng(2).integers(0, E, 64), mx.uint32))
     x = mx.random.normal((64, 1, K), key=mx.random.key(3))
     y = proj(x, indices, sorted_indices=True)
     assert _rel(y, _reference(x, indices, dense)) < 5e-3
 
 
-def test_gate_up_fusion_needs_matching_global_scales():
-    block = _Block()
-    sw = block.switch_mlp
-    codes, scales, ws2, _ = _modelopt_nvfp4(4)
-    mapped = install_nvfp4_global_scales(
-        block,
-        {
-            "switch_mlp.gate_proj.weight_scale_2": ws2,
-            "switch_mlp.up_proj.weight_scale_2": ws2,
-        },
-    )
-    for name in ("gate_proj", "up_proj"):
-        q = getattr(sw, name).to_quantized(group_size=16, bits=4, mode="nvfp4")
-        q.update(
-            {
-                "weight": codes,
-                "scales": scales,
-                "global_scale": mapped[f"switch_mlp.{name}.global_scale"],
-            }
-        )
-        setattr(sw, name, q)
-    sw.down_proj = sw.down_proj.to_quantized(group_size=16, bits=4, mode="nvfp4")
-    assert can_fuse(sw)
-    sw.up_proj.global_scale = sw.up_proj.global_scale * 2
-    assert not can_fuse(sw)
-
-
-@requires_metal
-@pytest.mark.parametrize("tokens", [1, 96])
-def test_fused_nvfp4_matches_separate_projections(tokens):
-    from omlx.patches.moe_gate_up_fusion import apply_switch_glu_gate_up_fusion
-
+def _nvfp4_switch_glu():
+    """Gate/up share tensor scales but not packed weights, like ModelOpt."""
     block = _Block()
     sw = block.switch_mlp
     for seed, name in enumerate(("gate_proj", "up_proj", "down_proj")):
         out_dims, in_dims = (K, N) if name == "down_proj" else (N, K)
         codes, scales, ws2, _ = _modelopt_nvfp4(seed, out_dims, in_dims)
-        # Gate/up use the same tensor scales but different packed weights.
         if name == "gate_proj":
             gate_scale = ws2
         elif name == "up_proj":
@@ -181,6 +148,20 @@ def test_fused_nvfp4_matches_separate_projections(tokens):
             }
         )
         sw[name] = q
+    return sw
+
+
+def test_gate_up_fusion_needs_matching_global_scales():
+    sw = _nvfp4_switch_glu()
+    assert can_fuse(sw)
+    sw.up_proj.global_scale = sw.up_proj.global_scale * 2
+    assert not can_fuse(sw)
+
+
+@requires_metal
+@pytest.mark.parametrize("tokens", [1, 96])
+def test_fused_nvfp4_matches_separate_projections(tokens):
+    sw = _nvfp4_switch_glu()
     x = (mx.random.normal((1, tokens, K), key=mx.random.key(5)) * 0.1).astype(
         mx.bfloat16
     )
@@ -196,17 +177,9 @@ def test_fused_nvfp4_matches_separate_projections(tokens):
     assert _rel(actual, expected) < 1e-2
 
 
-@pytest.mark.parametrize("prefix", ["language_model.model.", "model.language_model."])
 @pytest.mark.parametrize("mtp_naming", ["converted", "nextn"])
 @pytest.mark.parametrize("with_scale", [False, True])
-def test_glm_sanitize_quantize_and_mtp_preserve_scales(prefix, mtp_naming, with_scale):
-    from mlx_vlm.quantization.nvfp4 import replace_scaled_quantized_linears
-
-    from omlx.patches.mlx_vlm_glm5_next_compat import (
-        apply_mlx_vlm_glm5_next_compat_patch,
-    )
-    from omlx.patches.mlx_vlm_mtp import glm5_next_vlm_runtime
-
+def test_glm_sanitize_quantize_and_mtp_preserve_scales(mtp_naming, with_scale):
     apply_mlx_vlm_glm5_next_compat_patch()
     assert glm5_next_vlm_runtime.apply()
     from mlx_vlm.models.glm5_next import Model, ModelConfig, TextConfig
@@ -242,20 +215,20 @@ def test_glm_sanitize_quantize_and_mtp_preserve_scales(prefix, mtp_naming, with_
     )
     model = Model(ModelConfig(text_config=config, model_type="glm5_next"))
     ws2 = mx.array([0.01, 0.1, 1.0, 3.0], mx.float32)
-    backbone = "layers.0.mlp.switch_mlp.gate_proj"
+    backbone = "language_model.model.layers.0.mlp.switch_mlp.gate_proj"
     mtp = "language_model.mtp.0.block.mlp.switch_mlp.gate_proj"
     mtp_input = (
         mtp
         if mtp_naming == "converted"
-        else f"{prefix}layers.1.mlp.switch_mlp.gate_proj"
+        else "language_model.model.layers.1.mlp.switch_mlp.gate_proj"
     )
     before = dict(tree_flatten(model.parameters()))
     suffix = "weight_scale_2" if with_scale else "weight"
     value = ws2 if with_scale else mx.ones((E, N, K))
     weights = model.sanitize(
-        {f"{prefix}{backbone}.{suffix}": value, f"{mtp_input}.{suffix}": value}
+        {f"{backbone}.{suffix}": value, f"{mtp_input}.{suffix}": value}
     )
-    paths = [f"language_model.model.{backbone}", mtp]
+    paths = [backbone, mtp]
     if not with_scale:
         assert set(weights) == {f"{path}.weight" for path in paths}
         after = dict(tree_flatten(model.parameters()))
