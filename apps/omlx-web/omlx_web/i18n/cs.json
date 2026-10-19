@@ -971,6 +971,8 @@
   "cluster.v2.link.tailscale_control": "Řízení přes Tailscale",
   "cluster.v2.link.thunderbolt": "Thunderbolt",
   "cluster.v2.link.wifi": "Wi-Fi",
+  "cluster.v2.loopback.self_notice": "Other Macs can't connect to this Mac because its server only accepts connections from this Mac. Set Host (Listen Address in the Mac app) to 0.0.0.0 and set an API key.",
+  "cluster.v2.loopback.peer_notice": "This Mac only accepts connections from itself. On that Mac, set Host (Listen Address in the Mac app) to 0.0.0.0 and set an API key.",
   "cluster.v2.manual.add_by_ip": "Přidat pomocí IP",
   "cluster.v2.manual.add_show_code": "Přidat a zobrazit kód",
   "cluster.v2.manual.blurb_discovering": "Multicast se nedostane do každé sítě - přímá Thunderbolt nebo drátová adresa funguje vždy.",
