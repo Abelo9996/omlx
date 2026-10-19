@@ -15878,8 +15878,8 @@ class Scheduler:
                     kv_bytes_per_token=kv_bytes_per_token,
                     rotating_layer_specs=rotating_layer_specs,
                     prefill_memory_profile=prefill_memory_profile,
-                    # ANE prefill holds fixed-shape I/O surfaces the first
-                    # long prompt dirties on top of KV+SDPA (issue #2841).
+                    # ANE program weights are wired during prefill on top
+                    # of KV+SDPA (issue #2841).
                     ane_prefill_transient_bytes=_ane_prefill_transient_bytes(
                         self.model
                     ),
