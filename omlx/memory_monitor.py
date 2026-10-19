@@ -294,8 +294,8 @@ class MemoryMonitor:
         # full-attention formula. Empty for non-hybrid models.
         self._rotating_layer_specs: tuple[tuple[int, int], ...] = ()
         self._prefill_memory_profile: PrefillMemoryProfile | None = None
-        # Fixed-shape ANE prefill I/O surfaces (issue #2841); set via
-        # set_model_info, 0 unless the Qwen ANE prefill backend is attached.
+        # ANE program weights the driver wires during prefill (issue #2841);
+        # set via set_model_info, 0 unless the Qwen ANE backend is attached.
         self._ane_prefill_transient_bytes: int = 0
         # Fixed per-sequence recurrent state (GDN/Mamba ArraysCache),
         # measured once from a live cache after the first prefill chunk.
@@ -468,10 +468,10 @@ class MemoryMonitor:
         return 0
 
     def clear_ane_prefill_transient(self) -> None:
-        """Stop reserving ANE prefill I/O surfaces after the banks are shed.
+        """Stop reserving ANE prefill memory after the banks are shed.
 
         The reservation is snapshotted at load; once the runtime headroom
-        rung releases the banks the surfaces are gone, so keeping the term
+        rung releases the banks the programs are gone, so keeping the term
         would make every later admission pass pause for memory that can no
         longer be reclaimed. The next load re-prices it via set_model_info.
         """
@@ -563,9 +563,8 @@ class MemoryMonitor:
             if count > 0 and window > 0
         )
         self._prefill_memory_profile = prefill_memory_profile
-        # ANE prefill I/O surfaces are dirtied by the first long prompt, on
-        # top of the KV+SDPA peak, so admission must price them or the hard
-        # watermark aborts the request mid-prefill (issue #2841).
+        # The ANE driver wires the program weights outside phys_footprint
+        # during prefill, on top of the KV+SDPA peak (issue #2841).
         self._ane_prefill_transient_bytes = max(int(ane_prefill_transient_bytes), 0)
         # A new model's fixed state must be re-measured; a stale value from
         # the previous model would silently mis-charge admission.
@@ -2093,7 +2092,7 @@ def estimate_mla_kv_bytes_per_token(
 
 
 def _ane_prefill_transient_bytes(model: Any) -> int:
-    """ANE prefill I/O surface bytes for ``model``, 0 when not attached.
+    """ANE prefill program weight bytes for ``model``, 0 when not attached.
 
     Defensive: the ANE patch is optional at runtime, so any import or lookup
     failure leaves the KV+SDPA estimate unchanged (issue #2841).
