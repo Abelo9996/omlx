@@ -975,7 +975,8 @@ private struct BasicSection: View {
                              comment: "Section header above the Basic tab fields"))
 
         // These are per-model fields (never stored in profiles), so each
-        // one saves on commit. Enable Thinking is the profile exception.
+        // one saves on commit. Context Window and Enable Thinking are the
+        // profile exceptions.
         ListGroup {
             Row(label: String(localized: "settings.basic.alias.label",
                               defaultValue: "Model Alias",
@@ -994,6 +995,16 @@ private struct BasicSection: View {
                     width: .controlMedium,
                     options: ModelSettingsScreenVM.modelTypeOptions
                 )
+            }
+            if vm.showsEmbeddingContextWindow {
+                Row(label: String(localized: "settings.basic.context_window.label",
+                                  defaultValue: "Context Window",
+                                  comment: "Row label for the context window field"),
+                    sublabel: String(localized: "settings.basic.embedding_context_window.sub",
+                                     defaultValue: "Longer inputs are truncated to this length when a request does not set max_length.",
+                                     comment: "Sublabel for the context window field of an embedding model")) {
+                    TextInput(text: vm.bindProfile($vm.contextLength), mono: true, suffix: "tk", width: .controlCompact)
+                }
             }
             Row(label: String(localized: "settings.basic.ttl.label",
                               defaultValue: "TTL",

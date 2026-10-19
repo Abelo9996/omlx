@@ -1245,6 +1245,7 @@
   "modal.model_settings.model_type_auto": "Auto-detect",
   "modal.model_settings.max_context_window": "Context Window",
   "modal.model_settings.max_context_window_hint": "Sets the total context size the model can handle. Longer prompts are rejected.",
+  "modal.model_settings.embedding_context_window_hint": "Longer inputs are truncated to this length when a request does not set max_length.",
   "modal.model_settings.max_tokens": "Max Tokens",
   "modal.model_settings.max_tokens_hint": "Limits how many tokens the model generates in one turn when the request does not set max_tokens.",
   "modal.model_settings.temperature": "Temperature",

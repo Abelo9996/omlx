@@ -457,6 +457,9 @@ final class ModelSettingsScreenVM {
 
     var showsGenerationSection: Bool { isLLMLike }
 
+    /// Embedding requests without max_length truncate input to the context window.
+    var showsEmbeddingContextWindow: Bool { model?.modelType == "embedding" }
+
     /// Acceleration, Memory Saving and Experimental only apply to the MLX
     /// LLM engines.
     var showsEnginePages: Bool { isLLMLike && !isDiffusionModel }

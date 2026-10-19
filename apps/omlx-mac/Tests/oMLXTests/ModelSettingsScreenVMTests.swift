@@ -607,9 +607,15 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         XCTAssertTrue(vm.showsGenerationSection)
         XCTAssertTrue(vm.showsEnginePages)
 
+        XCTAssertFalse(vm.showsEmbeddingContextWindow)
+
         vm.model = makeModel(id: "embed", configModelType: "bert", modelType: "embedding")
         XCTAssertFalse(vm.showsGenerationSection)
         XCTAssertFalse(vm.showsEnginePages)
+        XCTAssertTrue(vm.showsEmbeddingContextWindow)
+
+        vm.model = makeModel(id: "rerank", configModelType: "xlm-roberta", modelType: "reranker")
+        XCTAssertFalse(vm.showsEmbeddingContextWindow)
 
         vm.model = makeModel(id: "diffusion", configModelType: "diffusion_gemma")
         XCTAssertTrue(vm.showsGenerationSection)

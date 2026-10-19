@@ -383,6 +383,18 @@ def test_embedding_audio_toggle_is_outside_the_llm_only_list():
     assert 'x-show="modelSettings.embedding_audio_enabled"' in section
 
 
+def test_embedding_context_window_is_in_basic_settings():
+    """Embedding requests use max_context_window as their default max_length."""
+    basic = _section(
+        _model_settings_template(),
+        '<section id="ms-basic"',
+        "<!-- Generation defaults (LLM/VLM only) -->",
+    )
+    row = _section(basic, "<!-- Embedding context window -->", "</label>")
+    assert "x-show=\"selectedModel?.model_type === 'embedding'\"" in row
+    assert 'x-model.number="modelSettings.max_context_window"' in row
+
+
 def test_oq_a8_toggle_is_gated_to_qwen35_models():
     """The kernels only exist for this checkpoint family, so the UI hides them."""
     html = _model_settings_template()
