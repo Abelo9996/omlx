@@ -61,6 +61,19 @@ final class ModelSettingsScreenVMTests: XCTestCase {
         )
     }
 
+    func testAffine8IsIncludedInWorkingProfile() {
+        let vm = ModelSettingsScreenVM()
+        vm.turboquantKvEnabled = true
+        vm.turboquantKvScheme = "affine8"
+        vm.turboquantKvBits = "4"
+
+        let settings = vm.currentSettingsDict()
+
+        XCTAssertEqual(settings["turboquant_kv_enabled"]?.value as? Bool, true)
+        XCTAssertEqual(settings["turboquant_kv_scheme"]?.value as? String, "affine8")
+        XCTAssertEqual(settings["turboquant_kv_bits"]?.value as? Double, 8)
+    }
+
     func testLightningMtpAllowsTurboQuantInWorkingProfile() {
         let vm = ModelSettingsScreenVM()
         vm.mtpEnabled = true
