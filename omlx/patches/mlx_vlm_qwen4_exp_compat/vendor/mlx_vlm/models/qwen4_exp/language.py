@@ -192,6 +192,14 @@ def _append_indexer_positions(
 ) -> mx.array:
     if cached is None:
         return position_ids
+    cached, position_ids = _promote_indexer_positions(cached, position_ids)
+    return mx.concatenate([cached, position_ids], axis=-1)
+
+
+def _promote_indexer_positions(
+    cached: mx.array, position_ids: mx.array
+) -> tuple[mx.array, mx.array]:
+    """Broadcast 2-D text positions up to the other side's 3-D MRoPE rank."""
     if cached.ndim == 3 and position_ids.ndim == 2:
         position_ids = mx.broadcast_to(
             position_ids[None],
@@ -204,7 +212,7 @@ def _append_indexer_positions(
             "QSA position IDs must be 2-D text positions or 3-D MRoPE positions, "
             f"got cached={cached.shape} and current={position_ids.shape}."
         )
-    return mx.concatenate([cached, position_ids], axis=-1)
+    return cached, position_ids
 
 
 class _QSAIndexerCache:
@@ -727,8 +735,6 @@ class BatchQSAKVCache:
 
     # Raw keys and positions live in a buffer that grows on the batch KV
     # capacity ladder with this minimum grain, so an append writes in place.
-    # Concatenating the whole bank every step left each exact-width bank in
-    # MLX's pool, where it can never satisfy a later (larger) request.
     index_step = 1024
 
     # True while the backing buffers are wider than ``index_offset``.
@@ -824,23 +830,9 @@ class BatchQSAKVCache:
             self.index_position_ids = position_ids
             self.index_offset = self.index_keys.shape[1]
             return self.index_keys, self.index_position_ids
-        # The rank promotion of _append_indexer_positions, ahead of the write.
-        if cached_positions.ndim == 3 and position_ids.ndim == 2:
-            position_ids = mx.broadcast_to(
-                position_ids[None],
-                (cached_positions.shape[0], *position_ids.shape),
-            )
-        elif cached_positions.ndim == 2 and position_ids.ndim == 3:
-            cached_positions = mx.broadcast_to(
-                cached_positions[None],
-                (position_ids.shape[0], *cached_positions.shape),
-            )
-        elif cached_positions.ndim != position_ids.ndim:
-            raise ValueError(
-                "QSA position IDs must be 2-D text positions or 3-D MRoPE "
-                f"positions, got cached={cached_positions.shape} and "
-                f"current={position_ids.shape}."
-            )
+        cached_positions, position_ids = _promote_indexer_positions(
+            cached_positions, position_ids
+        )
         if (
             cached_keys.dtype != keys.dtype
             or cached_positions.dtype != position_ids.dtype
@@ -1025,8 +1017,7 @@ class BatchQSAKVCache:
         width = self.index_offset
         length = width - min_left
         # Survivors are copied once, straight onto the ladder the next append
-        # would regrow to. Gathering the rows and slicing off the shared left
-        # padding left a strided view that the first append copied again.
+        # would regrow to.
         capacity = _ladder_capacity(length + 1, self.index_step)
         new_keys = mx.zeros((len(kept), capacity, keys.shape[-1]), keys.dtype)
         shape = list(positions.shape)
@@ -1299,10 +1290,8 @@ class BatchQSAKVCache:
         if trimmed and self._pooled_bank is not None:
             for row in range(len(self._pooled_bank.blocks)):
                 self._pooled_bank.drop_tail(row, trimmed)
-        # A capacity buffer is addressed by index_offset, and the next append
-        # overwrites the stale draft columns past it. An exact-width bank is
-        # cut like the singleton trim does, or those columns would fossilize
-        # and desync the indexer from the KV by the trimmed amount.
+        # Cut an exact-width bank like the singleton trim, or stale draft columns
+        # desync the indexer from the KV. A capacity buffer is read via index_offset.
         if (
             trimmed
             and self._index_keys is not None

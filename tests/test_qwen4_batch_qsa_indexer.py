@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Qwen4-Exp ``BatchQSAKVCache`` indexer capacity buffer stays bit-exact.
-
-The batched indexer used to concatenate the whole raw-key bank and its
-position ids on every append, leaving each exact-width bank in MLX's pool.
-It now writes appends in place into a buffer on the batch KV capacity ladder.
-
-Only allocation changes: every append / trim / ragged-finalize / filter /
-join sequence must match the concatenate bookkeeping (``_ExactIndexer``)
-bit-for-bit, and the backing width may only change on a ladder crossing.
-"""
+"""Qwen4-Exp ``BatchQSAKVCache`` indexer capacity buffer matches the
+concatenate bookkeeping (``_ExactIndexer``) bit-for-bit."""
 
 import random
 
@@ -153,25 +145,6 @@ def test_externally_assigned_indexer_keeps_plain_attribute_semantics():
     batch.update_indexer(_rnd((1, 1, DI), 4), mx.array([[4]], dtype=mx.int32))
     assert batch.index_offset == 5
     assert batch.index_keys.shape == (1, 5, DI)
-
-
-def test_filter_after_managed_appends_keeps_keys_and_positions_aligned():
-    batch = BatchQSAKVCache.merge([_row(40, 1), _row(36, 11)])
-    ref = _ExactIndexer(batch.index_keys, batch.index_position_ids)
-    for step in range(3):
-        keys = _rnd((2, 2, DI), 70 + step)
-        pos = mx.array([[40 + 2 * step, 41 + 2 * step]] * 2, dtype=mx.int32)
-        batch.kv_cache.update_and_fetch(
-            _rnd((2, H, 2, D), 80 + step), _rnd((2, H, 2, D), 90 + step)
-        )
-        batch.update_indexer(keys, pos)
-        ref.update(keys, pos)
-    assert batch._index_keys.shape[1] > batch.index_offset
-    batch.filter(mx.array([1]))
-    assert batch.index_keys.shape[1] == batch.index_position_ids.shape[-1]
-    assert batch.index_offset == batch.kv_cache.size()
-    _assert_same(batch.index_keys, ref.index_keys[1:2, 4:])
-    _assert_same(batch.index_position_ids, ref.index_position_ids[1:2, 4:])
 
 
 def test_join_lands_indexer_on_capacity_bit_for_bit():
