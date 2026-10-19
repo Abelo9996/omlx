@@ -14662,8 +14662,8 @@ class Scheduler:
 
     def _requeue_prefill_retry(self, request: "Request") -> None:
         """Reset a torn-down prefill request and requeue it at the front."""
-        # Clear any SpecPrefill RoPE patch tied to this request so the retry
-        # re-scores cleanly.
+        # Drops only the SpecPrefill id. A request with an installed RoPE patch
+        # skips external/chunked prefill, so it never reaches this reset.
         if self._specprefill_active_request_id == request.request_id:
             self._specprefill_active_request_id = None
 
