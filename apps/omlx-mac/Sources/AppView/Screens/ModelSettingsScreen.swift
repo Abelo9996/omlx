@@ -1133,7 +1133,7 @@ private struct GenerationSection: View {
                                   defaultValue: "Top K",
                                   comment: "Row label for the top-k sampling field"),
                     sublabel: String(localized: "settings.basic.top_k.sub",
-                                     defaultValue: "Limit candidates to top K (positive integer).",
+                                     defaultValue: "Limit candidates to top K (0 turns it off).",
                                      comment: "Sublabel describing the top-k field")) {
                     TextInput(text: vm.bindProfile($vm.topK), mono: true, width: .controlNarrow)
                 }
@@ -2546,10 +2546,13 @@ enum SamplingValidator {
                                                   defaultValue: "Top K must be an integer.",
                                                   comment: "Validation error when top-k isn't an integer")))
         }
-        guard v >= 1 else {
+        // 0 turns top-k off: that is how the server's settings, the web dashboard
+        // and mlx-lm's sampler already read it, and the global Server screen
+        // accepts it too; only this per-model check refused it (#4649).
+        guard v >= 0 else {
             return .failure(.init(message: String(localized: "settings.validator.top_k.positive",
-                                                  defaultValue: "Top K must be a positive integer.",
-                                                  comment: "Validation error when top-k isn't positive")))
+                                                  defaultValue: "Top K must be 0 or a positive integer.",
+                                                  comment: "Validation error when top-k is negative")))
         }
         return .success(v)
     }

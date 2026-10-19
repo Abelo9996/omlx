@@ -22955,19 +22955,19 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Limit candidates to top K (positive integer)."
+            "value" : "Limit candidates to top K (0 turns it off)."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ограничить кандидаты top K (положительное целое)."
+            "value" : "Ограничить кандидаты до top K (0 — выключено)."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "将候选限制为 Top K（正整数）。"
+            "value" : "将候选限制为 Top K（0 表示关闭）。"
           }
         }
       }
@@ -25769,25 +25769,25 @@
       }
     },
     "settings.validator.top_k.positive" : {
-      "comment" : "Validation error when top-k isn't positive",
+      "comment" : "Validation error when top-k is negative",
       "extractionState" : "manual",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Top K must be a positive integer."
+            "value" : "Top K must be 0 or a positive integer."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Top K должен быть положительным целым числом."
+            "value" : "Top K должен быть 0 или положительным целым числом."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Top K 必须是正整数。"
+            "value" : "Top K 必须为 0 或正整数。"
           }
         }
       }
