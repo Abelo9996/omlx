@@ -10937,6 +10937,30 @@
         }
       }
     },
+    "models.library.gguf.help" : {
+      "comment" : "Tooltip on the GGUF badge in the model library",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A GGUF file, served by an external engine"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Файл GGUF, который запускает внешний движок"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由外部引擎运行的 GGUF 文件"
+          }
+        }
+      }
+    },
     "models.library.hf_cache.badge" : {
       "comment" : "Badge on a library model found in the shared Hugging Face cache",
       "extractionState" : "manual",
@@ -22206,6 +22230,30 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "为此模型启用推理/思考模式"
+          }
+        }
+      }
+    },
+    "settings.advanced.external_engine.gguf" : {
+      "comment" : "Sublabel for the external engine toggle of a GGUF model",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GGUF models run on an external engine only."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Модели GGUF работают только на внешнем движке."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GGUF 模型只能在外部引擎上运行。"
           }
         }
       }

@@ -119,6 +119,10 @@
                                                           :title="window.t('models.manager.hf_cache_tooltip')"
                                                           x-text="window.t('models.manager.hf_cache_badge')"></span>
                                                 </template>
+                                                <template x-if="model.model_format === 'gguf'">
+                                                    <span class="badge bg-neutral-100 text-neutral-500 border-neutral-200 flex-shrink-0 whitespace-nowrap"
+                                                          :title="window.t('settings.models.table.gguf_tooltip')">GGUF</span>
+                                                </template>
                                                 <button x-data="{ copied: false }"
                                                         @click.stop="copyToClipboard(apiModelName(model.name)); copied = true; setTimeout(() => copied = false, 2000)"
                                                         class="p-1 rounded-md transition-all flex-shrink-0"
@@ -814,7 +818,7 @@
                                                         <span class="text-sm font-medium text-neutral-900 truncate"
                                                               x-text="taskGgufFiles(task) ? task.repo_id + ' · ' + taskGgufFiles(task) : task.repo_id"></span>
                                                         <button x-show="task.status === 'completed'" x-cloak x-data="{ copied: false }"
-                                                                @click.stop="copyToClipboard(apiModelName(task.repo_id.split('/').pop())); copied = true; setTimeout(() => copied = false, 2000)"
+                                                                @click.stop="copyToClipboard(apiModelName(taskModelId(task))); copied = true; setTimeout(() => copied = false, 2000)"
                                                                 class="p-1 rounded-md transition-all flex-shrink-0"
                                                                 :class="copied ? 'text-green-500' : 'text-neutral-300 hover:text-neutral-600 hover:bg-neutral-100'"
                                                                 :title="window.t('models.queue.copy_model_name_tooltip')">

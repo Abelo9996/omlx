@@ -958,7 +958,7 @@ private struct TopPage: View {
         return NavRow(label: page.title,
                       value: vm.summary(for: page),
                       isLast: isLast,
-                      isDimmed: enginePage && !vm.externalEngine.isEmpty,
+                      isDimmed: enginePage && !vm.effectiveExternalEngine.isEmpty,
                       action: { open(page) }) {
             Squircle(systemSymbol: symbol, gradient: gradient)
         }
@@ -1370,7 +1370,7 @@ private struct EnginePage<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if !vm.externalEngine.isEmpty {
+            if !vm.effectiveExternalEngine.isEmpty {
                 HintLine(text: String(localized: "settings.advanced.external_engine.section_note",
                                       defaultValue: "These settings do not apply while an external engine serves this model.",
                                       comment: "Note above MLX-only settings while an external engine serves the model"),
@@ -1379,7 +1379,7 @@ private struct EnginePage<Content: View>: View {
                     .padding(.bottom, 8)
             }
             content()
-                .disabled(!vm.externalEngine.isEmpty)
+                .disabled(!vm.effectiveExternalEngine.isEmpty)
         }
         .padding(.top, 14)
     }
@@ -1497,13 +1497,20 @@ private struct ExternalEngineRow: View {
         engines.first(where: { $0.compatible })?.id
     }
 
+    private var isGGUF: Bool { vm.model?.isGGUF == true }
+
     private var sublabel: String {
-        let selected = engines.first(where: { $0.id == vm.externalEngine })
+        let selected = engines.first(where: { $0.id == vm.effectiveExternalEngine })
         if let selected, !selected.compatible, let reason = selected.reason, !reason.isEmpty {
             return reason
         }
         if usableEngine == nil, let reason = engines.first?.reason, !reason.isEmpty {
             return reason
+        }
+        if isGGUF {
+            return String(localized: "settings.advanced.external_engine.gguf",
+                          defaultValue: "GGUF models run on an external engine only.",
+                          comment: "Sublabel for the external engine toggle of a GGUF model")
         }
         return String(localized: "settings.advanced.external_engine.sub",
                       defaultValue: "Serve this model with another inference engine in its own process instead of oMLX's MLX engines.",
@@ -1524,13 +1531,13 @@ private struct ExternalEngineRow: View {
                               .map { ($0.id, $0.label) })
                 }
                 RowSwitch(isOn: Binding(
-                    get: { !vm.externalEngine.isEmpty },
+                    get: { !vm.effectiveExternalEngine.isEmpty },
                     set: { on in
                         vm.externalEngine = on ? (usableEngine ?? "") : ""
                         save()
                     }
                 ))
-                .disabled(vm.externalEngine.isEmpty && usableEngine == nil)
+                .disabled(isGGUF || (vm.externalEngine.isEmpty && usableEngine == nil))
             }
         }
     }

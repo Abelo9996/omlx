@@ -301,6 +301,7 @@
                 qwen35_oq_a8_min_tokens: 128,
                 external_engine: '',
                 external_engines: [],
+                model_format: null,
                 trust_remote_code: false,
                 embedding_audio_enabled: false,
                 embedding_audio_max_seconds: null,
@@ -2225,6 +2226,7 @@
                     is_diffusion_model: isDiffusion,
                     external_engine: s.external_engine || '',
                     external_engines: model?.external_engines || [],
+                    model_format: model?.model_format || null,
                     trust_remote_code: s.trust_remote_code || false,
                     embedding_audio_enabled: s.embedding_audio_enabled || false,
                     embedding_audio_max_seconds: s.embedding_audio_max_seconds ?? null,
@@ -4347,9 +4349,20 @@
                 return usable ? usable.id : '';
             },
 
+            isGgufModel() {
+                return this.modelSettings.model_format === 'gguf';
+            },
+
+            // A GGUF runs on an external engine even when its settings pick none.
+            effectiveExternalEngine() {
+                if (this.modelSettings.external_engine) return this.modelSettings.external_engine;
+                if (!this.isGgufModel()) return '';
+                return this.firstUsableExternalEngine() || this.modelSettings.external_engines?.[0]?.id || '';
+            },
+
             externalEngineReason() {
                 const engines = this.modelSettings.external_engines || [];
-                const selected = engines.find(e => e.id === this.modelSettings.external_engine);
+                const selected = engines.find(e => e.id === this.effectiveExternalEngine());
                 if (selected) return selected.compatible ? '' : selected.reason;
                 return engines.some(e => e.compatible) ? '' : (engines[0]?.reason || '');
             },
@@ -7673,6 +7686,14 @@
                     .filter(name => name.toLowerCase().endsWith('.gguf') && !name.toLowerCase().includes('mmproj'))
                     .map(name => name.split('/').pop())
                     .join(', ');
+            },
+
+            // The model ID a finished download serves under: a GGUF's file name.
+            taskModelId(task) {
+                const name = (task.files || []).find(f =>
+                    f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
+                if (!name) return task.repo_id.split('/').pop();
+                return name.split('/').pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
             },
 
             // Every download picks its files in the detail modal first.

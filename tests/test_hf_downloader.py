@@ -39,6 +39,7 @@ from omlx.admin.hf_downloader import (
     _make_cancellable_tqdm,
     _sum_safetensors_blob_bytes,
 )
+from omlx.engine_pool import EnginePool
 
 
 @pytest.fixture(autouse=True)
@@ -1875,6 +1876,51 @@ class TestHFDownloaderRoutes:
                 )
             assert exc_info.value.status_code == 404
             assert plain.exists()
+
+    @pytest.mark.asyncio
+    async def test_gguf_models_list_and_delete_one_file_at_a_time(
+        self, tmp_path, write_gguf
+    ):
+        models_dir = tmp_path / "models"
+        repo = models_dir / "unsloth" / "Q-GGUF"
+        for name, size in (("Q-Q4_K_M.gguf", 100), ("Q-Q8_0.gguf", 200)):
+            write_gguf(repo / name, {"general.architecture": "qwen35"}, size=size)
+        write_gguf(repo / "mmproj-BF16.gguf", {"general.architecture": "clip"}, size=10)
+        (repo / "README.md").write_text("card")
+        base = SimpleNamespace(base_path=tmp_path / "base")
+        pool = EnginePool()
+        settings = MagicMock()
+        settings.get_effective_model_dirs.return_value = [models_dir]
+
+        with patch(
+            "omlx.engine_pool.get_global_settings", return_value=base
+        ), patch.multiple(
+            admin_routes,
+            _get_global_settings=lambda: settings,
+            _get_engine_pool=lambda: pool,
+            _get_settings_manager=lambda: None,
+            _hf_downloader=None,
+        ):
+            pool.discover_models([str(models_dir)])
+            rows = (await admin_routes.list_hf_models(is_admin=True))["models"]
+            assert [(r["name"], r["model_format"], r["repo_id"]) for r in rows] == [
+                ("Q-Q4_K_M", "gguf", None),
+                ("Q-Q8_0", "gguf", None),
+            ]
+
+            await admin_routes.delete_hf_model("Q-Q4_K_M", is_admin=True)
+            assert sorted(p.name for p in repo.iterdir()) == [
+                "Q-Q8_0.gguf",
+                "README.md",
+                "mmproj-BF16.gguf",
+            ]
+            assert set(pool._entries) == {"Q-Q8_0"}
+
+            # The last GGUF takes its folder, and the empty org folder, along.
+            await admin_routes.delete_hf_model("Q-Q8_0", is_admin=True)
+            assert not (models_dir / "unsloth").exists()
+            assert pool._entries == {}
+            assert list((tmp_path / "base" / "gguf").iterdir()) == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_inside_hub", [False, True])

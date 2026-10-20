@@ -16,7 +16,6 @@ import glob
 import json
 import logging
 import os
-import re
 import signal
 import sys
 import threading
@@ -42,6 +41,8 @@ from huggingface_hub.utils import tqdm as _hf_tqdm
 # Private-module imports (also read_download_metadata above); the pyproject floor
 # (huggingface-hub>=1.19.0) guarantees them. Re-verify both when bumping the hub.
 from huggingface_hub.utils._xet import abort_xet_session
+
+from .. import gguf
 
 logger = logging.getLogger(__name__)
 
@@ -660,7 +661,6 @@ MODEL_FORMATS = ("mlx", "gguf", "all")
 # PyTorch copies a whole-repo download skips when safetensors exist.
 _SAFETENSORS_REPO_IGNORE = ["*.bin", "original/**", "consolidated.*.pth"]
 
-_GGUF_SPLIT_RE = re.compile(r"-\d{5}-of-\d{5}\.gguf$", re.IGNORECASE)
 # Files a safetensors checkpoint loads without: docs, media, other formats.
 _OPTIONAL_SUFFIXES = (
     ".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf",
@@ -668,8 +668,6 @@ _OPTIONAL_SUFFIXES = (
     ".msgpack", ".ckpt", ".tflite",
 )
 _OPTIONAL_DIRS = frozenset({"original", "onnx", "openvino", "coreml"})
-# Vision projector precisions in the order a GGUF is paired with them.
-_MMPROJ_PREFERENCE = ("bf16", "f16", "f32")
 
 
 def _repo_layout(names: list[str]) -> str:
@@ -679,15 +677,6 @@ def _repo_layout(names: list[str]) -> str:
     if any(name.lower().endswith(".gguf") for name in names):
         return "gguf"
     return "other"
-
-
-def _gguf_kind(name: str) -> str:
-    base = name.rsplit("/", 1)[-1].lower()
-    if "mmproj" in base:
-        return "mmproj"
-    if "imatrix" in base:
-        return "imatrix"
-    return "gguf"
 
 
 def _optional_for_safetensors(name: str) -> bool:
@@ -700,22 +689,14 @@ def _optional_for_safetensors(name: str) -> bool:
     return lower.endswith(_OPTIONAL_SUFFIXES)
 
 
-def _mmproj_rank(name: str) -> tuple[int, str]:
-    base = name.rsplit("/", 1)[-1].lower()
-    for rank, tag in enumerate(_MMPROJ_PREFERENCE):
-        if re.search(rf"(^|[-_.]){tag}([-_.]|$)", base):
-            return rank, name
-    return len(_MMPROJ_PREFERENCE), name
-
-
 def _default_mmproj(names: list[str]) -> dict[str, str]:
     """Map each folder to the vision projector its GGUFs pair with."""
     by_folder: dict[str, list[str]] = {}
     for name in names:
-        if name.lower().endswith(".gguf") and _gguf_kind(name) == "mmproj":
+        if name.lower().endswith(".gguf") and gguf.file_kind(name) == "mmproj":
             by_folder.setdefault(name.rpartition("/")[0], []).append(name)
     return {
-        folder: min(candidates, key=_mmproj_rank)
+        folder: min(candidates, key=gguf.projector_rank)
         for folder, candidates in by_folder.items()
     }
 
@@ -750,10 +731,10 @@ def _describe_repo_files(files: list[dict], local_dir: Path | None) -> str:
         row["group"] = None
         row["mmproj"] = None
         if lower.endswith(".gguf"):
-            row["kind"] = _gguf_kind(name)
+            row["kind"] = gguf.file_kind(name)
             if row["kind"] == "gguf":
-                split = _GGUF_SPLIT_RE.search(name)
-                row["group"] = name[: split.start()] if split else None
+                split = gguf.SPLIT_RE.match(name)
+                row["group"] = split["prefix"] if split else None
                 row["mmproj"] = projectors.get(name.rpartition("/")[0])
         elif lower.endswith(".safetensors"):
             row["kind"] = "weights"

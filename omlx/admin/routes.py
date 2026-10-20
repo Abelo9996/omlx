@@ -39,6 +39,7 @@ from pydantic import (
     model_validator,
 )
 
+from .. import gguf
 from .._version import __version__ as _omlx_version
 from ..api.markitdown import MARKITDOWN_MODEL_ID, markitdown_model_visible
 from ..api.openai_models import _coerce_tool_call_arguments
@@ -2504,6 +2505,8 @@ async def list_models(is_admin: bool = Depends(require_admin)):
             "reasoning_efforts": model_info.get("reasoning_efforts"),
             "source_type": model_info.get("source_type", "local"),
             "source_repo_id": model_info.get("source_repo_id"),
+            "model_format": model_info.get("model_format"),
+            "source_path": model_info.get("source_path"),
             "distributed": model_info.get("distributed", False),
             "cluster": model_info.get("cluster"),
             "last_access": model_info.get("last_access"),
@@ -2827,6 +2830,11 @@ async def update_model_settings(
         }
         # Treat empty string as None (auto-detect)
         override_value = request.model_type_override or None
+        if override_value is not None and entry.model_format == "gguf":
+            raise HTTPException(
+                status_code=400,
+                detail="A GGUF model's type comes from its file",
+            )
         if override_value is not None and override_value not in valid_types:
             raise HTTPException(
                 status_code=400,
@@ -8059,6 +8067,8 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
             if not subdir.is_dir() or subdir.name.startswith("."):
                 continue
 
+            if gguf.is_gguf_folder(subdir):
+                continue  # Listed per GGUF below.
             if (subdir / "config.json").exists():
                 # Level 1: direct model folder
                 _add_model(subdir, subdir.name)
@@ -8066,6 +8076,8 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
                 # HF Hub cache entry: models--Org--Name/snapshots/<hash>/
                 hf_resolved = _resolve_hf_cache_entry(subdir)
                 if hf_resolved is not None:
+                    if gguf.is_gguf_folder(hf_resolved.snapshot_path):
+                        continue
                     if _is_hf_cache_mlx_compatible(
                         hf_resolved.snapshot_path, hf_resolved.source_repo_id
                     ):
@@ -8081,10 +8093,35 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
                 for child in sorted(subdir.iterdir()):
                     if not child.is_dir() or child.name.startswith("."):
                         continue
+                    if gguf.is_gguf_folder(child):
+                        continue
                     if (child / "config.json").exists():
                         _add_model(
                             child, child.name, repo_id=f"{subdir.name}/{child.name}"
                         )
+
+    # One row per GGUF model, as discovery found them. No repo_id: a repo
+    # holds several GGUFs, so one of them does not make the repo downloaded.
+    try:
+        engine_pool = _get_engine_pool() if _get_engine_pool else None
+    except HTTPException:  # the server has not created the pool yet
+        engine_pool = None
+    for info in engine_pool.get_status()["models"] if engine_pool else []:
+        if info.get("model_format") != "gguf" or info["id"] in seen_names:
+            continue
+        seen_names.add(info["id"])
+        models.append(
+            {
+                "name": info["id"],
+                "path": info.get("source_path"),
+                "display_name": info["id"],
+                "size": info.get("estimated_size", 0),
+                "size_formatted": format_size(info.get("estimated_size", 0)),
+                "repo_id": None,
+                "source_type": info.get("source_type", "local"),
+                "model_format": "gguf",
+            }
+        )
 
     # Sort by the UI display name so organization prefixes group together.
     models.sort(key=lambda m: m["display_name"].lower())
@@ -8104,6 +8141,12 @@ async def delete_hf_model(
         raise HTTPException(status_code=503, detail="Server not initialized")
 
     model_dirs = global_settings.get_effective_model_dirs()
+
+    entry = engine_pool.get_entry(model_name) if engine_pool is not None else None
+    if entry is not None and entry.model_format == "gguf":
+        await _delete_gguf_model(entry, model_dirs, engine_pool)
+        _refresh_pool_after_delete(model_name, engine_pool, global_settings)
+        return {"success": True, "message": f"Model '{model_name}' deleted"}
 
     # Search the discovery directories in flat, HF cache and org-folder layouts
     model_path = None
@@ -8202,27 +8245,106 @@ async def delete_hf_model(
         except OSError as e:
             logger.debug(f"Could not remove empty org folder {parent}: {e}")
 
-    # Re-discover models
-    if engine_pool is not None:
-        settings_manager = _get_settings_manager()
-        pinned_models = []
-        if settings_manager:
-            pinned_models = settings_manager.get_pinned_model_ids()
-
-        engine_pool._entries.pop(model_name, None)
-        # Release the deleted model's persisted settings (including its alias)
-        # so they can be reused by another model.
-        if settings_manager:
-            settings_manager.delete_settings(model_name)
-        engine_pool.discover_models(
-            [str(d) for d in global_settings.get_effective_model_dirs()],
-            pinned_models,
-        )
-        if settings_manager:
-            engine_pool.apply_settings_overrides(settings_manager)
-        logger.info("Model pool refreshed after deletion")
-
+    _refresh_pool_after_delete(model_name, engine_pool, global_settings)
     return {"success": True, "message": f"Model '{model_name}' deleted"}
+
+
+def _refresh_pool_after_delete(model_name: str, engine_pool, global_settings) -> None:
+    """Forget a deleted model's entry and settings, then re-discover."""
+    if engine_pool is None:
+        return
+    settings_manager = _get_settings_manager()
+    pinned_models = []
+    if settings_manager:
+        pinned_models = settings_manager.get_pinned_model_ids()
+
+    engine_pool._entries.pop(model_name, None)
+    # Release the deleted model's persisted settings (including its alias)
+    # so they can be reused by another model.
+    if settings_manager:
+        settings_manager.delete_settings(model_name)
+    engine_pool.discover_models(
+        [str(d) for d in global_settings.get_effective_model_dirs()],
+        pinned_models,
+    )
+    if settings_manager:
+        engine_pool.apply_settings_overrides(settings_manager)
+    logger.info("Model pool refreshed after deletion")
+
+
+def _unlink_hf_cache_file(link: Path, repo_dir: Path) -> None:
+    """Remove a snapshot link and its blob once no other link uses it."""
+    blob = link.resolve()
+    link.unlink(missing_ok=True)
+    if not blob.is_relative_to(repo_dir / "blobs"):
+        return
+    for other in (repo_dir / "snapshots").rglob("*"):
+        if other.is_symlink() and other.resolve() == blob:
+            return
+    blob.unlink(missing_ok=True)
+
+
+async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None:
+    """Delete one GGUF model's files; its folder goes with its last GGUF.
+
+    Vision projectors stay while another GGUF in the folder pairs with them.
+    """
+    info = gguf.source_info(entry.model_path) or {}
+    folder = Path(entry.source_path).parent
+    if not any(
+        folder.resolve().is_relative_to(model_dir.resolve())
+        for model_dir in model_dirs
+    ):
+        raise HTTPException(status_code=400, detail="Invalid model name")
+    parts = [folder / name for name in info.get("parts") or [Path(entry.source_path).name]]
+
+    hf_cache = entry.source_type == "hf_cache"
+    # snapshots/<revision>/ inside models--Org--Name/
+    repo_dir = folder.parent.parent if hf_cache else folder
+    if _hf_downloader is not None and not hf_cache:
+        await _hf_downloader.cancel_download_for_dir(folder)
+    if entry.model_id in engine_pool.get_loaded_model_ids():
+        try:
+            await engine_pool._unload_engine(entry.model_id)
+            logger.info(f"Unloaded model '{entry.model_id}' before deletion")
+        except Exception as e:
+            logger.warning(f"Failed to unload model '{entry.model_id}': {e}")
+
+    remaining = [
+        model
+        for model in gguf.find_models(folder)
+        if model.path not in parts and model.model_id != entry.model_id
+    ]
+    try:
+        if hf_cache and not remaining:
+            shutil.rmtree(repo_dir)
+        elif hf_cache:
+            for part in parts:
+                _unlink_hf_cache_file(part, repo_dir)
+        else:
+            for part in parts:
+                part.unlink(missing_ok=True)
+            if not remaining:
+                for projector in folder.glob("*.gguf"):
+                    if gguf.file_kind(projector.name) == "mmproj":
+                        projector.unlink(missing_ok=True)
+                is_model_dir = any(
+                    folder.resolve() == model_dir.resolve() for model_dir in model_dirs
+                )
+                if not is_model_dir and not any(folder.rglob("*.gguf")):
+                    shutil.rmtree(folder)
+                    parent = folder.parent
+                    if (
+                        all(parent.resolve() != d.resolve() for d in model_dirs)
+                        and parent.exists()
+                        and not any(parent.iterdir())
+                    ):
+                        parent.rmdir()
+        logger.info(f"Deleted GGUF model {entry.model_id}: {', '.join(map(str, parts))}")
+    except OSError as e:
+        logger.error(f"Failed to delete GGUF model {entry.model_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete model: {e}")
+    shutil.rmtree(entry.model_path, ignore_errors=True)
 
 
 # =============================================================================

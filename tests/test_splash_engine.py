@@ -850,6 +850,19 @@ class TestEnginePool:
                 entry, ModelSettings(external_engine="splash"), "vlm"
             )
 
+    def test_a_gguf_runs_on_an_external_engine_without_the_setting(
+        self, tmp_path, launchers, global_settings
+    ):
+        pool, entry = _pool(tmp_path)
+        entry.model_format = "gguf"
+
+        # No in-process fallback, even with no engine to run it.
+        with pytest.raises(ModelLoadingError, match="Splash is not installed"):
+            pool._external_engine_for(entry, None, "vlm")
+        launchers("splash")
+        engine = pool._external_engine_for(entry, ModelSettings(), "vlm")
+        assert isinstance(engine, SplashEngine)
+
     def test_options_follow_omlx_settings(self, tmp_path, launchers, global_settings):
         launchers("splash")
         pool, entry = _pool(tmp_path)

@@ -3694,7 +3694,11 @@ async def list_models(_: bool = Depends(verify_inference_api_key)) -> JSONRespon
                 or m.get("model_path") in referenced_drafts
                 or (m.get("source_repo_id") in referenced_drafts)
             )
-            if is_hidden or is_hidden_helper:
+            # A GGUF no external engine can serve is listed in the admin only.
+            unservable = m.get("model_format") == "gguf" and bool(
+                await _server_state.engine_pool.external_engine_problem(model_id, ms)
+            )
+            if is_hidden or is_hidden_helper or unservable:
                 excluded_model_ids.add(model_id)
                 continue
             if ms is not None and ms.is_favorite:

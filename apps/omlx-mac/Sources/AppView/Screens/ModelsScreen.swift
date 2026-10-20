@@ -250,6 +250,15 @@ private struct LibrarySection: View {
                                                          defaultValue: "Found in the Hugging Face cache. Other apps that use this cache will need to download it again after you delete it.",
                                                          comment: "Tooltip on the HF cache badge in the model library"))
                                     }
+                                    if m.isGGUF {
+                                        StatusPill(status: .custom(
+                                            color: theme.textTertiary,
+                                            label: "GGUF",
+                                            fillBg: true))
+                                            .help(String(localized: "models.library.gguf.help",
+                                                         defaultValue: "A GGUF file, served by an external engine",
+                                                         comment: "Tooltip on the GGUF badge in the model library"))
+                                    }
                                 }
                                 Text("\(m.id) · \(m.estimatedSizeFormatted ?? formatBytes(m.estimatedSize))")
                                     .font(.omlxMono(11))

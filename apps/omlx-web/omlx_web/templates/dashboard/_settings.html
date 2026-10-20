@@ -1811,6 +1811,10 @@
                                             <span x-show="model.settings?.model_alias" x-cloak
                                                   class="badge bg-neutral-100 text-neutral-500 border-neutral-200 truncate max-w-[120px]"
                                                   x-text="model.settings?.model_alias"></span>
+                                            <span x-show="model.model_format === 'gguf'" x-cloak
+                                                  class="badge bg-neutral-100 text-neutral-500 border-neutral-200"
+                                                  @mouseenter="showTip($event.currentTarget, window.t('settings.models.table.gguf_tooltip'))"
+                                                  @mouseleave="hideTip()">GGUF</span>
                                             <span x-show="model.is_helper" x-cloak
                                                   class="badge bg-amber-50 text-amber-600 border-amber-200"
                                                   @mouseenter="showTip($event.currentTarget, window.t('settings.models.table.helper_tooltip'))"

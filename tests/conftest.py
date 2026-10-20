@@ -1,5 +1,6 @@
 import fnmatch
 import os
+import struct
 import subprocess
 import sys
 import zlib
@@ -266,6 +267,40 @@ def mock_model() -> MockModel:
 def mock_model_config() -> MockModelConfig:
     """Provide a mock model configuration for tests."""
     return MockModelConfig()
+
+
+def _gguf_value(value) -> bytes:
+    if isinstance(value, bool):
+        return struct.pack("<I?", 7, value)
+    if isinstance(value, int):
+        return struct.pack("<II", 4, value)
+    if isinstance(value, float):
+        return struct.pack("<If", 6, value)
+    if isinstance(value, str):
+        data = value.encode()
+        return struct.pack("<IQ", 8, len(data)) + data
+    if all(isinstance(item, str) for item in value):
+        items = b"".join(
+            struct.pack("<Q", len(item.encode())) + item.encode() for item in value
+        )
+        return struct.pack("<IIQ", 9, 8, len(value)) + items
+    items = b"".join(struct.pack("<i", item) for item in value)
+    return struct.pack("<IIQ", 9, 5, len(value)) + items
+
+
+@pytest.fixture
+def write_gguf():
+    """Write a GGUF file of a header with ``metadata`` and ``size`` bytes in all."""
+
+    def write(path: Path, metadata: dict, size: int = 0) -> Path:
+        header = b"GGUF" + struct.pack("<IQQ", 3, 0, len(metadata))
+        for key, value in metadata.items():
+            header += struct.pack("<Q", len(key)) + key.encode() + _gguf_value(value)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(header + b"\0" * max(0, size - len(header)))
+        return path
+
+    return write
 
 
 @pytest.fixture
