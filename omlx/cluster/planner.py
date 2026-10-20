@@ -645,6 +645,9 @@ def _supports_tensor_parallel(config: dict[str, Any]) -> bool:
         shard = getattr(model_class, "shard", None)
     except (ImportError, AttributeError):
         return False
+    # A module oMLX registers for its own checkpoint format loads the slice.
+    if callable(getattr(module, "load_tensor_shard", None)):
+        return True
     supported, _reason = native_shard_is_layer_local(shard)
     return supported
 
@@ -680,6 +683,8 @@ def _tensor_parallel_divisors(config: dict[str, Any]) -> tuple[int, ...]:
     kv_heads = _config_int(config, "num_key_value_heads", heads)
     values = [heads, kv_heads]
     model_type = config.get("model_type")
+    if model_type == "deepseek_v41":
+        return _deepseek_v41_tensor_divisors(config, heads)
     if model_type in {"qwen3_next", "qwen3_next_moe", "qwen3_5", "qwen3_5_moe"}:
         values.extend(
             (
@@ -743,6 +748,33 @@ def _tensor_parallel_divisors(config: dict[str, Any]) -> tuple[int, ...]:
                     for group_size in group_sizes:
                         if dim > 0 and dim % group_size == 0:
                             values.append(dim // group_size)
+    return tuple(dict.fromkeys(values))
+
+
+def _deepseek_v41_tensor_divisors(
+    config: dict[str, Any], heads: int
+) -> tuple[int, ...]:
+    """DeepSeek V4.1 splits heads, output groups and expert neurons.
+
+    The single KV head is shared and stays whole. The column-split projections
+    (``wo_b`` and expert ``w2``) need whole quantization groups on each rank.
+    """
+
+    groups = _config_int(config, "o_groups", 1)
+    widths = {
+        "attn.wo_b": groups * _config_int(config, "o_lora_rank", 1),
+        "experts.w2": _config_int(
+            config, "moe_intermediate_size", 1, maximum=1_000_000
+        ),
+    }
+    values = [heads, groups]
+    spec = config.get("omlx_deepseek_v41")
+    modules = spec.get("quantized_modules") if isinstance(spec, dict) else None
+    for name, entry in (modules or {}).items():
+        width = next((w for k, w in widths.items() if name.endswith(k)), 0)
+        group_size = entry.get("group_size", 32) if isinstance(entry, dict) else 0
+        if width and group_size and width % group_size == 0:
+            values.append(width // group_size)
     return tuple(dict.fromkeys(values))
 
 

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """``mlx_lm.models.deepseek_v41``: oMLX's DeepSeek V4.1 for a cluster rank.
 
-The worker's progressive loader calls ``load_pipeline_stage`` instead of
-mlx-lm's loader: the checkpoint format (packed projections, Engram tables) is
-oMLX's own. The planner reads ``pipeline_stage_starts`` because layers share
-compressed KV and index state with earlier source layers.
+The worker's progressive loader calls ``load_pipeline_stage`` or
+``load_tensor_shard`` instead of mlx-lm's loader: the checkpoint format
+(packed projections, Engram tables) is oMLX's own. The planner reads
+``pipeline_stage_starts`` because layers share compressed KV and index state
+with earlier source layers.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ __all__ = [
     "Model",
     "ModelArgs",
     "load_pipeline_stage",
+    "load_tensor_shard",
     "pipeline_stage_starts",
 ]
 
@@ -75,5 +77,14 @@ def load_pipeline_stage(model_path: Any, group: Any) -> Model:
     model, _ = load(
         model_path, stage=lambda language_model: language_model.pipeline(group)
     )
+    model.__class__ = Model
+    return model
+
+
+def load_tensor_shard(model_path: Any, group: Any) -> Model:
+    """This rank's tensor-parallel slice of a converted checkpoint, text model only."""
+
+    # Every rank reads every Engram row, so the tables stay on SSD.
+    model, _ = load(model_path, tensor=group, engram_ssd_offload=True)
     model.__class__ = Model
     return model

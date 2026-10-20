@@ -839,6 +839,9 @@ def hc_post(x, residual, post, comb):
 
 
 class Block(nn.Module):
+    # Set on tensor-parallel ranks, whose sublayers return partial sums.
+    _tensor_group = None
+
     def __init__(self, c, layer):
         super().__init__()
         self._config = c
@@ -854,6 +857,10 @@ class Block(nn.Module):
             self[f"hc_{kind}_scale"] = mx.ones((3,))
         if layer in c.engram_layer_ids:
             self.engram = Engram(c, list(c.engram_layer_ids).index(layer))
+
+    def sum_ranks(self, x):
+        group = self._tensor_group
+        return x if group is None else mx.distributed.all_sum(x, group=group)
 
     def __call__(self, h, pre, cache, shared, start, image_mask, ced_tail=None):
         if (
@@ -917,7 +924,11 @@ class Block(nn.Module):
             )
             x = hc_pre_norm(h, pre, self.attn_norm.weight, self.attn_norm.eps)
         h = hc_post(
-            self.attn(x, cache, shared, start, ced_kv=ced_kv, ced_kv_start=ced_kv_start),
+            self.sum_ranks(
+                self.attn(
+                    x, cache, shared, start, ced_kv=ced_kv, ced_kv_start=ced_kv_start
+                )
+            ),
             h,
             ao,
             ac,
@@ -926,8 +937,11 @@ class Block(nn.Module):
             h, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base, self._config
         )
         h = hc_post(
-            self.ffn(
-                hc_pre_norm(h, ap, self.ffn_norm.weight, self.ffn_norm.eps), image_mask
+            self.sum_ranks(
+                self.ffn(
+                    hc_pre_norm(h, ap, self.ffn_norm.weight, self.ffn_norm.eps),
+                    image_mask,
+                )
             ),
             h,
             fo,

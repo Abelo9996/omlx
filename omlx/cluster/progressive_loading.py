@@ -121,16 +121,19 @@ def progressive_sharded_load(
         tokenizer_config or {"trust_remote_code": trust_remote_code},
         eos_token_ids=metadata_config.get("eos_token_id", None),
     )
-    # An architecture with its own checkpoint format loads its stage itself.
-    stage_loader = getattr(
-        sys.modules.get(f"mlx_lm.models.{metadata_config.get('model_type')}"),
-        "load_pipeline_stage",
-        None,
-    )
+    # An architecture with its own checkpoint format loads its part itself.
+    own_format = sys.modules.get(f"mlx_lm.models.{metadata_config.get('model_type')}")
+    stage_loader = getattr(own_format, "load_pipeline_stage", None)
     if stage_loader is not None:
         if tensor_group is not None:
-            raise ValueError("this model supports pipeline parallelism only")
-        model = stage_loader(model_path, pipeline_group or mx_module.distributed.init())
+            tensor_loader = getattr(own_format, "load_tensor_shard", None)
+            if tensor_loader is None:
+                raise ValueError("this model supports pipeline parallelism only")
+            model = tensor_loader(model_path, tensor_group)
+        else:
+            model = stage_loader(
+                model_path, pipeline_group or mx_module.distributed.init()
+            )
         if return_config:
             return model, tokenizer, metadata_config
         return model, tokenizer

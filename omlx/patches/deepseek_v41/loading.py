@@ -42,6 +42,27 @@ def _load_shard(path):
     return values
 
 
+# A tensor-parallel rank splits these projections: rows hold whole heads,
+# output groups or expert neurons, and columns their partial sums. Everything
+# else, Engram included, is replicated.
+_TENSOR_ROWS = ("attn.wq_b", "attn.wo_a", "experts.w1", "experts.w3")
+_TENSOR_COLUMNS = ("attn.wo_b", "experts.w2")
+
+
+def tensor_slice(key, value, rank, size):
+    """This rank's part of checkpoint tensor ``key``."""
+    module = key.rpartition(".")[0]
+    if key.endswith("attn.attn_sink"):
+        axis = 0
+    elif module.endswith(_TENSOR_ROWS):
+        axis = -2
+    elif module.endswith(_TENSOR_COLUMNS):
+        axis = -1
+    else:
+        return value
+    return mx.contiguous(mx.split(value, size, axis=axis)[rank])
+
+
 def set_module(model, path, module):
     parent = model
     parts = path.split(".")
@@ -63,11 +84,14 @@ def load(
     moe_expert_offload_resident_fraction=None,
     ced_prefill=False,
     stage=None,
+    tensor=None,
 ):
     """Load a converted or source checkpoint.
 
     ``stage`` makes a cluster rank: it is called with the language model to
     keep one pipeline stage, and only that stage's text weights are read.
+    ``tensor`` (a distributed group) makes a tensor-parallel rank that reads
+    only its slice of the split projections.
     """
     path = Path(path)
     if (path / "conversion.inprogress.json").exists():
@@ -85,14 +109,16 @@ def load(
             raise ValueError("Expected a DeepSeek V4.1 checkpoint")
         format_spec = {"engram_tables": source_engram_tables(mapping, raw)}
     config = ModelConfig.from_dict(raw)
-    if stage is not None:
+    if stage is not None or tensor is not None:
         if source_checkpoint:
             raise ValueError(
-                "DeepSeek V4.1 pipeline stages load converted checkpoints only"
+                "DeepSeek V4.1 cluster ranks load converted checkpoints only"
             )
         # Cluster ranks serve the text model without draft heads.
         config.preserve_mtp = False
         config.vision_n_layers = 0
+    if tensor is not None:
+        config = config.tensor_shard(tensor.size())
     if source_checkpoint and preserve_mtp is None:
         from ..mlx_lm_mtp import is_mtp_active
 
@@ -121,7 +147,11 @@ def load(
     held = None
     if stage is not None:
         stage(model.language_model)
+    if stage is not None or tensor is not None:
         held = {name for name, _ in tree_flatten(model.parameters())}
+    if tensor is not None:
+        for block in model.language_model.layers:
+            block._tensor_group = tensor
 
     def in_scope(key):
         module, _, name = key.rpartition(".")
@@ -247,6 +277,11 @@ def load(
                             reader.close()
                     else:
                         values = _load_shard(path / filename)
+                    if tensor is not None:
+                        values = {
+                            key: tensor_slice(key, value, tensor.rank(), tensor.size())
+                            for key, value in values.items()
+                        }
                     for key in values:
                         if mapping.get(key) != filename:
                             raise ValueError(f"Unexpected or misplaced weight: {key}")

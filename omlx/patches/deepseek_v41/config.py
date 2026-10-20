@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """DeepSeek V4.1 configuration; field defaults follow the official reference."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Literal
 
 
@@ -240,6 +240,25 @@ class ModelConfig:
                 for layer in range(start, self.n_layers)
                 for source in sources(layer)
             )
+        )
+
+    def tensor_shard(self, size: int) -> "ModelConfig":
+        """The shapes one of ``size`` tensor-parallel ranks holds.
+
+        A rank keeps whole attention heads, output groups and expert neurons.
+        """
+
+        for name in ("n_heads", "o_groups", "moe_inter_dim"):
+            if getattr(self, name) % size:
+                raise ValueError(
+                    f"DeepSeek V4.1 {name} ({getattr(self, name)}) is not "
+                    f"divisible by {size} ranks"
+                )
+        return replace(
+            self,
+            n_heads=self.n_heads // size,
+            o_groups=self.o_groups // size,
+            moe_inter_dim=self.moe_inter_dim // size,
         )
 
     def ced_layout_supported(self) -> bool:

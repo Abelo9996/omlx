@@ -437,3 +437,10 @@ def test_a_model_with_its_own_stage_loader_bypasses_mlx_lm_loading(
         progressive_sharded_load(
             tmp_path, tensor_group=group, utils_module=utils, mx_module=_FakeMX()
         )
+
+    module.load_tensor_shard = lambda path, group: calls.append(group) or "shard"
+    loaded = progressive_sharded_load(
+        tmp_path, tensor_group=group, utils_module=utils, mx_module=_FakeMX()
+    )
+    assert loaded == ("shard", "tokenizer")
+    assert calls[-1] is group

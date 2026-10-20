@@ -1286,7 +1286,8 @@ print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
 """
 
 
-def test_pipelined_forward_matches_single_process(tmp_path):
+def run_two_ranks(tmp_path, script, *args):
+    """Run ``script`` as ranks 0 and 1 of a loopback ring; each prints ok."""
     import json
     import os
     import socket
@@ -1303,7 +1304,7 @@ def test_pipelined_forward_matches_single_process(tmp_path):
     )
     procs = [
         subprocess.Popen(
-            [sys.executable, "-c", _PIPELINE_RANK, str(Path(__file__).parent)],
+            [sys.executable, "-c", script, *map(str, args)],
             env=dict(os.environ, MLX_RANK=str(rank), MLX_HOSTFILE=str(hostfile)),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -1322,6 +1323,10 @@ def test_pipelined_forward_matches_single_process(tmp_path):
     for rank, (proc, out) in enumerate(zip(procs, outputs)):
         assert proc.returncode == 0, f"rank {rank} failed:\n{out[-2000:]}"
         assert '"ok": true' in out
+
+
+def test_pipelined_forward_matches_single_process(tmp_path):
+    run_two_ranks(tmp_path, _PIPELINE_RANK, Path(__file__).parent)
 
 
 _ENGRAM = dict(
@@ -1376,6 +1381,75 @@ def test_cluster_stage_loads_only_its_text_weights(tmp_path):
         mx.array_equal(value, reference[key]).item() for key, value in loaded.items()
     )
     stage.close()
+
+
+# One rank of the tensor-parallel test below: the whole model, then this rank's
+# slice of it, read from the same converted checkpoint.
+_TENSOR_RANK = """
+import json
+import sys
+
+import mlx.core as mx
+import numpy as np
+
+group = mx.distributed.init(backend="ring", strict=True)
+from omlx.patches.deepseek_v41.loading import load
+
+ids = np.random.default_rng(16).integers(3, 60, (2, 14), dtype=np.int32)
+steps = [ids[:, :9], ids[:, 9:12], ids[:, 12:13], ids[:, 13:14]]
+
+def run(model):
+    cache = model.language_model.make_cache()
+    outs = []
+    for chunk in steps:
+        outs.append(model.language_model(mx.array(chunk), cache=cache))
+        mx.eval(outs[-1])
+    return outs
+
+full, _ = load(sys.argv[1])
+reference = run(full)
+full.close()
+model, _ = load(sys.argv[1], tensor=group, engram_ssd_offload=True)
+assert model.language_model.layers[0].attn.attn_sink.shape == (1,)
+for r, g in zip(reference, run(model)):
+    assert mx.allclose(r, g, atol=1e-3, rtol=1e-3).item(), mx.abs(r - g).max()
+print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
+"""
+
+
+def test_tensor_parallel_ranks_match_single_process(tmp_path):
+    import json
+
+    from omlx.patches.deepseek_v41.convert import convert
+
+    # Two heads, output groups and 32-wide quantization groups per split width.
+    source, _ = write_checkpoint(tmp_path, moe_inter_dim=64, o_lora_rank=32, **_ENGRAM)
+    target = tmp_path / "converted"
+    convert(source, target)
+    # Pack the split projections the way released checkpoints do.
+    shard = next(target.glob("model-*.safetensors"))
+    tensors = dict(mx.load(str(shard)))
+    config = json.loads((target / "config.json").read_text())
+    index = json.loads((target / "model.safetensors.index.json").read_text())
+    modules = config["omlx_deepseek_v41"].setdefault("quantized_modules", {})
+    for key in [k for k in tensors if k.endswith(".weight")]:
+        name = key.removesuffix(".weight")
+        if not name.endswith(
+            ("attn.wq_b", "attn.wo_b", "experts.w1", "experts.w2", "experts.w3")
+        ):
+            continue
+        mode = "mxfp4" if ".ffn.experts." in key else "affine"
+        packed = mx.quantize(tensors[key], group_size=32, bits=4, mode=mode)
+        for suffix, value in zip((".weight", ".scales", ".biases"), packed):
+            tensors[name + suffix] = value
+            index["weight_map"][name + suffix] = shard.name
+        modules[name] = {"bits": 4, "mode": mode, "group_size": 32}
+    mx.eval(list(tensors.values()))
+    mx.save_safetensors(str(shard), tensors, metadata={"format": "mlx"})
+    (target / "config.json").write_text(json.dumps(config))
+    (target / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    run_two_ranks(tmp_path, _TENSOR_RANK, target)
 
 
 def test_mlx_lm_tokenizer_gets_the_v41_protocol(tmp_path):

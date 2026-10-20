@@ -663,6 +663,38 @@ def test_glm5_next_divisors_include_kda_heads():
     assert set(_tensor_parallel_divisors(config)) == {64, 12}
 
 
+def test_deepseek_v41_tensor_plan_keeps_the_shared_kv_head_whole():
+    from omlx.cluster.planner import (
+        _supports_tensor_parallel,
+        _tensor_parallel_divisors,
+    )
+    from omlx.patches.deepseek_v41_mlx_lm import apply_deepseek_v41_mlx_lm_patch
+
+    assert apply_deepseek_v41_mlx_lm_patch()
+    affine = {"bits": 3, "mode": "affine", "group_size": 64}
+    config = {
+        "model_type": "deepseek_v41",
+        "text_config": {
+            "num_attention_heads": 64,
+            "num_key_value_heads": 1,
+            "o_groups": 8,
+            "o_lora_rank": 1024,
+            "moe_intermediate_size": 2304,
+        },
+        "omlx_deepseek_v41": {
+            "quantized_modules": {
+                "language_model.layers.0.attn.wo_b": affine,
+                "language_model.layers.0.ffn.experts.w2": affine,
+                "language_model.layers.1.ffn.experts.w2": {"bits": 4, "mode": "mxfp4"},
+            }
+        },
+    }
+
+    assert _supports_tensor_parallel(config)
+    # 2304 / 64 = 36 expert groups allow four ranks, not eight.
+    assert set(_tensor_parallel_divisors(config)) == {64, 8, 128, 36, 72}
+
+
 def test_complete_model_layout_cache_invalidates_on_shard_overwrite(
     tmp_path, monkeypatch
 ):
