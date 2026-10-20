@@ -91,7 +91,7 @@ class Model(nn.Module):
         prefetch = getattr(self.language_model, "_engram_prefetch", None)
         if prefetch is not None:
             closers.append(prefetch.close)
-        for layer in self.language_model.layers:
+        for layer in self.language_model.pipeline_layers:
             if "engram" in layer:
                 close = getattr(layer.engram.embed, "close", None)
                 if close is not None:

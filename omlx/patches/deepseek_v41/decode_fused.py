@@ -477,10 +477,10 @@ def decode_block_nb(blk, h, pre, caches, shareds, starts, c):
                                             caches[r], shareds[r], starts[r], cs[r].reshape(-1), ss[r].reshape(-1), c)[None]
                              for r in range(b_n)])
     yq = woa_nb(att, oq, c, DM.use_mma(b_n))
-    a, _ = gemv_fp8_nb(yq, att.wo_b)
+    a = blk.sum_ranks(gemv_fp8_nb(yq, att.wo_b)[0])
     coef_f, x2, _, h2 = mix_nb(blk, "ffn", c, hf, ap, sub=a, post=ao, comb=ac)
     fp, fo, fc = coef_f[:, :hc], coef_f[:, hc:2 * hc], coef_f[:, 2 * hc:]
-    f = DM.fused_decode_moe_nb(blk.ffn, x2, c)[0]
+    f = blk.sum_ranks(DM.fused_decode_moe_nb(blk.ffn, x2, c)[0])
     h3 = hc_post_nb(f, h2, fo, fc, c)
     return h3.reshape(b_n, 1, hc, dim), fp.reshape(b_n, 1, hc)
 
@@ -553,10 +553,10 @@ def decode_block_verify(blk, h, pre, cache, shared, start, c):
         if pooling:
             state["compressor"] = tuple(mx.concatenate([p[i] for p in pending], 1) for i in (0, 1))
     yq = woa_nb(att, oq, c, False)
-    a, _ = gemv_fp8_nb(yq, att.wo_b, mma=False)
+    a = blk.sum_ranks(gemv_fp8_nb(yq, att.wo_b, mma=False)[0])
     coef_f, x2, _, h2 = mix_nb(blk, "ffn", c, hf, ap, sub=a, post=ao, comb=ac)
     fp, fo, fc = coef_f[:, :hc], coef_f[:, hc:2 * hc], coef_f[:, 2 * hc:]
-    f = DM.fused_decode_moe_nb(blk.ffn, x2, c, mma=False)[0]
+    f = blk.sum_ranks(DM.fused_decode_moe_nb(blk.ffn, x2, c, mma=False)[0])
     h3 = hc_post_nb(f, h2, fo, fc, c)
     return h3.reshape(1, r_n, hc, dim), fp.reshape(1, r_n, hc)
 
@@ -588,9 +588,9 @@ def decode_block(blk, h, pre, cache, shared, start, c):
     hf = h.reshape(-1)
     coef_a, x, xq, _ = mix(blk, "attn", c, hf, pre.reshape(-1))
     ap, ao, ac = coef_a[:hc], coef_a[hc:2 * hc], coef_a[2 * hc:]
-    a = decode_attention(blk.attn, x, xq, cache, shared, start, c)
+    a = blk.sum_ranks(decode_attention(blk.attn, x, xq, cache, shared, start, c))
     coef_f, x2, _, h2 = mix(blk, "ffn", c, hf, ap, sub=a, post=ao, comb=ac)
     fp, fo, fc = coef_f[:hc], coef_f[hc:2 * hc], coef_f[2 * hc:]
-    f = DM.fused_decode_moe(blk.ffn, x2.reshape(1, 1, -1), c)[0].reshape(-1)
+    f = blk.sum_ranks(DM.fused_decode_moe(blk.ffn, x2.reshape(1, 1, -1), c)[0].reshape(-1))
     h3 = hc_post(f, h2, fo, fc, c)
     return h3.reshape(1, 1, hc, dim), fp.reshape(1, 1, hc)

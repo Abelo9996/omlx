@@ -13,6 +13,7 @@ from functools import cache, lru_cache
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+from mlx_lm.models.pipeline import PipelineMixin
 from mlx_lm.models.switch_layers import SwitchLinear
 
 from omlx.custom_kernels.attention import fast as attention_fast
@@ -724,6 +725,34 @@ class MoE(nn.Module):
         )
 
 
+# Each cross-rank transfer finishes on the host before GPU work reads it. A
+# GPU command buffer that waits for a slower rank fails after about 5 s, and
+# this model's stages are uneven by design. It also fixes the order in which
+# rows pair their transfers across ranks.
+
+
+def _receive_stage(h, pre, source):
+    """(h, pre) from the rank holding the preceding layers; h keeps its dtype."""
+    payload = mx.distributed.recv_like(
+        mx.zeros((*h.shape[:-1], h.shape[-1] + 1), mx.float32), source
+    )
+    mx.eval(payload)
+    return payload[..., :-1].astype(h.dtype), payload[..., -1]
+
+
+def _send_stage(h, pre, destination):
+    """One transfer: pre must stay fp32, and bf16 h widens without loss."""
+    payload = mx.concatenate([h.astype(mx.float32), pre[..., None]], axis=-1)
+    mx.eval(mx.distributed.send(payload, destination))
+
+
+def _gather_stage(x):
+    """Rank 0's rows of ``x``: it holds the last layers."""
+    gathered = mx.distributed.all_gather(x)
+    mx.eval(gathered)
+    return gathered[: x.shape[0]]
+
+
 @mx.compile
 def _hc_mix_weights(mixes, scale, base, n, hc_eps, iters):
     pre = mx.sigmoid(mixes[..., :n] * scale[0] + base[:n]) + hc_eps
@@ -810,6 +839,9 @@ def hc_post(x, residual, post, comb):
 
 
 class Block(nn.Module):
+    # Set on tensor-parallel ranks, whose sublayers return partial sums.
+    _tensor_group = None
+
     def __init__(self, c, layer):
         super().__init__()
         self._config = c
@@ -825,6 +857,10 @@ class Block(nn.Module):
             self[f"hc_{kind}_scale"] = mx.ones((3,))
         if layer in c.engram_layer_ids:
             self.engram = Engram(c, list(c.engram_layer_ids).index(layer))
+
+    def sum_ranks(self, x):
+        group = self._tensor_group
+        return x if group is None else mx.distributed.all_sum(x, group=group)
 
     def __call__(self, h, pre, cache, shared, start, image_mask, ced_tail=None):
         if (
@@ -888,7 +924,11 @@ class Block(nn.Module):
             )
             x = hc_pre_norm(h, pre, self.attn_norm.weight, self.attn_norm.eps)
         h = hc_post(
-            self.attn(x, cache, shared, start, ced_kv=ced_kv, ced_kv_start=ced_kv_start),
+            self.sum_ranks(
+                self.attn(
+                    x, cache, shared, start, ced_kv=ced_kv, ced_kv_start=ced_kv_start
+                )
+            ),
             h,
             ao,
             ac,
@@ -897,8 +937,11 @@ class Block(nn.Module):
             h, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base, self._config
         )
         h = hc_post(
-            self.ffn(
-                hc_pre_norm(h, ap, self.ffn_norm.weight, self.ffn_norm.eps), image_mask
+            self.sum_ranks(
+                self.ffn(
+                    hc_pre_norm(h, ap, self.ffn_norm.weight, self.ffn_norm.eps),
+                    image_mask,
+                )
             ),
             h,
             fo,
@@ -907,7 +950,7 @@ class Block(nn.Module):
         return h, fp
 
 
-class LanguageModel(DSparkMixin, nn.Module):
+class LanguageModel(DSparkMixin, PipelineMixin, nn.Module):
     def __init__(self, config):
         super().__init__()
         self._config = config
@@ -953,8 +996,27 @@ class LanguageModel(DSparkMixin, nn.Module):
                 if i in self._config.kv_source_layers
                 else 0
             )
-            for i in range(len(self.layers))
+            for i in range(self.start_idx, self.start_idx + len(self.pipeline_layers))
         ]
+
+    def _stage(self):
+        """(global layer id, block) for the layers this rank holds."""
+        return list(enumerate(self.pipeline_layers, self.start_idx))
+
+    def _next_engram(self, stage, layer_id):
+        """The first Engram block after ``layer_id`` in this stage, or None."""
+        return next(
+            (i for i, layer in stage if i > layer_id and "engram" in layer), None
+        )
+
+    def _stage_output(self, h, pre, skip_logits):
+        """Hand the stage to the next rank, then logits from rank 0's hidden."""
+        if self.pipeline_rank != 0:
+            _send_stage(h, pre, self.pipeline_rank - 1)
+        x = self.norm(hc_pre(h, pre))
+        if self.pipeline_size > 1:
+            x = _gather_stage(x)
+        return x if skip_logits else project_logits(x, self.head.weight)
 
     def _batched_decode_ok(self, input_ids, cache, masks, inputs_embeds, capture, kwargs):
         """One token for each of 2..MAX_BATCH requests, all at a valid position, through
@@ -967,14 +1029,34 @@ class LanguageModel(DSparkMixin, nn.Module):
             and not capture
             and kwargs.get("mtp_verify_states") is None
             and not kwargs.get("_ced_prefill", False)
-            and all(decode_fused.supported(layer, self._config) for layer in self.layers)
         ):
             return False
         if masks is not None and not bool(np.all(np.asarray(masks))):
             return False
-        return all(not item.empty() for item in cache)
+        return all(not item.empty() for item in cache) and self._stages_decode_fused()
 
-    def _forward_decode_batched(self, input_ids, cache):
+    def _stages_decode_fused(self):
+        """Whether the fused decode supports the layers of every stage.
+
+        The batched path changes the stage transfers, so the stages agree once.
+        Each rank asks at the same forward: the checks before it read only the
+        requests, which every stage shares.
+        """
+        agreed = getattr(self, "_fused_stages", None)
+        if agreed is None:
+            agreed = all(
+                decode_fused.supported(layer, self._config)
+                for layer in self.pipeline_layers
+            )
+            if self.pipeline_size > 1:
+                # On the CPU stream: no GPU command buffer waits for a peer.
+                votes = mx.distributed.all_sum(mx.array(int(agreed)), stream=mx.cpu)
+                mx.eval(votes)
+                agreed = votes.item() == self.pipeline_size
+            self._fused_stages = agreed
+        return agreed
+
+    def _forward_decode_batched(self, input_ids, cache, skip_logits=False):
         """_forward for B single-token requests with the weights read once per step.
 
         Same per-request semantics as the row loop below (positions, caches, Engram history,
@@ -1000,33 +1082,42 @@ class LanguageModel(DSparkMixin, nn.Module):
         h = self.embed(input_ids)
         h = mx.repeat(h[..., None, :], c.hc_mult, -2)
         pre = mx.broadcast_to((mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1])
+        if self.pipeline_rank < self.pipeline_size - 1:
+            h, pre = _receive_stage(h, pre, self.pipeline_rank + 1)
         shareds = [{} for _ in range(b_n)]
+        engram_ids = list(c.engram_layer_ids)
+        stage = self._stage()
         prefetch = getattr(self, "_engram_prefetch", None)
         with prefetch.forward() if prefetch is not None else nullcontext():
-            if prefetch is not None and c.engram_layer_ids:
-                prefetch.submit(self.layers[c.engram_layer_ids[0]].engram.embed, hashes[:, :, 0])
-            for i, layer in enumerate(self.layers):
+            first = self._next_engram(stage, -1)
+            if prefetch is not None and first is not None:
+                prefetch.submit(
+                    self.layers[first].engram.embed, hashes[:, :, engram_ids.index(first)]
+                )
+            for j, (i, layer) in enumerate(stage):
                 if "engram" in layer:
-                    ix = list(c.engram_layer_ids).index(i)
+                    ix = engram_ids.index(i)
                     if prefetch is not None:
                         mx.async_eval(h, pre)
                     h = layer.engram(h, hashes[:, :, ix], None)
-                    if prefetch is not None and ix + 1 < len(c.engram_layer_ids):
+                    following = self._next_engram(stage, i)
+                    if prefetch is not None and following is not None:
                         prefetch.submit(
-                            self.layers[c.engram_layer_ids[ix + 1]].engram.embed, hashes[:, :, ix + 1]
+                            self.layers[following].engram.embed,
+                            hashes[:, :, engram_ids.index(following)],
                         )
                 h, pre = decode_fused.decode_block_nb(
-                    layer, h, pre, [rcs[r][i] for r in range(b_n)], shareds, starts, c
+                    layer, h, pre, [rcs[r][j] for r in range(b_n)], shareds, starts, c
                 )
                 if prefetch is not None and "engram" in layer:
                     mx.async_eval(h, pre)
                 for r in range(b_n):
                     rc = rcs[r]
-                    rc[i][0] = mx.array([starts[r] + 1], mx.int32)
-                    if histories is not None and i == 0:
-                        rc[i][6] = mx.array(histories[r], mx.int64)
+                    rc[j][0] = mx.array([starts[r] + 1], mx.int32)
+                    if histories is not None and j == 0:
+                        rc[j][6] = mx.array(histories[r], mx.int64)
                     for slot in range(1, 7):
-                        if rc[i][slot] is None:
+                        if rc[j][slot] is None:
                             width = c.index_head_dim if slot == 3 else c.head_dim
                             empty = mx.zeros((1, 0, width), h.dtype)
                             if slot == 1:
@@ -1035,8 +1126,8 @@ class LanguageModel(DSparkMixin, nn.Module):
                                 empty = pack_activation(empty, 4, 16, True)
                             elif slot == 3:
                                 empty = pack_activation(empty, 4)
-                            rc[i][slot] = mx.zeros((1, 0), mx.int64) if slot == 6 else empty
-        logits = project_logits(self.norm(hc_pre(h, pre)), self.head.weight)
+                            rc[j][slot] = mx.zeros((1, 0), mx.int64) if slot == 6 else empty
+        logits = self._stage_output(h, pre, skip_logits)
         for i, item in enumerate(cache):
             item.adopt_rows([rcs[r][i] for r in range(b_n)])
             item.advance(1)
@@ -1047,9 +1138,11 @@ class LanguageModel(DSparkMixin, nn.Module):
     ):
         c = self._config
         cache = self.make_cache() if cache is None else cache
-        if len(cache) != len(self.layers):
+        stage = self._stage()
+        skip_logits = bool(kwargs.get("skip_logits", False))
+        if len(cache) != len(stage):
             raise ValueError("DeepSeek V4.1 cache layer count mismatch")
-        for i, item in enumerate(cache):
+        for i, item in enumerate(cache, self.start_idx):
             ratio = c.compress_ratios[i] if i in c.kv_source_layers else 0
             if item.compress_ratio is None:
                 item.compress_ratio = ratio  # Upgrade a legacy full snapshot.
@@ -1062,13 +1155,14 @@ class LanguageModel(DSparkMixin, nn.Module):
         masks = cache[0].make_mask(input_ids.shape[1])
         capture = bool(kwargs.get("return_dspark_hidden", False))
         if self._batched_decode_ok(input_ids, cache, masks, inputs_embeds, capture, kwargs):
-            return self._forward_decode_batched(input_ids, cache)
+            return self._forward_decode_batched(input_ids, cache, skip_logits)
         if capture and input_ids.shape[0] != 1:
             raise ValueError(
                 "DSpark target capture currently requires one unpadded row"
             )
         captured = {}
-        results, rows = [], [[] for _ in self.layers]
+        engram_ids = list(c.engram_layer_ids)
+        results, rows = [], [[] for _ in stage]
         for row in range(input_ids.shape[0]):
             valid = (
                 np.ones(input_ids.shape[1], bool)
@@ -1077,7 +1171,8 @@ class LanguageModel(DSparkMixin, nn.Module):
             )
             positions = np.flatnonzero(valid)
             if not len(positions):
-                results.append(mx.zeros((1, input_ids.shape[1], c.vocab_size)))
+                width = c.dim if skip_logits else c.vocab_size
+                results.append(mx.zeros((1, input_ids.shape[1], width)))
                 for i, item in enumerate(cache):
                     rows[i].append(item.extract(row))
                 continue
@@ -1108,6 +1203,8 @@ class LanguageModel(DSparkMixin, nn.Module):
             pre = mx.broadcast_to(
                 (mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1]
             )
+            if self.pipeline_rank < self.pipeline_size - 1:
+                h, pre = _receive_stage(h, pre, self.pipeline_rank + 1)
             shared = {}
             # An MTP verify block runs through the fused decode kernels token-exactly
             # (decode_fused.decode_block_verify: each token gets its single-token decode
@@ -1116,7 +1213,7 @@ class LanguageModel(DSparkMixin, nn.Module):
                 verify_states is not None
                 and inputs_embeds is None
                 and 1 <= end - begin <= decode_fused.MAX_BATCH
-                and all(decode_fused.supported(layer, c) for layer in self.layers)
+                and all(decode_fused.supported(layer, c) for _, layer in stage)
             ):
                 shared["_verify_rows"] = True
             # Only cache-only scheduler calls may omit decoder logits. A short
@@ -1145,19 +1242,23 @@ class LanguageModel(DSparkMixin, nn.Module):
             # reuse). Decode/verify widths stay lazy for latency.
             prefill_backpressure = end - begin >= 256
             with prefetch.forward() if prefetch is not None else nullcontext():
-                if prefetch is not None and c.engram_layer_ids:
-                    first = self.layers[c.engram_layer_ids[0]].engram.embed
-                    prefetch.submit(first, hashes[:, :, 0])
-                for i, layer in enumerate(self.layers):
+                first = self._next_engram(stage, -1)
+                if prefetch is not None and first is not None:
+                    prefetch.submit(
+                        self.layers[first].engram.embed,
+                        hashes[:, :, engram_ids.index(first)],
+                    )
+                for j, (i, layer) in enumerate(stage):
                     if "engram" in layer:
-                        ix = list(c.engram_layer_ids).index(i)
+                        ix = engram_ids.index(i)
                         if prefetch is not None:
                             mx.async_eval(h, pre)
                         h = layer.engram(h, hashes[:, :, ix], image_mask)
-                        if prefetch is not None and ix + 1 < len(c.engram_layer_ids):
-                            next_layer = self.layers[c.engram_layer_ids[ix + 1]]
+                        following = self._next_engram(stage, i)
+                        if prefetch is not None and following is not None:
                             prefetch.submit(
-                                next_layer.engram.embed, hashes[:, :, ix + 1]
+                                self.layers[following].engram.embed,
+                                hashes[:, :, engram_ids.index(following)],
                             )
                     if capture and i in c.dspark_target_layer_ids:
                         captured[i] = mx.mean(h, axis=2)
@@ -1168,7 +1269,7 @@ class LanguageModel(DSparkMixin, nn.Module):
                     h, pre = layer(
                         h,
                         pre,
-                        rc[i],
+                        rc[j],
                         shared,
                         query_start,
                         image_mask,
@@ -1179,11 +1280,11 @@ class LanguageModel(DSparkMixin, nn.Module):
                     if prefill_backpressure:
                         mx.eval(h, pre)
                         mx.clear_cache()
-                    rc[i][0] = mx.array([start + end - begin], mx.int32)
-                    if history is not None and i == 0:
-                        rc[i][6] = mx.array(history, mx.int64)
+                    rc[j][0] = mx.array([start + end - begin], mx.int32)
+                    if history is not None and j == 0:
+                        rc[j][6] = mx.array(history, mx.int64)
                     for slot in range(1, 7):
-                        if rc[i][slot] is None:
+                        if rc[j][slot] is None:
                             width = c.index_head_dim if slot == 3 else c.head_dim
                             empty = mx.zeros((1, 0, width), h.dtype)
                             if slot == 1:
@@ -1192,11 +1293,11 @@ class LanguageModel(DSparkMixin, nn.Module):
                                 empty = pack_activation(empty, 4, 16, True)
                             elif slot == 3:
                                 empty = pack_activation(empty, 4)
-                            rc[i][slot] = (
+                            rc[j][slot] = (
                                 mx.zeros((1, 0), mx.int64) if slot == 6 else empty
                             )
-                    rows[i].append(rc[i])
-            logits = project_logits(self.norm(hc_pre(h, pre)), self.head.weight)
+                    rows[j].append(rc[j])
+            logits = self._stage_output(h, pre, skip_logits)
             # The scheduler discards this tail-only result. Ordinary forward
             # calls still return real logits for every input token.
             results.append(

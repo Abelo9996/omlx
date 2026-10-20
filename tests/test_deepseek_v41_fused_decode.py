@@ -9,6 +9,7 @@ leaves free, so the logits must agree to rounding noise.
 
 import zlib
 from dataclasses import replace
+from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -20,6 +21,7 @@ from omlx.patches.deepseek_v41.config import ModelConfig
 from omlx.patches.deepseek_v41.language import LanguageModel
 from omlx.patches.deepseek_v41.moe_offload import ExpertOffloadPlan, OffloadedExpert
 from omlx.patches.deepseek_v41.quantization import QuantizedProjection
+from tests.test_deepseek_v41 import run_two_ranks
 
 pytestmark = pytest.mark.skipif(
     mx.default_device() != mx.gpu, reason="fused decode kernels are Metal-only"
@@ -482,3 +484,125 @@ def test_mtp_generation_matches_greedy_with_fused_kernels(monkeypatch):
         generator.close()
     assert calls and max(calls) > 1, "verify blocks must take the fused path"
     assert result[:24] == expected
+
+
+# One rank of the cluster decode test below.
+_CLUSTER_DECODE_RANK = """
+import json
+import sys
+
+import mlx.core as mx
+import numpy as np
+from mlx.utils import tree_flatten
+
+group = mx.distributed.init(backend="ring", strict=True)
+sys.path.insert(0, sys.argv[1])
+import test_deepseek_v41_fused_decode as t
+from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
+from omlx.patches.deepseek_v41 import decode_fused, decode_moe
+from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
+from omlx.patches.deepseek_v41.language import Block
+from omlx.patches.deepseek_v41.loading import tensor_slice
+from omlx.patches.deepseek_v41.quantization import QuantizedProjection
+
+rng = np.random.default_rng(11)
+prompts = [rng.integers(3, 60, 13 + 2 * r).tolist() for r in range(2)]
+x = mx.array(rng.normal(0, 1, (2, 1024)).astype(np.float32)).astype(mx.bfloat16)
+
+def prefill(model):
+    rows = []
+    for p in prompts:
+        cache = model.make_cache()
+        mx.eval(model(mx.array([p[:-1]]), cache=cache))
+        rows.append(cache)
+    return rows
+
+def merged(rows):
+    return [DeepseekV41Cache.merge(list(pair)) for pair in zip(*rows)]
+
+# Tensor parallel. Layer 0 sees the same embeddings and KV on every rank, so
+# its summed attention output and a MoE fed the same input differ from one
+# process only by the summation order. Later layers amplify that rounding on
+# this random model.
+sums, fused = [], {"decode_block": 0, "decode_block_nb": 0}
+real_sum = Block.sum_ranks
+
+def record(self, value):
+    out = real_sum(self, value)
+    if self.attn._layer == 0:
+        sums.append(out.astype(mx.float32).reshape(-1))
+    return out
+
+Block.sum_ranks = record
+for name in fused:
+    def counted(*args, _real=getattr(decode_fused, name), _name=name):
+        fused[_name] += 1
+        return _real(*args)
+    setattr(decode_fused, name, counted)
+
+def tensor_run(model):
+    sums.clear()
+    singles, batched = prefill(model), merged(prefill(model))
+    for token in range(3, 6):
+        for cache in singles:
+            mx.eval(model(mx.array([[token]]), cache=cache))
+        mx.eval(model(mx.array([[token], [token + 1]]), cache=batched))
+    block, c = model.layers[0], model._config
+    one = decode_moe.fused_decode_moe(block.ffn, x[:1].reshape(1, 1, -1), c)[0]
+    both = decode_moe.fused_decode_moe_nb(block.ffn, x, c)[0]
+    # Each block sums its attention output, then its MoE output.
+    return mx.concatenate(sums[0::2]), block.sum_ranks(one), block.sum_ranks(both)
+
+full = t.build(n_heads=16, moe_inter_dim=512)
+reference = tensor_run(full)
+model = t.build(n_heads=8, o_groups=1, moe_inter_dim=256)
+model.load_weights(
+    [(k, tensor_slice(k, v, group.rank(), group.size())) for k, v in tree_flatten(full.parameters())],
+    strict=True,
+)
+for block in model.layers:
+    block._tensor_group = group
+fused = dict.fromkeys(fused, 0)
+got = tensor_run(model)
+assert fused["decode_block"] and fused["decode_block_nb"], fused
+for r, g in zip(reference, got):
+    error = (mx.abs(g - r).max() / mx.abs(r.astype(mx.float32)).max()).item()
+    assert error < 0.02, error
+
+# Pipeline. Layer 4's affine wo_b is a layout the fused kernels do not cover,
+# so only rank 0's stage [3, 5) lacks fused decode.
+def mixed():
+    model = t.build()
+    att = model.layers[4].attn
+    weight = mx.dequantize(
+        att.wo_b.weight, att.wo_b.scales, None, group_size=32, bits=8, mode="mxfp8"
+    )
+    packed, scales, biases = mx.quantize(weight, group_size=64, bits=4)
+    att.wo_b = QuantizedProjection(packed, scales, 4, "affine", biases, group_size=64)
+    return model
+
+def pipeline_run(model):
+    batched = merged(prefill(model))
+    outs = []
+    for token in range(3, 6):
+        outs.append(model(mx.array([[token], [token + 1]]), cache=batched))
+        mx.eval(outs[-1])
+    return outs
+
+reference = pipeline_run(mixed())
+model = mixed()
+plan = (
+    PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
+    PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
+)
+with install_unequal_pipeline_plan(plan):
+    model.pipeline(group)
+assert all(mx.array_equal(r, g).item() for r, g in zip(reference, pipeline_run(model)))
+print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
+"""
+
+
+def test_cluster_decode_matches_single_process(tmp_path):
+    # Ranks sum their partial outputs, and pipeline stages agree on batched
+    # decode even when only one stage's layers support it.
+    run_two_ranks(tmp_path, _CLUSTER_DECODE_RANK, Path(__file__).parent)
