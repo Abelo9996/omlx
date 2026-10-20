@@ -1231,9 +1231,22 @@ class TestAdminAPI:
         }
 
         assert rows[entry.model_id] == [
-            {"id": "splash", "label": "Splash", "compatible": True, "reason": ""}
+            {
+                "id": "splash",
+                "label": "Splash",
+                "compatible": True,
+                "reason": "",
+                "draft_repo": None,
+            }
         ]
         assert rows["Qwen3.8-27B-DFlash2"] == []
+
+        # Without its draft the model names the repo that provides it.
+        del pool._entries["Qwen3.8-27B-DFlash2"]
+        info = pool.get_status()["models"][0]
+        (row,) = admin_routes._external_engines_for_model(pool, info, None)
+        assert not row["compatible"]
+        assert row["draft_repo"] == "incoai/Qwen3.8-27B-DFlash2"
 
 
 # -- native response_format ---------------------------------------------------

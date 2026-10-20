@@ -956,12 +956,19 @@ def _external_engines_for_model(engine_pool, model_info: dict, settings) -> list
     if model_info.get("is_helper"):
         return []
     target, reason = engine_pool.splash_target(model_info["id"], settings)
+    draft_repo = (
+        engine_pool.splash_draft_to_download(model_info["id"], settings)
+        if target is None
+        else None
+    )
     return [
         {
             "id": engine_id,
             "label": label,
             "compatible": target is not None,
             "reason": reason,
+            # The draft the engine needs that a download provides.
+            "draft_repo": draft_repo,
         }
         for engine_id, label in EXTERNAL_ENGINES.items()
     ]

@@ -106,6 +106,8 @@ struct ExternalEngineOption: Codable, Equatable, Sendable, Identifiable {
     let label: String
     let compatible: Bool
     let reason: String?
+    /// Hugging Face repo of the draft the engine lacks, when one provides it.
+    var draftRepo: String? = nil
 }
 
 struct ModelSettingsDTO: Codable, Equatable, Sendable {

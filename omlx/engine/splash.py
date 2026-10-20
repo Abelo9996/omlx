@@ -111,6 +111,11 @@ SPLASH_FAMILIES: dict[str, dict[str, Any]] = {
     },
 }
 _REQUIRED_MODEL_FILES = ("config.json", "tokenizer.json", "tokenizer_config.json")
+# The DFlash2 draft Splash pairs with each family (its install/families.py).
+SPLASH_DRAFT_REPOS = {
+    "Qwen3.8-27B": "incoai/Qwen3.8-27B-DFlash2",
+    "Qwen3.6-35B-A3B": "incoai/Qwen3.6-35B-A3B-DFlash2",
+}
 
 # Splash quantizes the BF16 DFlash2 draft to 4 bits when it loads it.
 _DRAFT_LOAD_RATIO = 1 / 3
@@ -408,10 +413,21 @@ def resolve_splash_target(
     draft = find_splash_draft(config["text_config"], draft_candidates)
     if draft is None:
         return None, (
-            f"Splash needs the {family} DFlash2 draft in a model directory "
-            f"(z-lab/{family}-DFlash2 or incoai/{family}-DFlash2)"
+            f"Splash needs the {family} DFlash2 draft "
+            f"({SPLASH_DRAFT_REPOS[family]}) in a model directory"
         )
     return SplashTarget(binary, family, draft), ""
+
+
+def splash_draft_to_download(
+    model_path: str | Path, draft_candidates: Iterable[str]
+) -> str | None:
+    """The draft repo a Splash model lacks, or None when it has one."""
+    config = _read_config(Path(model_path)) or {}
+    family = splash_family(config)
+    if family is None or find_splash_draft(config["text_config"], draft_candidates):
+        return None
+    return SPLASH_DRAFT_REPOS[family]
 
 
 # -- memory ---------------------------------------------------------------------

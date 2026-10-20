@@ -1403,6 +1403,7 @@
   "modal.model_settings.external_engine": "使用外部引擎",
   "modal.model_settings.external_engine_hint": "改用另一个在独立进程中运行的推理引擎来提供此模型，而不使用 oMLX 的 MLX 引擎。",
   "modal.model_settings.external_engine_gguf": "GGUF 模型只能在外部引擎上运行。",
+  "modal.model_settings.external_engine_get_draft": "下载 {repo_id}",
   "modal.model_settings.external_engine_select": "引擎",
   "modal.model_settings.external_engine_select_hint": "Splash：incoai 的 Metal 引擎，支持 DFlash2 推测解码。请在“设置 → 集成”中配置。",
   "modal.model_settings.external_engine_section_note": "由外部引擎提供服务时，这些设置不生效。",

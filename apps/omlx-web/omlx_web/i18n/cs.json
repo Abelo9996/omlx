@@ -1403,6 +1403,7 @@
   "modal.model_settings.external_engine": "Použít externí engine",
   "modal.model_settings.external_engine_hint": "Model bude obsluhovat jiný inferenční engine ve vlastním procesu, nikoli MLX enginy oMLX.",
   "modal.model_settings.external_engine_gguf": "Modely GGUF běží jen na externím enginu.",
+  "modal.model_settings.external_engine_get_draft": "Stáhnout {repo_id}",
   "modal.model_settings.external_engine_select": "Engine",
   "modal.model_settings.external_engine_select_hint": "Splash: Metal engine od incoai se spekulativním dekódováním DFlash2. Nastavte jej v Nastavení → Integrace.",
   "modal.model_settings.external_engine_section_note": "Tato nastavení se nepoužijí, dokud model obsluhuje externí engine.",

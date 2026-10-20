@@ -1403,6 +1403,7 @@
   "modal.model_settings.external_engine": "외부 엔진 사용",
   "modal.model_settings.external_engine_hint": "oMLX의 MLX 엔진 대신 다른 추론 엔진을 별도 프로세스로 띄워 이 모델을 서빙합니다.",
   "modal.model_settings.external_engine_gguf": "GGUF 모델은 외부 엔진으로만 실행돼요.",
+  "modal.model_settings.external_engine_get_draft": "{repo_id} 받기",
   "modal.model_settings.external_engine_select": "엔진",
   "modal.model_settings.external_engine_select_hint": "Splash: incoai의 Metal 엔진으로 DFlash2 speculative decoding을 씁니다. 설정 → Integrations에서 설정합니다.",
   "modal.model_settings.external_engine_section_note": "외부 엔진이 이 모델을 서빙하는 동안에는 이 설정이 적용되지 않습니다.",

@@ -44,6 +44,7 @@ from .engine.splash import (
     SplashTarget,
     find_splash_binary,
     resolve_splash_target,
+    splash_draft_to_download,
     splash_memory_estimate,
     splash_repo_id,
 )
@@ -2031,6 +2032,17 @@ class EnginePool:
             entry.model_path,
             get_global_settings().integrations.splash_path,
             self._splash_draft_candidates(model_settings),
+        )
+
+    def splash_draft_to_download(
+        self, model_id: str, model_settings: object | None
+    ) -> str | None:
+        """The DFlash2 draft repo ``model_id`` lacks for Splash, or None."""
+        entry = self._entries.get(model_id)
+        if entry is None:
+            return None
+        return splash_draft_to_download(
+            entry.model_path, self._splash_draft_candidates(model_settings)
         )
 
     def _splash_sizing_context(

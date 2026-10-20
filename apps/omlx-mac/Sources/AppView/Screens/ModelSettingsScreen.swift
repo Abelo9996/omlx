@@ -1492,12 +1492,21 @@ private struct ExternalEngineRow: View {
     @Bindable var vm: ModelSettingsScreenVM
     let client: OMLXClient
     let engines: [ExternalEngineOption]
+    /// Set once the draft download starts, or to the error that stopped it.
+    @State private var draftStatus: String?
 
     private var usableEngine: String? {
         engines.first(where: { $0.compatible })?.id
     }
 
     private var isGGUF: Bool { vm.model?.isGGUF == true }
+
+    /// The draft the selected engine lacks, when a download provides it.
+    private var draftRepo: String? {
+        let engine = engines.first(where: { $0.id == vm.effectiveExternalEngine }) ?? engines.first
+        guard let engine, !engine.compatible else { return nil }
+        return engine.draftRepo
+    }
 
     private var sublabel: String {
         let selected = engines.first(where: { $0.id == vm.effectiveExternalEngine })
@@ -1523,6 +1532,15 @@ private struct ExternalEngineRow: View {
                           comment: "Row label for serving a model with an external engine"),
             sublabel: sublabel) {
             HStack(spacing: 7) {
+                if let draftRepo {
+                    Button(draftStatus ?? String(localized: "settings.advanced.external_engine.get_draft",
+                                                 defaultValue: "Download \(draftRepo)",
+                                                 comment: "Button that downloads the draft model an external engine needs; placeholder is the Hugging Face repo")) {
+                        Task { await downloadDraft(draftRepo) }
+                    }
+                    .buttonStyle(.omlx(.normal, size: .small))
+                    .disabled(draftStatus != nil)
+                }
                 if !vm.externalEngine.isEmpty {
                     Popup(selection: vm.bind($vm.externalEngine, save: save),
                           width: .controlCompact,
@@ -1544,6 +1562,17 @@ private struct ExternalEngineRow: View {
 
     private func save() {
         Task { await vm.save(.externalEngine, client: client) }
+    }
+
+    private func downloadDraft(_ repo: String) async {
+        do {
+            _ = try await client.startHFDownload(repoId: repo)
+            draftStatus = String(localized: "settings.advanced.external_engine.draft_started",
+                                 defaultValue: "Downloading…",
+                                 comment: "Draft download button label after the download starts")
+        } catch {
+            draftStatus = error.omlxDescription
+        }
     }
 }
 
