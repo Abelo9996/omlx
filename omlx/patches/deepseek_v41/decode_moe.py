@@ -642,11 +642,13 @@ def _kernels():
 
 def supported(moe, x, config):
     e, s = moe.experts, moe.shared_experts
+    # Offloaded experts (OffloadedExpert) hold resident slots, not w1 / w2 / w3.
+    routed = [getattr(e, name, None) for name in ("w1", "w2", "w3")]
     return (
         x.size == config.dim
         and x.dtype == mx.bfloat16
         and getattr(config, "score_func", "sqrtsoftplus") == "sqrtsoftplus"
-        and all(getattr(p, "mode", None) == "mxfp4" and p.group_size == 32 and "biases" not in p for p in (e.w1, e.w2, e.w3))
+        and all(getattr(p, "mode", None) == "mxfp4" and p.group_size == 32 and "biases" not in p for p in routed)
         and all(getattr(p, "mode", None) == "mxfp8" and p.group_size == 32 and "biases" not in p for p in (s.w1, s.w2, s.w3))
         and config.n_activated_experts <= 31
         and config.dim % 256 == 0 and config.moe_inter_dim % 256 == 0

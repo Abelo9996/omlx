@@ -18,6 +18,7 @@ from mlx.utils import tree_flatten
 from omlx.patches.deepseek_v41 import decode_fused
 from omlx.patches.deepseek_v41.config import ModelConfig
 from omlx.patches.deepseek_v41.language import LanguageModel
+from omlx.patches.deepseek_v41.moe_offload import ExpertOffloadPlan, OffloadedExpert
 from omlx.patches.deepseek_v41.quantization import QuantizedProjection
 
 pytestmark = pytest.mark.skipif(
@@ -149,6 +150,28 @@ def test_fused_decode_rejects_unsupported_layouts():
     assert not mx.array_equal(scaled, other.wo_a.weight).item()
     other.wo_a.weight = scaled
     assert not decode_fused.supported(model.layers[3], c)
+
+
+def test_offloaded_experts_decode_on_the_unfused_path(tmp_path):
+    model = build()
+    c = model._config
+    specs, tensors = {}, {}
+    for i, layer in enumerate(model.layers):
+        prefix = f"language_model.layers.{i}.ffn.experts"
+        specs.update({f"{prefix}.{proj}": dict(bits=4, mode="mxfp4") for proj in ("w1", "w2", "w3")})
+        tensors.update({f"{prefix}.{k}": v for k, v in tree_flatten(layer.ffn.experts.parameters())})
+    mx.save_safetensors(str(tmp_path / "model.safetensors"), tensors)
+    raw = {"omlx_deepseek_v41": {"version": 1, "quantized_modules": specs}}
+    plan = ExpertOffloadPlan(tmp_path, raw, {k: "model.safetensors" for k in tensors}, c, 0.5)
+    try:
+        for i, layer in enumerate(model.layers):
+            layer.ffn.experts = OffloadedExpert(layer.ffn.experts, plan, f"language_model.layers.{i}.ffn.experts")
+        assert not decode_fused.supported(model.layers[0], c)
+        cache = model.make_cache()
+        mx.eval(model(mx.array([[1, 2, 3, 4, 5]]), cache=cache))
+        assert mx.isfinite(model(mx.array([[6]]), cache=cache)).all().item()
+    finally:
+        plan.close()
 
 
 @pytest.mark.parametrize("batch", [2, 3, 8])
