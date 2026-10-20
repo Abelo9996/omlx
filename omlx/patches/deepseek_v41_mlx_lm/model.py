@@ -19,7 +19,21 @@ from omlx.patches.deepseek_v41.language import LanguageModel
 from omlx.patches.deepseek_v41.loading import load
 from omlx.patches.deepseek_v41.model import Model as _LoadedModel
 
-ModelArgs = ModelConfig
+
+class ModelArgs(ModelConfig):
+    """The config of a checkpoint a cluster rank can load."""
+
+    @classmethod
+    def from_dict(cls, params: dict[str, Any]) -> ModelArgs:
+        # Ranks read their part of converted shards. A source checkpoint is
+        # converted while one Mac loads it whole.
+        if "omlx_deepseek_v41" not in params:
+            raise ValueError(
+                "DeepSeek V4.1 cluster ranks load converted checkpoints only"
+            )
+        return super().from_dict(params)
+
+
 # Read by the planner, which would otherwise refuse a checkpoint with a vision
 # config. LanguageModel inherits PipelineMixin.pipeline, the method the worker
 # replaces with the planner's split.
@@ -36,7 +50,7 @@ __all__ = [
 
 
 def pipeline_stage_starts(config: dict[str, Any]) -> tuple[int, ...]:
-    return ModelArgs.from_dict(config).pipeline_stage_starts()
+    return ModelConfig.from_dict(config).pipeline_stage_starts()
 
 
 class Model(_LoadedModel):

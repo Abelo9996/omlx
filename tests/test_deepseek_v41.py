@@ -1383,6 +1383,20 @@ def test_cluster_stage_loads_only_its_text_weights(tmp_path):
     stage.close()
 
 
+def test_cluster_plans_converted_checkpoints_only(tmp_path):
+    from omlx.cluster.planner import complete_model_layout
+    from omlx.patches.deepseek_v41.convert import convert
+
+    source, _ = write_checkpoint(tmp_path)
+    convert(source, tmp_path / "converted")
+    raw = complete_model_layout(source)
+    layout = complete_model_layout(tmp_path / "converted")
+
+    # Ranks load their part of converted shards only.
+    assert not raw.supports_pipeline and not raw.supports_tensor_parallel
+    assert layout.supports_pipeline and layout.supports_tensor_parallel
+
+
 # One rank of the tensor-parallel test below: the whole model, then this rank's
 # slice of it, read from the same converted checkpoint.
 _TENSOR_RANK = """

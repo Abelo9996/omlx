@@ -3,7 +3,7 @@
 
 mlx-lm ships its own ``deepseek_v41``, which refuses Engram layers and cannot
 read oMLX-converted checkpoints. This replaces it with an adapter over oMLX's
-implementation, loaded one pipeline stage at a time. TP is not supported.
+implementation, loaded one pipeline stage or tensor-parallel slice at a time.
 """
 
 from __future__ import annotations
