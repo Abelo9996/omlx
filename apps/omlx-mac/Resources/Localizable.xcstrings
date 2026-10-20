@@ -10937,6 +10937,30 @@
         }
       }
     },
+    "models.library.external_engine.help" : {
+      "comment" : "Tooltip on the external engine badge in the model library; placeholder is the engine name",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ can serve this model. Turn it on in the model's Advanced settings."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ может запускать эту модель. Включите его в расширенных настройках модели."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 可以运行此模型。请在模型的高级设置中开启。"
+          }
+        }
+      }
+    },
     "models.library.gguf.help" : {
       "comment" : "Tooltip on the GGUF badge in the model library",
       "extractionState" : "manual",

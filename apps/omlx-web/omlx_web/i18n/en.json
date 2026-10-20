@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "hidden",
   "settings.models.table.hidden_tooltip": "Hidden from the /v1/models API",
   "settings.models.table.gguf_tooltip": "A GGUF file, served by an external engine",
+  "settings.models.table.external_engine_tooltip": "{engine} can serve this model. Turn it on in the model's Advanced settings.",
   "settings.models.table.visible_on_tooltip": "Listed in /v1/models — click to hide",
   "settings.models.table.visible_off_tooltip": "Hidden from /v1/models — click to list",
   "settings.models.table.favorite_on_tooltip": "Favorite — listed first in model lists; click to remove",

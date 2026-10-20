@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "已隱藏",
   "settings.models.table.hidden_tooltip": "已從 /v1/models API 中隱藏",
   "settings.models.table.gguf_tooltip": "由外部引擎執行的 GGUF 檔案",
+  "settings.models.table.external_engine_tooltip": "{engine} 可以執行此模型。請在模型設定的進階選項中開啟。",
   "settings.models.table.visible_on_tooltip": "已列入 /v1/models — 點擊隱藏",
   "settings.models.table.visible_off_tooltip": "已從 /v1/models 隱藏 — 點擊列入",
   "settings.models.table.favorite_on_tooltip": "我的最愛 — 在模型列表中排在最前；點擊移除",

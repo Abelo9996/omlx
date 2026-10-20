@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "скрыто",
   "settings.models.table.hidden_tooltip": "Не отображается в API /v1/models",
   "settings.models.table.gguf_tooltip": "Файл GGUF, который запускает внешний движок",
+  "settings.models.table.external_engine_tooltip": "{engine} может запускать эту модель. Включите его в расширенных настройках модели.",
   "settings.models.table.visible_on_tooltip": "Отображается в /v1/models — нажмите, чтобы скрыть",
   "settings.models.table.visible_off_tooltip": "Не отображается в /v1/models — нажмите, чтобы показать в списке",
   "settings.models.table.favorite_on_tooltip": "В избранном — показывается первым в списках моделей; нажмите, чтобы убрать",

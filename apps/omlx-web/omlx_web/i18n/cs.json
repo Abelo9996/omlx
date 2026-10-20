@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "skrytý",
   "settings.models.table.hidden_tooltip": "Skrytý z API /v1/models",
   "settings.models.table.gguf_tooltip": "Soubor GGUF spouštěný externím enginem",
+  "settings.models.table.external_engine_tooltip": "{engine} může tento model spustit. Zapněte ho v pokročilém nastavení modelu.",
   "settings.models.table.visible_on_tooltip": "Uveden v /v1/models - klikněte pro skrytí",
   "settings.models.table.visible_off_tooltip": "Skrytý z /v1/models - klikněte pro zobrazení",
   "settings.models.table.favorite_on_tooltip": "Oblíbený - zobrazen jako první v seznamech modelů; klikněte pro odebrání",

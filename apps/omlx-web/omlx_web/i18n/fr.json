@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "masqué",
   "settings.models.table.hidden_tooltip": "Masqué de l'API /v1/models",
   "settings.models.table.gguf_tooltip": "Un fichier GGUF exécuté par un moteur externe",
+  "settings.models.table.external_engine_tooltip": "{engine} peut exécuter ce modèle. Activez-le dans les réglages avancés du modèle.",
   "settings.models.table.visible_on_tooltip": "Listé dans /v1/models — cliquez pour masquer",
   "settings.models.table.visible_off_tooltip": "Masqué de /v1/models — cliquez pour lister",
   "settings.models.table.favorite_on_tooltip": "Favorite — listed first in model lists; click to remove",

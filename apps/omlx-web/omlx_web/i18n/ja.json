@@ -1239,6 +1239,7 @@
   "settings.models.table.hidden_badge": "非表示",
   "settings.models.table.hidden_tooltip": "/v1/models API から非表示",
   "settings.models.table.gguf_tooltip": "外部エンジンで実行するGGUFファイル",
+  "settings.models.table.external_engine_tooltip": "{engine} でこのモデルを実行できます。モデル設定の詳細でオンにしてください。",
   "settings.models.table.visible_on_tooltip": "/v1/models に掲載中 — クリックで非表示",
   "settings.models.table.visible_off_tooltip": "/v1/models から非表示 — クリックで掲載",
   "settings.models.table.favorite_on_tooltip": "Favorite — listed first in model lists; click to remove",
