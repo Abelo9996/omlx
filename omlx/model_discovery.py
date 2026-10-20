@@ -1791,6 +1791,32 @@ def _register_model(
         logger.error(f"Failed to discover model {model_id}: {e}")
 
 
+# Prebuilt Splash packages, by their manifest's format, and the MLX model
+# that holds the same weights. Splash stopped loading packages in 1.3.1.
+_SPLASH_PACKAGE_REPLACEMENTS = {
+    "splash-packed-q4": "mlx-community/Qwen3.8-27B-4bit",
+    "splash-packed-q4-moe": "mlx-community/Qwen3.6-35B-A3B-4bit",
+}
+
+
+def _skip_splash_package(folder: Path) -> bool:
+    """Log and skip a Splash package, which nothing loads any more."""
+    try:
+        manifest = json.loads((folder / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return False
+    package_format = manifest.get("format") if isinstance(manifest, dict) else None
+    name = package_format.get("name") if isinstance(package_format, dict) else None
+    replacement = _SPLASH_PACKAGE_REPLACEMENTS.get(name)
+    if replacement is None:
+        return False
+    logger.warning(
+        f"Skipping {folder}: a Splash package, a prebuilt format Splash stopped "
+        f"loading in 1.3.1; {replacement} holds the same weights"
+    )
+    return True
+
+
 def _register_gguf_model(
     models: dict[str, DiscoveredModel],
     model: gguf.GgufModel,
@@ -1976,7 +2002,7 @@ def discover_models(
                     gguf_root,
                     source_type="hf_cache",
                     source_repo_id=hf_resolved.source_repo_id,
-                ):
+                ) or _skip_splash_package(hf_resolved.snapshot_path):
                     pass
                 elif _is_hf_cache_mlx_compatible(
                     hf_resolved.snapshot_path,
@@ -1989,6 +2015,9 @@ def discover_models(
                         source_type="hf_cache",
                         source_repo_id=hf_resolved.source_repo_id,
                     )
+                continue
+
+            if _skip_splash_package(subdir):
                 continue
 
             # Level 2: organization folder — scan children
@@ -2005,6 +2034,8 @@ def discover_models(
                         "(oMLX does not support LoRA/PEFT adapters)"
                     )
                 elif _register_gguf_folder(models, child, gguf_root):
+                    has_children = True
+                elif _skip_splash_package(child):
                     has_children = True
                 elif _is_model_dir(child):
                     has_children = True

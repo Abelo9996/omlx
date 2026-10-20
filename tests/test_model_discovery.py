@@ -2552,3 +2552,14 @@ class TestGgufDiscovery:
         assert (model.model_type, model.config_model_type) == ("llm", "llama")
         link = Path(model.model_path) / "Llama-Q4_K_M.gguf"
         assert link.resolve() == blob.resolve()
+
+
+def test_splash_package_is_skipped_with_its_replacement(tmp_path, caplog):
+    package = tmp_path / "incoai" / "Qwen3.8-27B-Splash"
+    (package / "tokenizer").mkdir(parents=True)
+    (package / "tokenizer" / "config.json").write_text("{}")
+    manifest = {"format": {"name": "splash-packed-q4"}, "model": "Qwen3.8-27B"}
+    (package / "manifest.json").write_text(json.dumps(manifest))
+
+    assert discover_models(tmp_path, tmp_path / "gguf") == {}
+    assert "mlx-community/Qwen3.8-27B-4bit holds the same weights" in caplog.text

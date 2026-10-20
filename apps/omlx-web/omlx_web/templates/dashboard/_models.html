@@ -2203,7 +2203,11 @@
                                             <i data-lucide="check" class="w-3 h-3"></i>
                                             {{ t('models.browse.downloaded') }}
                                         </span>
-                                        <template x-if="!hfModelDetail.is_adapter && (hfModelDetail.layout === 'gguf' || !isModelDownloaded(hfModelDetail.repo_id))">
+                                        <template x-if="hfModelDetail.unsupported_reason">
+                                            <span class="px-4 py-2 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg max-w-md"
+                                                  x-text="hfModelDetail.unsupported_reason"></span>
+                                        </template>
+                                        <template x-if="!hfModelDetail.is_adapter && !hfModelDetail.unsupported_reason && (hfModelDetail.layout === 'gguf' || !isModelDownloaded(hfModelDetail.repo_id))">
                                             <div class="flex items-center gap-2">
                                                 <button @click="submitHFDownload(null)"
                                                         :disabled="hfDownloading || !hfFitsDisk(hfModelDetail.download_all_size)"

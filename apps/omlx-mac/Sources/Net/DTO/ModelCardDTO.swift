@@ -59,6 +59,9 @@ struct ModelCardDTO: Decodable, Equatable, Sendable {
 
     /// HF-only: free bytes in the model folder.
     let diskFree: Int64?
+
+    /// HF-only: why no engine oMLX runs loads the repo (a Splash package).
+    let unsupportedReason: String?
 }
 
 /// One entry in `ModelCardDTO.files`. `sizeFormatted` is already

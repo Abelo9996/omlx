@@ -4905,6 +4905,26 @@ class TestFileSelection:
         assert "Q-UD-Q4_K_M.gguf" in task.error
         snapshot.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_splash_package_fails_before_transfer(self, model_dir):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        api = self._gguf_api([_sibling("manifest.json", 10)])
+        info = api.model_info.return_value
+        info.library_name = "splash"
+        info.card_data = SimpleNamespace(
+            base_model=["mlx-community/Qwen3.8-27B-4bit", "incoai/Qwen3.8-27B-DFlash2"]
+        )
+
+        with patch(
+            "omlx.admin.hf_downloader._get_hf_api", return_value=(api, None)
+        ), patch("omlx.admin.hf_downloader.snapshot_download") as snapshot:
+            task = await downloader.start_download("incoai/Qwen3.8-27B-Splash")
+            await downloader._active_tasks[task.task_id]
+
+        assert task.status == DownloadStatus.FAILED
+        assert "Download mlx-community/Qwen3.8-27B-4bit instead" in task.error
+        snapshot.assert_not_called()
+
     def test_selection_progress_ignores_files_already_in_the_folder(self, model_dir):
         target = model_dir / "unsloth" / "Q-GGUF"
         staging = target / ".cache" / "huggingface" / "download"

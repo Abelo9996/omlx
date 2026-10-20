@@ -232,6 +232,25 @@ class _MissingFilesError(ValueError):
     """Raised when selected files are not in the repository."""
 
 
+class _UnsupportedRepoError(ValueError):
+    """Raised for a repository no engine oMLX runs can load."""
+
+
+def _unsupported_repo_reason(model_info) -> str | None:
+    """Why no engine oMLX runs loads this repo, or None."""
+    if getattr(model_info, "library_name", None) != "splash":
+        return None
+    card = getattr(model_info, "card_data", None)
+    base = getattr(card, "base_model", None) or []
+    base = [base] if isinstance(base, str) else list(base)
+    mlx = next((name for name in base if name.startswith("mlx-community/")), None)
+    instead = mlx or "an MLX or GGUF checkpoint of the model"
+    return (
+        "This is a Splash package, a prebuilt format Splash stopped loading in "
+        f"1.3.1. Download {instead} instead."
+    )
+
+
 def _check_selected_files(task: "DownloadTask", model_info) -> None:
     """Fail a file selection the repo does not hold, before any transfer."""
     siblings = getattr(model_info, "siblings", None)
@@ -1468,6 +1487,7 @@ class HFDownloader(_QueuePersistenceMixin):
             "files": files,
             "layout": layout,
             "download_all_size": download_all_size or 0,
+            "unsupported_reason": _unsupported_repo_reason(info),
             "tags": list(info.tags) if info.tags else [],
             "pipeline_tag": info.pipeline_tag or "",
             "params": params,
@@ -1774,6 +1794,9 @@ class HFDownloader(_QueuePersistenceMixin):
                         getattr(model_info, "safetensors", None)
                     )
                     _check_selected_files(task, model_info)
+                    unsupported = _unsupported_repo_reason(model_info)
+                    if unsupported:
+                        raise _UnsupportedRepoError(unsupported)
                     if st_params and allow_patterns is None:
                         ignore_patterns = _SAFETENSORS_REPO_IGNORE
                     # Blob sizes of every file the snapshot fetches.
@@ -1789,7 +1812,7 @@ class HFDownloader(_QueuePersistenceMixin):
                         size_estimate = _calc_safetensors_disk_size(
                             {"parameters": st_params}
                         )
-                except _MissingFilesError:
+                except (_MissingFilesError, _UnsupportedRepoError):
                     raise
                 except Exception as e:
                     logger.warning(

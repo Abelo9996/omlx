@@ -564,7 +564,12 @@ struct ModelCardSheet: View {
                 // Adapters can't be downloaded as a runnable model;
                 // hide the action entirely so the user doesn't kick
                 // off a download that won't load.
-                if target.source == .huggingFace {
+                if let reason = dto.unsupportedReason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.omlxText(11))
+                        .foregroundStyle(theme.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if target.source == .huggingFace {
                     hfDownloadButtons(dto: dto)
                 } else {
                     Button {
