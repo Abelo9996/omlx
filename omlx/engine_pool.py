@@ -1466,14 +1466,11 @@ class EnginePool:
             del self._entries[mid]
         if gguf_root is not None:
             # Loaded models keep their folder until they unload.
-            gguf.prune_model_folders(
-                gguf_root,
-                {
-                    Path(entry.model_path).name
-                    for entry in self._entries.values()
-                    if entry.model_format == "gguf"
-                },
-            )
+            in_use = [
+                *(entry.model_path for entry in self._entries.values()),
+                *(info.model_path for info in discovered.values()),
+            ]
+            gguf.prune_model_folders(gguf_root, {Path(path).name for path in in_use})
 
         # Warn about pinned models not found
         found_models = set(self._entries.keys())
@@ -1790,8 +1787,12 @@ class EnginePool:
     ) -> None:
         """Drop stale unloaded entries whose backing model directory vanished."""
         model_path = Path(entry.model_path)
-        source_present = entry.source_path is None or Path(entry.source_path).exists()
-        if model_path.exists() and (model_path / "config.json").exists() and source_present:
+        source = entry.source_path
+        if (
+            model_path.exists()
+            and (model_path / "config.json").exists()
+            and (source is None or Path(source).exists())
+        ):
             return
 
         if entry.engine is None:
@@ -2042,7 +2043,9 @@ class EnginePool:
         if entry is None:
             return None
         return splash_draft_to_download(
-            entry.model_path, self._splash_draft_candidates(model_settings)
+            entry.model_path,
+            get_global_settings().integrations.splash_path,
+            self._splash_draft_candidates(model_settings),
         )
 
     def _splash_sizing_context(

@@ -730,6 +730,7 @@ def _is_local_copy(path: Path, size: int) -> bool:
 def _describe_repo_files(files: list[dict], local_dir: Path | None) -> str:
     """Add download hints to model-info file rows; return the repo layout.
 
+    Only root GGUFs are models (subfolders hold split copies and MTP heads).
     ``required`` marks the files a safetensors checkpoint cannot load
     without, ``preselected`` the files a selection starts with, ``group``
     the split GGUF a part belongs to, ``mmproj`` the projector a GGUF pairs
@@ -749,7 +750,7 @@ def _describe_repo_files(files: list[dict], local_dir: Path | None) -> str:
         lower = name.lower()
         row["group"] = None
         row["mmproj"] = None
-        if lower.endswith(".gguf"):
+        if lower.endswith(".gguf") and "/" not in name:
             row["kind"] = gguf.file_kind(name)
             if row["kind"] == "gguf":
                 split = gguf.SPLIT_RE.match(name)
@@ -1399,13 +1400,16 @@ class HFDownloader(_QueuePersistenceMixin):
         }
 
     @staticmethod
-    async def get_model_info(repo_id: str, local_dir: Path | None = None) -> dict:
+    async def get_model_info(
+        repo_id: str, local_dir: Path | None = None, token: str | None = None
+    ) -> dict:
         """Fetch detailed model information from HuggingFace.
 
         Args:
             repo_id: HuggingFace repository ID (e.g., "mlx-community/Llama-3-8B-4bit").
             local_dir: The folder the repo downloads into, to mark files
                 already there.
+            token: HF token for a gated or private repo; None uses the stored one.
 
         Returns:
             Dict with model details including description, files, tags, etc.
@@ -1416,6 +1420,7 @@ class HFDownloader(_QueuePersistenceMixin):
                 api.model_info,
                 repo_id,
                 files_metadata=True,
+                token=token,
             ),
             timeout=_HF_API_TIMEOUT,
         )
@@ -1465,6 +1470,7 @@ class HFDownloader(_QueuePersistenceMixin):
                     repo_id=repo_id,
                     filename="README.md",
                     endpoint=endpoint,
+                    token=token,
                 ),
                 timeout=_HF_API_TIMEOUT,
             )
@@ -1622,14 +1628,23 @@ class HFDownloader(_QueuePersistenceMixin):
         logger.info(f"Download cancelled: {task.repo_id} (task_id={task_id})")
         return True
 
-    async def cancel_download_for_dir(self, target_dir: Path) -> None:
-        """Cancel the download writing into ``target_dir`` and wait for it."""
+    async def cancel_download_for_dir(
+        self, target_dir: Path, files: list[str] | None = None
+    ) -> None:
+        """Cancel the download writing into ``target_dir`` and wait for it.
+
+        With ``files``, only a download that fetches one of them is cancelled.
+        """
         resolved = Path(target_dir).resolve()
         for task_id, active in list(self._active_tasks.items()):
             task = self._tasks.get(task_id)
-            if task and (self._model_dir / task.repo_id).resolve() == resolved:
-                await self.cancel_download(task_id)
-                await asyncio.gather(active, return_exceptions=True)
+            if task is None or (self._model_dir / task.repo_id).resolve() != resolved:
+                continue
+            if files is not None and task.files is not None:
+                if not set(task.files) & set(files):
+                    continue
+            await self.cancel_download(task_id)
+            await asyncio.gather(active, return_exceptions=True)
 
     def remove_task(self, task_id: str) -> bool:
         """Remove a completed, failed, or cancelled task from the list.

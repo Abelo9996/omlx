@@ -352,7 +352,7 @@
                                    :placeholder="selectedModel?.id"
                                    class="{{ ms_field }}">
                         </label>
-                        <label class="{{ ms_row }}">
+                        <label class="{{ ms_row }}" x-show="!isGgufModel()">
                             <span class="{{ ms_row_label }}">{{ t('modal.model_settings.model_type') }}</span>
                             <select x-model="modelSettings.model_type_override" class="{{ ms_field_short }}">
                                 <option value="">{{ t('modal.model_settings.model_type_auto') }}</option>

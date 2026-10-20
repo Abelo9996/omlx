@@ -2545,10 +2545,8 @@ class TestGgufDiscovery:
         models = discover_models(hub, tmp_path / "gguf")
 
         model = models["Llama-Q4_K_M"]
-        assert (model.source_type, model.source_repo_id) == (
-            "hf_cache",
-            "bartowski/Llama-GGUF",
-        )
+        # Named by its file, not the repo every GGUF in it shares.
+        assert (model.source_type, model.source_repo_id) == ("hf_cache", None)
         assert (model.model_type, model.config_model_type) == ("llm", "llama")
         link = Path(model.model_path) / "Llama-Q4_K_M.gguf"
         assert link.resolve() == blob.resolve()

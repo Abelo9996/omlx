@@ -125,6 +125,7 @@ from .benchmark import (
     _sanitize_upload_error,
     _upload_model_name,
 )
+from .hf_downloader import MODEL_FORMATS
 from .recipe import (
     ALL_FIELDS,
     DEFAULTS,
@@ -7841,8 +7842,6 @@ async def remove_hf_task(
 
 def _hf_model_format(model_format: str | None, mlx_only: bool) -> str:
     """The downloader's format filter; ``mlx_only`` is the older spelling."""
-    from .hf_downloader import MODEL_FORMATS
-
     if model_format is None:
         return "mlx" if mlx_only else "all"
     if model_format not in MODEL_FORMATS:
@@ -7988,10 +7987,14 @@ async def search_hf_models(
 
 @router.get("/api/hf/model-info")
 async def get_hf_model_info(
+    request: Request,
     repo_id: str = "",
     is_admin: bool = Depends(require_admin),
 ):
-    """Get detailed model information from HuggingFace."""
+    """Get detailed model information from HuggingFace.
+
+    An ``X-HF-Token`` header carries a token for a gated or private repo.
+    """
     if not repo_id.strip():
         raise HTTPException(
             status_code=400, detail="Query parameter 'repo_id' is required"
@@ -8008,7 +8011,9 @@ async def get_hf_model_info(
         local_dir = _hf_downloader.model_dir / repo_id
     try:
         result = await HFDownloader.get_model_info(
-            repo_id=repo_id, local_dir=local_dir
+            repo_id=repo_id,
+            local_dir=local_dir,
+            token=request.headers.get("x-hf-token") or None,
         )
         if _hf_downloader is not None:
             result["disk_free"] = await asyncio.to_thread(
@@ -8067,6 +8072,8 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
 
     models = []
     seen_names: set[str] = set()
+    # (folder, row name, source type) of folders of GGUF models.
+    gguf_folders: list[tuple[Path, str, str]] = []
     for model_dir in model_dirs:
         if not model_dir.exists():
             continue
@@ -8075,8 +8082,8 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
                 continue
 
             if gguf.is_gguf_folder(subdir):
-                continue  # Listed per GGUF below.
-            if (subdir / "config.json").exists():
+                gguf_folders.append((subdir, subdir.name, "local"))
+            elif (subdir / "config.json").exists():
                 # Level 1: direct model folder
                 _add_model(subdir, subdir.name)
             else:
@@ -8084,8 +8091,9 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
                 hf_resolved = _resolve_hf_cache_entry(subdir)
                 if hf_resolved is not None:
                     if gguf.is_gguf_folder(hf_resolved.snapshot_path):
-                        continue
-                    if _is_hf_cache_mlx_compatible(
+                        folder, name = hf_resolved.snapshot_path, hf_resolved.model_id
+                        gguf_folders.append((folder, name, "hf_cache"))
+                    elif _is_hf_cache_mlx_compatible(
                         hf_resolved.snapshot_path, hf_resolved.source_repo_id
                     ):
                         _add_model(
@@ -8101,8 +8109,8 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
                     if not child.is_dir() or child.name.startswith("."):
                         continue
                     if gguf.is_gguf_folder(child):
-                        continue
-                    if (child / "config.json").exists():
+                        gguf_folders.append((child, child.name, "local"))
+                    elif (child / "config.json").exists():
                         _add_model(
                             child, child.name, repo_id=f"{subdir.name}/{child.name}"
                         )
@@ -8113,10 +8121,14 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
         engine_pool = _get_engine_pool() if _get_engine_pool else None
     except HTTPException:  # the server has not created the pool yet
         engine_pool = None
+    registered: set[Path] = set()
     for info in engine_pool.get_status()["models"] if engine_pool else []:
         if info.get("model_format") != "gguf" or info["id"] in seen_names:
             continue
         seen_names.add(info["id"])
+        source = Path(info.get("source_path") or "")
+        parts = (gguf.source_info(info["model_path"]) or {}).get("parts") or []
+        registered.update(source.parent / name for name in parts)
         models.append(
             {
                 "name": info["id"],
@@ -8130,9 +8142,27 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
             }
         )
 
+    # A folder with GGUFs no model stands for (an unfinished split, an
+    # unreadable file, subfolder copies) is listed whole so it can be deleted.
+    for folder, name, source_type in gguf_folders:
+        stranded = [
+            path
+            for path in folder.rglob("*.gguf")
+            if path not in registered
+            and not (path.parent == folder and gguf.file_kind(path.name) != "gguf")
+        ]
+        if stranded and name not in seen_names:
+            _add_model(folder, name, source_type=source_type)
+            models[-1]["model_format"] = "gguf"
+
     # Sort by the UI display name so organization prefixes group together.
     models.sort(key=lambda m: m["display_name"].lower())
     return {"models": models}
+
+
+def _is_listed_model_folder(path: Path) -> bool:
+    """A folder /api/hf/models lists whole: a checkpoint or a GGUF folder."""
+    return (path / "config.json").exists() or gguf.is_gguf_folder(path)
 
 
 @router.delete("/api/hf/models/{model_name}")
@@ -8162,7 +8192,7 @@ async def delete_hf_model(
         if not model_dir.exists():
             continue
         candidate = model_dir / model_name
-        if candidate.is_dir() and (candidate / "config.json").exists():
+        if candidate.is_dir() and _is_listed_model_folder(candidate):
             model_path = candidate
             parent_model_dir = model_dir
             break
@@ -8173,15 +8203,18 @@ async def delete_hf_model(
             if hf_resolved is not None:
                 # The repo dir owns the snapshot symlinks and their blobs, so
                 # it is removed as one unit.
-                if hf_resolved.model_id == model_name and _is_hf_cache_mlx_compatible(
-                    hf_resolved.snapshot_path, hf_resolved.source_repo_id
+                if hf_resolved.model_id == model_name and (
+                    _is_hf_cache_mlx_compatible(
+                        hf_resolved.snapshot_path, hf_resolved.source_repo_id
+                    )
+                    or gguf.is_gguf_folder(hf_resolved.snapshot_path)
                 ):
                     model_path = subdir
                     parent_model_dir = model_dir
                     break
                 continue
             candidate = subdir / model_name
-            if candidate.is_dir() and (candidate / "config.json").exists():
+            if candidate.is_dir() and _is_listed_model_folder(candidate):
                 model_path = candidate
                 parent_model_dir = model_dir
                 break
@@ -8303,13 +8336,23 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
         for model_dir in model_dirs
     ):
         raise HTTPException(status_code=400, detail="Invalid model name")
-    parts = [folder / name for name in info.get("parts") or [Path(entry.source_path).name]]
+    names = info.get("parts") or [Path(entry.source_path).name]
+    parts = [folder / name for name in names]
 
     hf_cache = entry.source_type == "hf_cache"
     # snapshots/<revision>/ inside models--Org--Name/
     repo_dir = folder.parent.parent if hf_cache else folder
+    remaining = [
+        model
+        for model in gguf.find_models(folder)
+        if model.path not in parts and model.model_id != entry.model_id
+    ]
     if _hf_downloader is not None and not hf_cache:
-        await _hf_downloader.cancel_download_for_dir(folder)
+        # The folder goes with its last GGUF, and with it every download
+        # into it; otherwise only a download of these files stops.
+        await _hf_downloader.cancel_download_for_dir(
+            folder, [part.name for part in parts] if remaining else None
+        )
     if entry.model_id in engine_pool.get_loaded_model_ids():
         try:
             await engine_pool._unload_engine(entry.model_id)
@@ -8317,11 +8360,6 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
         except Exception as e:
             logger.warning(f"Failed to unload model '{entry.model_id}': {e}")
 
-    remaining = [
-        model
-        for model in gguf.find_models(folder)
-        if model.path not in parts and model.model_id != entry.model_id
-    ]
     try:
         if hf_cache and not remaining:
             shutil.rmtree(repo_dir)
@@ -8347,7 +8385,8 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
                         and not any(parent.iterdir())
                     ):
                         parent.rmdir()
-        logger.info(f"Deleted GGUF model {entry.model_id}: {', '.join(map(str, parts))}")
+        deleted = ", ".join(map(str, parts))
+        logger.info(f"Deleted GGUF model {entry.model_id}: {deleted}")
     except OSError as e:
         logger.error(f"Failed to delete GGUF model {entry.model_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete model: {e}")

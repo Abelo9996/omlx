@@ -22,6 +22,7 @@ from huggingface_hub import HfApi
 from huggingface_hub import constants as hub_constants
 from huggingface_hub import file_download as hub_file_download
 from huggingface_hub.utils import HfHubHTTPError
+from starlette.requests import Request
 
 from omlx._hf_download_worker import _download_without_xet
 from omlx.admin import hf_downloader as hf_downloader_mod
@@ -1886,6 +1887,8 @@ class TestHFDownloaderRoutes:
         for name, size in (("Q-Q4_K_M.gguf", 100), ("Q-Q8_0.gguf", 200)):
             write_gguf(repo / name, {"general.architecture": "qwen35"}, size=size)
         write_gguf(repo / "mmproj-BF16.gguf", {"general.architecture": "clip"}, size=10)
+        # Part 1 of an unfinished split download: no model stands for it.
+        write_gguf(repo / "Q-BF16-00001-of-00002.gguf", {}, size=50)
         (repo / "README.md").write_text("card")
         base = SimpleNamespace(base_path=tmp_path / "base")
         pool = EnginePool()
@@ -1906,21 +1909,30 @@ class TestHFDownloaderRoutes:
             assert [(r["name"], r["model_format"], r["repo_id"]) for r in rows] == [
                 ("Q-Q4_K_M", "gguf", None),
                 ("Q-Q8_0", "gguf", None),
+                ("Q-GGUF", "gguf", None),  # Displayed as unsloth/Q-GGUF.
             ]
 
             await admin_routes.delete_hf_model("Q-Q4_K_M", is_admin=True)
             assert sorted(p.name for p in repo.iterdir()) == [
+                "Q-BF16-00001-of-00002.gguf",
                 "Q-Q8_0.gguf",
                 "README.md",
                 "mmproj-BF16.gguf",
             ]
             assert set(pool._entries) == {"Q-Q8_0"}
 
-            # The last GGUF takes its folder, and the empty org folder, along.
+            # Its projector goes with the last model; the split part stays.
             await admin_routes.delete_hf_model("Q-Q8_0", is_admin=True)
-            assert not (models_dir / "unsloth").exists()
+            assert sorted(p.name for p in repo.iterdir()) == [
+                "Q-BF16-00001-of-00002.gguf",
+                "README.md",
+            ]
             assert pool._entries == {}
             assert list((tmp_path / "base" / "gguf").iterdir()) == []
+
+            # The folder row deletes what is left, and the empty org folder.
+            await admin_routes.delete_hf_model("Q-GGUF", is_admin=True)
+            assert not (models_dir / "unsloth").exists()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_inside_hub", [False, True])
@@ -4862,7 +4874,10 @@ class TestFileSelection:
                         will_download=True,
                         commit_hash="c",
                     )
-                    for name, size in (("Q-UD-Q4_K_M.gguf", 100), ("mmproj-BF16.gguf", 10))
+                    for name, size in (
+                        ("Q-UD-Q4_K_M.gguf", 100),
+                        ("mmproj-BF16.gguf", 10),
+                    )
                 ]
 
         with patch(
@@ -4924,6 +4939,25 @@ class TestFileSelection:
         assert task.status == DownloadStatus.FAILED
         assert "Download mlx-community/Qwen3.8-27B-4bit instead" in task.error
         snapshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_dir_spares_downloads_of_other_files(self, model_dir):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        task = DownloadTask(
+            task_id="t-q8",
+            repo_id="unsloth/Q-GGUF",
+            status=DownloadStatus.DOWNLOADING,
+            files=["Q-Q8_0.gguf"],
+        )
+        downloader._tasks[task.task_id] = task
+        downloader._active_tasks[task.task_id] = asyncio.create_task(asyncio.sleep(60))
+        folder = model_dir / "unsloth" / "Q-GGUF"
+
+        with patch("omlx.admin.hf_downloader.abort_xet_session"):
+            await downloader.cancel_download_for_dir(folder, ["Q-Q4_K_M.gguf"])
+            assert task.status == DownloadStatus.DOWNLOADING
+            await downloader.cancel_download_for_dir(folder, ["Q-Q8_0.gguf"])
+        assert task.status == DownloadStatus.CANCELLED
 
     def test_selection_progress_ignores_files_already_in_the_folder(self, model_dir):
         target = model_dir / "unsloth" / "Q-GGUF"
@@ -5000,10 +5034,23 @@ class TestFileSelection:
         rows = {row["name"]: row for row in gguf}
         assert rows["Q-UD-Q4_K_M.gguf"]["mmproj"] == "mmproj-BF16.gguf"
         assert rows["Q-UD-Q4_K_M.gguf"]["local"] is True
-        assert rows["BF16/Q-BF16-00002-of-00002.gguf"]["group"] == "BF16/Q-BF16"
+        # Subfolders hold copies no engine loads as a model.
+        assert rows["BF16/Q-BF16-00002-of-00002.gguf"]["kind"] == "other"
         assert rows["BF16/Q-BF16-00001-of-00002.gguf"]["mmproj"] is None
         assert rows["imatrix_unsloth.gguf"]["kind"] == "imatrix"
         assert not any(row["required"] for row in gguf)
+
+    @pytest.mark.asyncio
+    async def test_model_info_uses_the_token_the_user_typed(self):
+        request = Request({"type": "http", "headers": [(b"x-hf-token", b"hf_typed")]})
+        with patch.object(
+            HFDownloader, "get_model_info", AsyncMock(return_value={})
+        ) as model_info, patch.object(admin_routes, "_hf_downloader", None):
+            await admin_routes.get_hf_model_info(
+                request, repo_id="owner/private", is_admin=True
+            )
+
+        assert model_info.call_args.kwargs["token"] == "hf_typed"
 
     @pytest.mark.asyncio
     async def test_gguf_format_lists_gguf_repos_with_their_metadata(self):

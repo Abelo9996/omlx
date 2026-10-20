@@ -74,7 +74,10 @@ MIXED_QUANTIZATION_VERSION = (1, 3, 1)
 THINKING_BUDGET_VERSION = (1, 3, 2)
 # Splash loads Model Optimizer and compressed-tensors NVFP4/FP8 from 1.3.2 on.
 NVIDIA_QUANTIZATION_VERSION = (1, 3, 2)
-_NVIDIA_QUANT_METHODS = frozenset({"modelopt", "compressed-tensors"})
+# The formats Splash reads from them: Model Optimizer algorithms and
+# compressed-tensors group formats.
+_MODELOPT_ALGOS = frozenset({"NVFP4", "W4A16_NVFP4", "FP8"})
+_COMPRESSED_TENSORS_FORMATS = frozenset({"nvfp4-pack-quantized", "float-quantized"})
 SPLASH_MAX_CONTEXT = 262144
 SPLASH_INSTALL_HINT = (
     "Splash is not installed: brew install incoai/tap/splash (M3 or later), "
@@ -319,16 +322,40 @@ def _is_affine_4bit_group64(quant: dict) -> bool:
     )
 
 
+def _is_nvfp4_or_fp8(quant_config: dict) -> bool:
+    """Whether a Model Optimizer or compressed-tensors config holds only the
+    NVFP4 and FP8 formats Splash reads; Splash checks each layer itself."""
+    method = quant_config.get("quant_method")
+    if method == "modelopt":
+        layers = quant_config.get("quantized_layers") or {}
+        algos = {quant_config.get("quant_algo")} | {
+            layer.get("quant_algo")
+            for layer in layers.values()
+            if isinstance(layer, dict)
+        }
+        algos -= {None, "MIXED_PRECISION"}
+        return bool(algos) and algos <= _MODELOPT_ALGOS
+    if method == "compressed-tensors":
+        groups = (quant_config.get("config_groups") or {}).values()
+        formats = {
+            group.get("format") or quant_config.get("format")
+            for group in groups
+            if isinstance(group, dict)
+        }
+        return bool(formats) and formats <= _COMPRESSED_TENSORS_FORMATS
+    return False
+
+
 def _quantization_problem(config: dict, binary: SplashBinary) -> str:
     quant = config.get("quantization")
     if not isinstance(quant, dict):
-        method = (config.get("quantization_config") or {}).get("quant_method")
+        quant_config = config.get("quantization_config") or {}
+        nvidia = isinstance(quant_config, dict) and _is_nvfp4_or_fp8(quant_config)
         if binary.loads_nvidia_quantization:
-            # Splash checks the layers' formats itself.
-            if method in _NVIDIA_QUANT_METHODS:
+            if nvidia:
                 return ""
             return "Splash needs a quantized MLX, NVFP4 or FP8 checkpoint"
-        if method in _NVIDIA_QUANT_METHODS:
+        if nvidia:
             minimum = ".".join(str(part) for part in NVIDIA_QUANTIZATION_VERSION)
             return (
                 f"{binary.label} {binary.version} serves MLX checkpoints only; "
@@ -374,6 +401,35 @@ class SplashTarget:
     draft_path: Path
 
 
+def _check_model(
+    path: Path, configured_binary: str | None
+) -> tuple[SplashBinary, str, dict] | str:
+    """(binary, family, text config) when only the draft is left to find,
+    else why Splash cannot serve ``path``."""
+    binary, reason = find_splash_binary(configured_binary)
+    if binary is None:
+        return reason
+    config = _read_config(path)
+    if config is None:
+        return "failed to read config.json"
+    family = splash_family(config)
+    if family is None:
+        return f"Splash serves {' and '.join(SPLASH_FAMILIES)} only"
+    source = _gguf_source(config)
+    if source is not None:
+        # Splash checks a GGUF's tensor types itself when it loads the file.
+        if len(source.get("parts") or []) > 1:
+            return "Splash serves single-file GGUFs only"
+    else:
+        problem = _quantization_problem(config, binary)
+        if problem:
+            return problem
+    missing = [name for name in _REQUIRED_MODEL_FILES if not (path / name).is_file()]
+    if missing:
+        return f"Splash needs {', '.join(missing)} in the model folder"
+    return binary, family, config["text_config"]
+
+
 def resolve_splash_target(
     model_path: str | Path,
     configured_binary: str | None,
@@ -388,29 +444,11 @@ def resolve_splash_target(
         (target, reason). ``target`` is None and ``reason`` says why when
         Splash cannot serve the model.
     """
-    path = Path(model_path)
-    binary, reason = find_splash_binary(configured_binary)
-    if binary is None:
-        return None, reason
-    config = _read_config(path)
-    if config is None:
-        return None, "failed to read config.json"
-    family = splash_family(config)
-    if family is None:
-        return None, f"Splash serves {' and '.join(SPLASH_FAMILIES)} only"
-    source = _gguf_source(config)
-    if source is not None:
-        # Splash checks a GGUF's tensor types itself when it loads the file.
-        if len(source.get("parts") or []) > 1:
-            return None, "Splash serves single-file GGUFs only"
-    else:
-        problem = _quantization_problem(config, binary)
-        if problem:
-            return None, problem
-    missing = [name for name in _REQUIRED_MODEL_FILES if not (path / name).is_file()]
-    if missing:
-        return None, f"Splash needs {', '.join(missing)} in the model folder"
-    draft = find_splash_draft(config["text_config"], draft_candidates)
+    checked = _check_model(Path(model_path), configured_binary)
+    if isinstance(checked, str):
+        return None, checked
+    binary, family, text = checked
+    draft = find_splash_draft(text, draft_candidates)
     if draft is None:
         return None, (
             f"Splash needs the {family} DFlash2 draft "
@@ -420,12 +458,16 @@ def resolve_splash_target(
 
 
 def splash_draft_to_download(
-    model_path: str | Path, draft_candidates: Iterable[str]
+    model_path: str | Path,
+    configured_binary: str | None,
+    draft_candidates: Iterable[str],
 ) -> str | None:
-    """The draft repo a Splash model lacks, or None when it has one."""
-    config = _read_config(Path(model_path)) or {}
-    family = splash_family(config)
-    if family is None or find_splash_draft(config["text_config"], draft_candidates):
+    """The draft repo Splash needs for ``model_path`` when only it is missing."""
+    checked = _check_model(Path(model_path), configured_binary)
+    if isinstance(checked, str):
+        return None
+    _, family, text = checked
+    if find_splash_draft(text, draft_candidates) is not None:
         return None
     return SPLASH_DRAFT_REPOS[family]
 
@@ -443,13 +485,26 @@ def _gguf_source(config: dict) -> dict | None:
     return source if isinstance(source, dict) else None
 
 
+# Splash picks a GGUF's vision projector by precision in this order.
+_SPLASH_PROJECTOR_ORDER = ("bf16", "f32", "f16")
+
+
+def _splash_projector_rank(name: str) -> int:
+    base = name.lower()
+    for rank, tag in enumerate(_SPLASH_PROJECTOR_ORDER):
+        if re.search(rf"(^|[-_.]){tag}([-_.]|$)", base):
+            return rank
+    return len(_SPLASH_PROJECTOR_ORDER)
+
+
 def _weight_bytes(path: Path) -> int:
     """Bytes of the weights Splash loads: the safetensors, or for a GGUF its
     file and the projector Splash pairs it with."""
     source = _gguf_source(_read_config(path) or {})
     if source is None:
         return _safetensors_bytes(path)
-    names = [*(source.get("parts") or []), *(source.get("projectors") or [])[:1]]
+    projectors = sorted(source.get("projectors") or [], key=_splash_projector_rank)
+    names = [*(source.get("parts") or []), *projectors[:1]]
     return sum((path / name).stat().st_size for name in names)
 
 

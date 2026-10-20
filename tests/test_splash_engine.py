@@ -253,8 +253,22 @@ class TestCompatibility:
     @pytest.mark.parametrize(
         "quantization_config",
         [
-            {"quant_method": "modelopt", "quant_algo": "NVFP4"},
-            {"quant_method": "compressed-tensors", "format": "mixed-precision"},
+            {
+                "quant_method": "modelopt",
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "a": {"quant_algo": "NVFP4"},
+                    "b": {"quant_algo": "FP8"},
+                },
+            },
+            {
+                "quant_method": "compressed-tensors",
+                "format": "mixed-precision",
+                "config_groups": {
+                    "group_0": {"format": "float-quantized"},
+                    "group_1": {"format": "nvfp4-pack-quantized"},
+                },
+            },
         ],
     )
     def test_nvfp4_and_fp8_checkpoints_need_splash_1_3_2(
@@ -273,6 +287,15 @@ class TestCompatibility:
         launchers("splash", version="1.3.2")
         target, reason = resolve_splash_target(model, None, [str(draft)])
         assert target is not None and reason == ""
+
+        # Other schemes of the same tools are not formats Splash reads.
+        config["quantization_config"] = {
+            "quant_method": "compressed-tensors",
+            "config_groups": {"g": {"format": "pack-quantized"}},
+        }
+        (model / "config.json").write_text(json.dumps(config))
+        _, reason = resolve_splash_target(model, None, [str(draft)])
+        assert "MLX, NVFP4 or FP8" in reason
 
     def test_missing_files_and_draft_explain_why(self, tmp_path, launchers):
         launchers("splash")
@@ -324,7 +347,8 @@ class TestGguf:
         self, tmp_path, monkeypatch, launchers, write_gguf
     ):
         # A small vocabulary keeps the derived tokenizer cheap to build.
-        monkeypatch.setitem(splash_mod.SPLASH_FAMILIES["Qwen3.8-27B"], "vocab_size", 300)
+        family = splash_mod.SPLASH_FAMILIES["Qwen3.8-27B"]
+        monkeypatch.setitem(family, "vocab_size", 300)
         alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
         specials = ["<|im_start|>", "<|im_end|>"]
         vocab = alphabet + specials + [f"t{i}" for i in range(300 - 258)]
@@ -334,7 +358,8 @@ class TestGguf:
         write_gguf(repo / "Qwen3.8-27B-UD-Q4_K_M.gguf", metadata)
         write_gguf(repo / "Qwen3.8-27B-BF16-00001-of-00002.gguf", metadata)
         write_gguf(repo / "Qwen3.8-27B-BF16-00002-of-00002.gguf", {})
-        write_gguf(repo / "mmproj-BF16.gguf", {"general.architecture": "clip"}, size=512)
+        projector = {"general.architecture": "clip"}
+        write_gguf(repo / "mmproj-BF16.gguf", projector, size=512)
         draft = _write_draft(tmp_path / "draft", {**QWEN38_TEXT, "vocab_size": 300})
 
         models = discover_models(tmp_path / "models", tmp_path / "gguf")
@@ -354,7 +379,9 @@ class TestGguf:
         # The tokenizer comes from the GGUF header, chat template included.
         tokenizer = AutoTokenizer.from_pretrained(folder)
         prompt = tokenizer.apply_chat_template(
-            [{"role": "user", "content": "hi"}], tokenize=False, add_generation_prompt=True
+            [{"role": "user", "content": "hi"}],
+            tokenize=False,
+            add_generation_prompt=True,
         )
         assert prompt == "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
         assert tokenizer.decode(tokenizer.encode(prompt)) == prompt
@@ -1247,6 +1274,15 @@ class TestAdminAPI:
         (row,) = admin_routes._external_engines_for_model(pool, info, None)
         assert not row["compatible"]
         assert row["draft_repo"] == "incoai/Qwen3.8-27B-DFlash2"
+
+        # A draft would not help a checkpoint Splash refuses for another reason.
+        bf16 = _write_model(tmp_path / "bf16")
+        config = json.loads((bf16 / "config.json").read_text())
+        del config["quantization"]
+        (bf16 / "config.json").write_text(json.dumps(config))
+        entry.model_path = str(bf16)
+        (row,) = admin_routes._external_engines_for_model(pool, info, None)
+        assert row["draft_repo"] is None
 
 
 # -- native response_format ---------------------------------------------------

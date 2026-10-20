@@ -7712,17 +7712,17 @@
             // The GGUF model files a task fetches, shown beside its repo.
             taskGgufFiles(task) {
                 return (task.files || [])
-                    .filter(name => name.toLowerCase().endsWith('.gguf') && !name.toLowerCase().includes('mmproj'))
-                    .map(name => name.split('/').pop())
+                    .filter(name => !name.includes('/') && name.toLowerCase().endsWith('.gguf')
+                        && !name.toLowerCase().includes('mmproj'))
                     .join(', ');
             },
 
             // The model ID a finished download serves under: a GGUF's file name.
             taskModelId(task) {
-                const name = (task.files || []).find(f =>
-                    f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
+                const name = (task.files || []).find(f => !f.includes('/')
+                    && f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
                 if (!name) return task.repo_id.split('/').pop();
-                return name.split('/').pop().replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
+                return name.replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
             },
 
             // Every download picks its files in the detail modal first.
@@ -8203,9 +8203,21 @@
                 this.hfSelectedFiles = {};
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
+                // A download still starts when the file list does not load.
+                const unavailable = (message) => {
+                    if (tab !== 'files') {
+                        this.hfError = message;
+                        setTimeout(() => { this.hfError = ''; }, 5000);
+                        return;
+                    }
+                    this.hfModelDetail = { repo_id: repoId, files: [], tags: [], layout: 'other',
+                                           downloads: 0, likes: 0, download_all_size: 0,
+                                           unavailable: message };
+                };
                 try {
                     const params = new URLSearchParams({ repo_id: repoId });
-                    const response = await fetch(`/admin/api/hf/model-info?${params}`, { signal: controller.signal });
+                    const headers = this.hfToken ? { 'X-HF-Token': this.hfToken } : {};
+                    const response = await fetch(`/admin/api/hf/model-info?${params}`, { headers, signal: controller.signal });
                     if (response.ok) {
                         this.hfModelDetail = await response.json();
                         this.resetHfSelection();
@@ -8213,16 +8225,11 @@
                         window.location.href = '/admin';
                     } else {
                         const data = await response.json().catch(() => ({}));
-                        this.hfError = data.detail || window.t('js.error.fetch_model_info_failed');
-                        setTimeout(() => { this.hfError = ''; }, 5000);
+                        unavailable(data.detail || window.t('js.error.fetch_model_info_failed'));
                     }
                 } catch (err) {
-                    if (err.name === 'AbortError') {
-                        this.hfError = window.t('js.error.hf_timeout');
-                    } else {
-                        this.hfError = window.t('js.error.hf_connect_failed');
-                    }
-                    setTimeout(() => { this.hfError = ''; }, 5000);
+                    unavailable(err.name === 'AbortError'
+                        ? window.t('js.error.hf_timeout') : window.t('js.error.hf_connect_failed'));
                     console.error('Failed to fetch model info:', err);
                 } finally {
                     clearTimeout(timeoutId);
@@ -8286,6 +8293,16 @@
                 if (!file.group) return file.size || 0;
                 return this.hfModelDetail.files
                     .filter(f => f.group === file.group)
+                    .reduce((total, f) => total + (f.size || 0), 0);
+            },
+
+            // What "download all" still has to fetch: its files not downloaded yet.
+            hfDownloadAllSize() {
+                const detail = this.hfModelDetail;
+                if (!detail?.files?.length) return detail?.download_all_size || 0;
+                const fetched = detail.layout === 'safetensors' ? (f => f.preselected) : (() => true);
+                return detail.files
+                    .filter(f => fetched(f) && !f.local)
                     .reduce((total, f) => total + (f.size || 0), 0);
             },
 

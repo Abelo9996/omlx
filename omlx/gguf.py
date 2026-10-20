@@ -420,7 +420,8 @@ def _folder_name(model: GgufModel) -> str:
     digest = hashlib.sha1(f"layout {_FOLDER_LAYOUT}\n".encode())
     for path in (*model.parts, *model.projectors):
         stat = path.stat()
-        digest.update(f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
+        line = f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\n"
+        digest.update(line.encode())
     return f"{model.model_id}-{digest.hexdigest()[:12]}"
 
 

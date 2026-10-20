@@ -378,7 +378,8 @@ struct ModelCardSheet: View {
             )
         } else {
             VStack(alignment: .leading, spacing: 0) {
-                if target.source == .huggingFace && dto.isAdapter != true {
+                if target.source == .huggingFace, dto.isAdapter != true, dto.unsupportedReason == nil,
+                   dto.layout == "safetensors" || dto.layout == "gguf" {
                     Text(dto.layout == "safetensors" ? checkpointFilesHint : ggufFilesHint)
                         .font(.omlxText(11))
                         .foregroundStyle(theme.textSecondary)
@@ -595,7 +596,13 @@ struct ModelCardSheet: View {
     private func hfDownloadButtons(dto: ModelCardDTO) -> some View {
         let picked = selectedFiles(dto)
         let pickedSize = picked.reduce(Int64(0)) { $0 + $1.size }
-        let allSize = dto.downloadAllSize ?? 0
+        // What "Download All" still fetches: its files not downloaded yet.
+        let files = dto.files ?? []
+        let allSize = files.isEmpty
+            ? (dto.downloadAllSize ?? 0)
+            : files
+                .filter { (dto.layout != "safetensors" || $0.preselected == true) && $0.local != true }
+                .reduce(Int64(0)) { $0 + $1.size }
         if !fitsDisk(pickedSize, dto) {
             Text(String(localized: "downloads.card.not_enough_space",
                         defaultValue: "Not enough free space in the model folder",
@@ -679,12 +686,22 @@ struct ModelCardSheet: View {
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
                 .textSelection(.enabled)
-            Button(String(localized: "downloads.card.retry",
-                          defaultValue: "Retry",
-                          comment: "Retry button shown after the model card fetch failed")) {
-                Task { await load() }
+            HStack(spacing: 8) {
+                Button(String(localized: "downloads.card.retry",
+                              defaultValue: "Retry",
+                              comment: "Retry button shown after the model card fetch failed")) {
+                    Task { await load() }
+                }
+                .buttonStyle(.omlx(.primary))
+                // A download still starts when the file list does not load.
+                if target.source == .huggingFace && target.startTab == .files {
+                    Button(downloadAllLabel) {
+                        onDownload(target.repoId, nil)
+                        dismiss()
+                    }
+                    .buttonStyle(.omlx(.normal))
+                }
             }
-            .buttonStyle(.omlx(.primary))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)

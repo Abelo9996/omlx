@@ -2132,7 +2132,8 @@
                                         <!-- Files content -->
                                         <div x-show="hfDetailTab === 'files'" class="flex-1 min-h-0 overflow-y-auto">
                                             <div x-show="hfModelDetail.files && hfModelDetail.files.length > 0" x-cloak>
-                                                <p x-show="!hfModelDetail.is_adapter" class="text-xs text-neutral-500 mb-2"
+                                                <p x-show="!hfModelDetail.is_adapter && !hfModelDetail.unsupported_reason && hfModelDetail.layout !== 'other'"
+                                                   class="text-xs text-neutral-500 mb-2"
                                                    x-text="hfModelDetail.layout === 'safetensors' ? window.t('models.detail.pick_files_checkpoint') : window.t('models.detail.pick_files_gguf')"></p>
                                                 <div class="bg-neutral-50 rounded-xl border border-neutral-200 divide-y divide-neutral-200">
                                                     <template x-for="file in hfModelDetail.files" :key="file.name">
@@ -2158,7 +2159,8 @@
                                                 </div>
                                             </div>
                                             <div x-show="!hfModelDetail.files || hfModelDetail.files.length === 0" x-cloak class="py-8 text-center">
-                                                <p class="text-sm text-neutral-500">{{ t('models.detail.no_files') }}</p>
+                                                <p class="text-sm text-neutral-500"
+                                                   x-text="hfModelDetail.unavailable || window.t('models.detail.no_files')"></p>
                                             </div>
                                         </div>
 
@@ -2210,11 +2212,11 @@
                                         <template x-if="!hfModelDetail.is_adapter && !hfModelDetail.unsupported_reason && (hfModelDetail.layout === 'gguf' || !isModelDownloaded(hfModelDetail.repo_id))">
                                             <div class="flex items-center gap-2">
                                                 <button @click="submitHFDownload(null)"
-                                                        :disabled="hfDownloading || !hfFitsDisk(hfModelDetail.download_all_size)"
+                                                        :disabled="hfDownloading || !hfFitsDisk(hfDownloadAllSize())"
                                                         class="px-4 py-2 text-xs font-medium text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded-full transition-all
                                                            disabled:opacity-50 disabled:cursor-not-allowed">
                                                     {{ t('models.detail.download_all') }}
-                                                    <span x-show="hfModelDetail.download_all_size" class="text-neutral-500" x-text="formatFileSize(hfModelDetail.download_all_size)"></span>
+                                                    <span x-show="hfDownloadAllSize()" class="text-neutral-500" x-text="formatFileSize(hfDownloadAllSize())"></span>
                                                 </button>
                                                 <button @click="submitHFDownload(hfSelectedNames())"
                                                         :disabled="hfDownloading || !hfSelectedNames().length || !hfFitsDisk(hfSelectionSize())"

@@ -987,14 +987,17 @@ private struct BasicSection: View {
                 TextInput(text: $vm.alias, placeholder: vm.modelID, mono: true, width: .controlMedium)
                     .onSubmit { Task { await vm.save(.alias, client: client) } }
             }
-            Row(label: String(localized: "settings.basic.model_type.label",
-                              defaultValue: "Model Type",
-                              comment: "Row label for the model type override popup")) {
-                Popup(
-                    selection: vm.bind($vm.modelTypeOverride, save: { Task { await vm.save(.modelType, client: client) } }),
-                    width: .controlMedium,
-                    options: ModelSettingsScreenVM.modelTypeOptions
-                )
+            // A GGUF's type comes from its file.
+            if vm.model?.isGGUF != true {
+                Row(label: String(localized: "settings.basic.model_type.label",
+                                  defaultValue: "Model Type",
+                                  comment: "Row label for the model type override popup")) {
+                    Popup(
+                        selection: vm.bind($vm.modelTypeOverride, save: { Task { await vm.save(.modelType, client: client) } }),
+                        width: .controlMedium,
+                        options: ModelSettingsScreenVM.modelTypeOptions
+                    )
+                }
             }
             if vm.showsEmbeddingContextWindow {
                 Row(label: String(localized: "settings.basic.context_window.label",
@@ -1492,8 +1495,9 @@ private struct ExternalEngineRow: View {
     @Bindable var vm: ModelSettingsScreenVM
     let client: OMLXClient
     let engines: [ExternalEngineOption]
-    /// Set once the draft download starts, or to the error that stopped it.
-    @State private var draftStatus: String?
+    @State private var draftStarted = false
+    /// Why the last draft download did not start; the button retries.
+    @State private var draftError: String?
 
     private var usableEngine: String? {
         engines.first(where: { $0.compatible })?.id
@@ -1509,6 +1513,7 @@ private struct ExternalEngineRow: View {
     }
 
     private var sublabel: String {
+        if let draftError { return draftError }
         let selected = engines.first(where: { $0.id == vm.effectiveExternalEngine })
         if let selected, !selected.compatible, let reason = selected.reason, !reason.isEmpty {
             return reason
@@ -1533,13 +1538,18 @@ private struct ExternalEngineRow: View {
             sublabel: sublabel) {
             HStack(spacing: 7) {
                 if let draftRepo {
-                    Button(draftStatus ?? String(localized: "settings.advanced.external_engine.get_draft",
-                                                 defaultValue: "Download \(draftRepo)",
-                                                 comment: "Button that downloads the draft model an external engine needs; placeholder is the Hugging Face repo")) {
+                    Button(draftStarted
+                           ? String(localized: "settings.advanced.external_engine.draft_started",
+                                    defaultValue: "Downloading…",
+                                    comment: "Draft download button label after the download starts")
+                           : String(localized: "settings.advanced.external_engine.get_draft",
+                                    defaultValue: "Download \(draftRepo)",
+                                    comment: "Button that downloads the draft model an external engine needs; placeholder is the Hugging Face repo")) {
                         Task { await downloadDraft(draftRepo) }
                     }
                     .buttonStyle(.omlx(.normal, size: .small))
-                    .disabled(draftStatus != nil)
+                    .disabled(draftStarted)
+                    .help(draftError ?? "")
                 }
                 if !vm.externalEngine.isEmpty {
                     Popup(selection: vm.bind($vm.externalEngine, save: save),
@@ -1567,11 +1577,10 @@ private struct ExternalEngineRow: View {
     private func downloadDraft(_ repo: String) async {
         do {
             _ = try await client.startHFDownload(repoId: repo)
-            draftStatus = String(localized: "settings.advanced.external_engine.draft_started",
-                                 defaultValue: "Downloading…",
-                                 comment: "Draft download button label after the download starts")
+            draftStarted = true
+            draftError = nil
         } catch {
-            draftStatus = error.omlxDescription
+            draftError = error.omlxDescription
         }
     }
 }

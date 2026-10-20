@@ -54,9 +54,9 @@ struct HFTaskDTO: Codable, Equatable, Sendable, Identifiable {
 
     /// The GGUF model files a selection fetches, shown beside the repo.
     var ggufFilesText: String? {
-        let names = (files ?? [])
-            .filter { $0.lowercased().hasSuffix(".gguf") && !$0.lowercased().contains("mmproj") }
-            .map { $0.split(separator: "/").last.map(String.init) ?? $0 }
+        let names = (files ?? []).filter {
+            !$0.contains("/") && $0.lowercased().hasSuffix(".gguf") && !$0.lowercased().contains("mmproj")
+        }
         return names.isEmpty ? nil : names.joined(separator: ", ")
     }
 
