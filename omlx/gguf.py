@@ -5,6 +5,10 @@ oMLX serves a GGUF only through an external engine. Each GGUF model gets a
 generated folder under ``<base path>/gguf`` with a config.json derived from
 the file's header and links to the file and its vision projectors, so
 discovery, settings and the engines handle it like any other model folder.
+
+A GGUF of the qwen35 tokenizer profile also gets a tokenizer.json derived
+from its header, as Splash (https://github.com/incoai/splash, Apache-2.0)
+derives it in install/gguf.py.
 """
 
 from __future__ import annotations
@@ -19,6 +23,17 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from tokenizers import (
+    AddedToken,
+    Regex,
+    Tokenizer,
+    decoders,
+    normalizers,
+    pre_tokenizers,
+    processors,
+)
+from tokenizers import models as token_models
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +73,22 @@ _HF_MODEL_TYPES = {"qwen35": "qwen3_5", "qwen35moe": "qwen3_5_moe"}
 CONFIG_FILE = "config.json"
 _CHAT_TEMPLATE_FILE = "chat_template.jinja"
 _GENERATION_CONFIG_FILE = "generation_config.json"
+# Changes the generated folders' names, so a new layout rebuilds them.
+_FOLDER_LAYOUT = 1
+
+# The qwen35 pre-tokenizer: Qwen2's letter class extended to combining
+# marks, then byte-level BPE.
+_QWEN35_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}"
+    r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+# GGUF token types: control tokens are special added tokens, user-defined
+# ones added tokens that are not special.
+_CONTROL_TOKEN = 3
+_USER_DEFINED_TOKEN = 4
+_TOKENIZER_ARRAYS = frozenset(
+    {"tokenizer.ggml.tokens", "tokenizer.ggml.token_type", "tokenizer.ggml.merges"}
+)
 
 
 class GgufError(ValueError):
@@ -262,6 +293,10 @@ def derive_config(
         # MTP layers are not part of the model the engines run.
         layers -= field("nextn_predict_layers") or 0
     tokens = metadata.get("tokenizer.ggml.tokens")
+    if isinstance(tokens, ArrayInfo):
+        vocab_size = tokens.length
+    else:
+        vocab_size = len(tokens) if isinstance(tokens, list) else None
     text = {
         "hidden_size": field("embedding_length"),
         "num_hidden_layers": layers,
@@ -272,7 +307,7 @@ def derive_config(
         "full_attention_interval": field("full_attention_interval"),
         "num_experts": field("expert_count"),
         "num_experts_per_tok": field("expert_used_count"),
-        "vocab_size": tokens.length if isinstance(tokens, ArrayInfo) else None,
+        "vocab_size": vocab_size,
     }
     hf_type = _HF_MODEL_TYPES.get(arch)
     text = {key: value for key, value in text.items() if value is not None}
@@ -284,6 +319,85 @@ def derive_config(
             vision["projector_type"] = projector["clip.projector_type"]
         config["vision_config"] = vision
     return config
+
+
+def has_qwen35_tokenizer(metadata: dict[str, Any]) -> bool:
+    return (
+        metadata.get("tokenizer.ggml.model") == "gpt2"
+        and metadata.get("tokenizer.ggml.pre") == "qwen35"
+    )
+
+
+def tokenizer_files(metadata: dict[str, Any]) -> dict[str, str]:
+    """tokenizer.json and tokenizer_config.json of a qwen35-profile GGUF.
+
+    ``metadata`` must hold the tokenizer arrays (``_TOKENIZER_ARRAYS``).
+    """
+    tokens = metadata["tokenizer.ggml.tokens"]
+    types = metadata["tokenizer.ggml.token_type"]
+    merges = metadata["tokenizer.ggml.merges"]
+    if len(types) != len(tokens) or len(set(tokens)) != len(tokens):
+        raise GgufError("invalid GGUF tokenizer vocabulary")
+    pairs = [tuple(merge.split(" ", 1)) for merge in merges]
+    if any(len(pair) != 2 for pair in pairs):
+        raise GgufError("invalid GGUF BPE merge")
+    backend = Tokenizer(
+        token_models.BPE({token: i for i, token in enumerate(tokens)}, pairs)
+    )
+    backend.normalizer = normalizers.NFC()
+    backend.pre_tokenizer = pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Split(Regex(_QWEN35_PATTERN), behavior="isolated"),
+            pre_tokenizers.ByteLevel(
+                add_prefix_space=False, use_regex=False, trim_offsets=False
+            ),
+        ]
+    )
+    backend.post_processor = processors.ByteLevel(
+        add_prefix_space=False, use_regex=False, trim_offsets=False
+    )
+    backend.decoder = decoders.ByteLevel()
+    # Index of each added token -> whether it is special.
+    added = {
+        index: kind == _CONTROL_TOKEN
+        for index, kind in enumerate(types)
+        if kind in (_CONTROL_TOKEN, _USER_DEFINED_TOKEN)
+    }
+    backend.add_tokens(
+        [
+            AddedToken(tokens[index], normalized=False, special=special)
+            for index, special in added.items()
+        ]
+    )
+
+    def special_token(name: str) -> str | None:
+        index = _int(metadata.get(f"tokenizer.ggml.{name}_token_id"))
+        return tokens[index] if index is not None and 0 <= index < len(tokens) else None
+
+    arch = metadata.get("general.architecture")
+    config = {
+        "tokenizer_class": "TokenizersBackend",
+        "model_max_length": _int(metadata.get(f"{arch}.context_length")),
+        "clean_up_tokenization_spaces": False,
+        "bos_token": special_token("bos"),
+        "eos_token": special_token("eos"),
+        "pad_token": special_token("padding"),
+        "added_tokens_decoder": {
+            str(index): {
+                "content": tokens[index],
+                "special": special,
+                "normalized": False,
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+            }
+            for index, special in added.items()
+        },
+    }
+    return {
+        "tokenizer.json": backend.to_str(),
+        "tokenizer_config.json": json.dumps(config),
+    }
 
 
 def _generation_config(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -303,7 +417,7 @@ def _generation_config(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def _folder_name(model: GgufModel) -> str:
     """Name that changes whenever the model's files change."""
-    digest = hashlib.sha1()
+    digest = hashlib.sha1(f"layout {_FOLDER_LAYOUT}\n".encode())
     for path in (*model.parts, *model.projectors):
         stat = path.stat()
         digest.update(f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
@@ -324,6 +438,10 @@ def prepare_model_folder(model: GgufModel, root: Path) -> Path:
     if (folder / CONFIG_FILE).is_file():
         return folder
     metadata = read_metadata(model.path)
+    tokenizer = {}
+    if has_qwen35_tokenizer(metadata):
+        metadata = read_metadata(model.path, keep_arrays=_TOKENIZER_ARRAYS)
+        tokenizer = tokenizer_files(metadata)
     projector = read_metadata(model.projectors[0]) if model.projectors else None
     config = derive_config(metadata, projector)
     config["omlx_gguf"] = {
@@ -343,6 +461,8 @@ def prepare_model_folder(model: GgufModel, root: Path) -> Path:
     generation = _generation_config(metadata)
     if generation:
         (partial / _GENERATION_CONFIG_FILE).write_text(json.dumps(generation))
+    for name, text in tokenizer.items():
+        (partial / name).write_text(text)
     try:
         partial.rename(folder)
     except OSError:

@@ -19,6 +19,8 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from tokenizers import pre_tokenizers
+from transformers import AutoTokenizer
 
 import omlx.server as srv
 from omlx.admin import routes as admin_routes
@@ -53,6 +55,7 @@ from omlx.engine.splash import (
 )
 from omlx.engine_pool import EngineEntry, EnginePool
 from omlx.exceptions import InvalidRequestError, ModelLoadingError
+from omlx.model_discovery import discover_models
 from omlx.model_settings import ModelSettings
 from omlx.settings import GlobalSettings
 from omlx.utils.proc_memory import list_process_group_pids
@@ -266,6 +269,73 @@ SPLASH_REPO_ID = re.compile(
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?/"
     r"[A-Za-z0-9_](?:[A-Za-z0-9._-]{0,94}[A-Za-z0-9_])?"
 )
+
+
+def _qwen38_gguf(vocab: list[str]) -> dict:
+    return {
+        "general.architecture": "qwen35",
+        "qwen35.block_count": 64,
+        "qwen35.context_length": 262144,
+        "qwen35.embedding_length": 5120,
+        "qwen35.attention.head_count": 24,
+        "qwen35.attention.head_count_kv": 4,
+        "qwen35.attention.key_length": 256,
+        "qwen35.full_attention_interval": 4,
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen35",
+        "tokenizer.ggml.tokens": vocab,
+        "tokenizer.ggml.token_type": [3 if t.startswith("<|") else 1 for t in vocab],
+        "tokenizer.ggml.merges": [],
+        "tokenizer.ggml.eos_token_id": vocab.index("<|im_end|>"),
+        "tokenizer.chat_template": (
+            "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}"
+            "<|im_end|>\n{% endfor %}"
+            "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+        ),
+    }
+
+
+class TestGguf:
+    def test_qwen_gguf_serves_on_splash_with_a_derived_tokenizer(
+        self, tmp_path, monkeypatch, launchers, write_gguf
+    ):
+        # A small vocabulary keeps the derived tokenizer cheap to build.
+        monkeypatch.setitem(splash_mod.SPLASH_FAMILIES["Qwen3.8-27B"], "vocab_size", 300)
+        alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+        specials = ["<|im_start|>", "<|im_end|>"]
+        vocab = alphabet + specials + [f"t{i}" for i in range(300 - 258)]
+        launchers("splash", version="1.3.2")
+        repo = tmp_path / "models" / "unsloth" / "Qwen3.8-27B-GGUF"
+        metadata = _qwen38_gguf(vocab)
+        write_gguf(repo / "Qwen3.8-27B-UD-Q4_K_M.gguf", metadata)
+        write_gguf(repo / "Qwen3.8-27B-BF16-00001-of-00002.gguf", metadata)
+        write_gguf(repo / "Qwen3.8-27B-BF16-00002-of-00002.gguf", {})
+        write_gguf(repo / "mmproj-BF16.gguf", {"general.architecture": "clip"}, size=512)
+        draft = _write_draft(tmp_path / "draft", {**QWEN38_TEXT, "vocab_size": 300})
+
+        models = discover_models(tmp_path / "models", tmp_path / "gguf")
+        folder = models["Qwen3.8-27B-UD-Q4_K_M"].model_path
+        target, reason = resolve_splash_target(folder, None, [str(draft)])
+
+        assert reason == ""
+        assert target.family == "Qwen3.8-27B"
+        gguf_bytes = (repo / "Qwen3.8-27B-UD-Q4_K_M.gguf").stat().st_size
+        assert splash_mod._weight_bytes(Path(folder)) == gguf_bytes + 512
+        split = models["Qwen3.8-27B-BF16"].model_path
+        assert resolve_splash_target(split, None, [str(draft)]) == (
+            None,
+            "Splash serves single-file GGUFs only",
+        )
+
+        # The tokenizer comes from the GGUF header, chat template included.
+        tokenizer = AutoTokenizer.from_pretrained(folder)
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "hi"}], tokenize=False, add_generation_prompt=True
+        )
+        assert prompt == "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+        assert tokenizer.decode(tokenizer.encode(prompt)) == prompt
+        assert tokenizer.encode("<|im_end|>") == [vocab.index("<|im_end|>")]
+        assert tokenizer.eos_token == "<|im_end|>"
 
 
 class TestStaging:

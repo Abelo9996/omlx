@@ -374,9 +374,15 @@ def resolve_splash_target(
     family = splash_family(config)
     if family is None:
         return None, f"Splash serves {' and '.join(SPLASH_FAMILIES)} only"
-    problem = _quantization_problem(config, binary)
-    if problem:
-        return None, problem
+    source = _gguf_source(config)
+    if source is not None:
+        # Splash checks a GGUF's tensor types itself when it loads the file.
+        if len(source.get("parts") or []) > 1:
+            return None, "Splash serves single-file GGUFs only"
+    else:
+        problem = _quantization_problem(config, binary)
+        if problem:
+            return None, problem
     missing = [name for name in _REQUIRED_MODEL_FILES if not (path / name).is_file()]
     if missing:
         return None, f"Splash needs {', '.join(missing)} in the model folder"
@@ -394,6 +400,22 @@ def resolve_splash_target(
 
 def _safetensors_bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in path.glob("*.safetensors"))
+
+
+def _gguf_source(config: dict) -> dict | None:
+    """The GGUF a generated model folder links to (omlx/gguf.py), or None."""
+    source = config.get("omlx_gguf")
+    return source if isinstance(source, dict) else None
+
+
+def _weight_bytes(path: Path) -> int:
+    """Bytes of the weights Splash loads: the safetensors, or for a GGUF its
+    file and the projector Splash pairs it with."""
+    source = _gguf_source(_read_config(path) or {})
+    if source is None:
+        return _safetensors_bytes(path)
+    names = [*(source.get("parts") or []), *(source.get("projectors") or [])[:1]]
+    return sum((path / name).stat().st_size for name in names)
 
 
 def _kv_bytes_per_token(text: dict, kv_format: str) -> int:
@@ -425,7 +447,7 @@ def splash_memory_estimate(
     context = min(max_context or SPLASH_MAX_CONTEXT, SPLASH_MAX_CONTEXT)
     kv = _kv_bytes_per_token(text, kv_format) * context
     draft = int(_safetensors_bytes(draft_path) * _DRAFT_LOAD_RATIO)
-    return _safetensors_bytes(path) + draft + _RUNTIME_RESERVE_BYTES + kv
+    return _weight_bytes(path) + draft + _RUNTIME_RESERVE_BYTES + kv
 
 
 # -- model staging -------------------------------------------------------------
@@ -1369,7 +1391,12 @@ class SplashEngine(BaseEngine):
 
     def _weights_bytes(self) -> int:
         if self._weights_size is None:
-            self._weights_size = sum(f.stat().st_size for f in _model_files(self._path))
+            if _gguf_source(_read_config(self._path) or {}) is not None:
+                self._weights_size = _weight_bytes(self._path)
+            else:
+                self._weights_size = sum(
+                    f.stat().st_size for f in _model_files(self._path)
+                )
         return self._weights_size
 
     def _reported_memory(self, key: str) -> int:
