@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 import mlx.core as mx
 
+from . import gguf
 from .engine import BaseEngine, BatchedEngine
 from .engine.decision import DecisionEngine
 from .engine.embedding import EmbeddingEngine
@@ -43,6 +44,7 @@ from .engine.splash import (
     SplashTarget,
     find_splash_binary,
     resolve_splash_target,
+    splash_draft_to_download,
     splash_memory_estimate,
     splash_repo_id,
 )
@@ -89,6 +91,14 @@ from .utils.model_loading import (
 from .utils.proc_memory import get_phys_footprint
 
 logger = logging.getLogger(__name__)
+
+
+def _gguf_model_root() -> Path | None:
+    """Where GGUF model folders are generated; None before settings load."""
+    try:
+        return get_global_settings().base_path / "gguf"
+    except RuntimeError:
+        return None
 
 
 def _touch_gpu() -> None:
@@ -372,6 +382,8 @@ class EngineEntry:
     source_type: str = "local"
     source_repo_id: str | None = None
     is_helper: bool = False  # Speculative-decoding drafter (dFlash/Assistant/MTP)
+    model_format: str | None = None  # "gguf": served by an external engine only
+    source_path: str | None = None  # The GGUF file a generated folder links to
     engine: (
         BaseEngine
         | EmbeddingEngine
@@ -584,7 +596,7 @@ class EnginePool:
         base = self._entry_resident_size(entry) if base_size is None else base_size
         if self._distributed_deployment_for_entry(entry) is not None:
             return base
-        if getattr(runtime_settings, "external_engine", None):
+        if self.external_engine_id(entry.model_id, runtime_settings):
             # Splash plans its own budget; none of the MLX reservations apply.
             target, _ = self.splash_target(entry.model_id, runtime_settings)
             if target is not None:
@@ -1396,10 +1408,11 @@ class EnginePool:
             dirs = [Path(d) for d in model_dirs]
         self._model_dirs = dirs
 
+        gguf_root = _gguf_model_root()
         if len(dirs) == 1:
-            discovered = discover_models(dirs[0])
+            discovered = discover_models(dirs[0], gguf_root)
         else:
-            discovered = discover_models_from_dirs(dirs)
+            discovered = discover_models_from_dirs(dirs, gguf_root)
 
         pinned_set = set(pinned_models or [])
 
@@ -1431,6 +1444,8 @@ class EnginePool:
                     source_type=getattr(info, "source_type", "local"),
                     source_repo_id=getattr(info, "source_repo_id", None),
                     is_helper=getattr(info, "is_helper", False),
+                    model_format=getattr(info, "model_format", None),
+                    source_path=getattr(info, "source_path", None),
                     is_pinned=model_id in pinned_set,
                 )
 
@@ -1449,6 +1464,13 @@ class EnginePool:
         ]
         for mid in stale:
             del self._entries[mid]
+        if gguf_root is not None:
+            # Loaded models keep their folder until they unload.
+            in_use = [
+                *(entry.model_path for entry in self._entries.values()),
+                *(info.model_path for info in discovered.values()),
+            ]
+            gguf.prune_model_folders(gguf_root, {Path(path).name for path in in_use})
 
         # Warn about pinned models not found
         found_models = set(self._entries.keys())
@@ -1765,7 +1787,12 @@ class EnginePool:
     ) -> None:
         """Drop stale unloaded entries whose backing model directory vanished."""
         model_path = Path(entry.model_path)
-        if model_path.exists() and (model_path / "config.json").exists():
+        source = entry.source_path
+        if (
+            model_path.exists()
+            and (model_path / "config.json").exists()
+            and (source is None or Path(source).exists())
+        ):
             return
 
         if entry.engine is None:
@@ -2008,6 +2035,19 @@ class EnginePool:
             self._splash_draft_candidates(model_settings),
         )
 
+    def splash_draft_to_download(
+        self, model_id: str, model_settings: object | None
+    ) -> str | None:
+        """The DFlash2 draft repo ``model_id`` lacks for Splash, or None."""
+        entry = self._entries.get(model_id)
+        if entry is None:
+            return None
+        return splash_draft_to_download(
+            entry.model_path,
+            get_global_settings().integrations.splash_path,
+            self._splash_draft_candidates(model_settings),
+        )
+
     def _splash_sizing_context(
         self, entry: EngineEntry, model_settings: object | None
     ) -> int | None:
@@ -2081,10 +2121,34 @@ class EnginePool:
             get_settings = getattr(self._settings_manager, "get_settings", None)
             if callable(get_settings):
                 settings = get_settings(model_id)
-        if getattr(settings, "external_engine", None):
+        if self.external_engine_id(model_id, settings):
             await asyncio.to_thread(
                 find_splash_binary, get_global_settings().integrations.splash_path
             )
+
+    async def external_engine_problem(
+        self, model_id: str, model_settings: object | None
+    ) -> str:
+        """Why no external engine can serve ``model_id``; empty when one can."""
+        await self._check_splash_launcher(model_id, model_settings)
+        _, reason = self.splash_target(model_id, model_settings)
+        return reason
+
+    def external_engine_id(
+        self, model_id: str, model_settings: object | None
+    ) -> str | None:
+        """The external engine that serves ``model_id``, else None.
+
+        A GGUF, which no in-process engine loads, falls back to the default
+        external engine when its settings pick none.
+        """
+        engine_id = getattr(model_settings, "external_engine", None)
+        if engine_id:
+            return engine_id
+        entry = self._entries.get(model_id)
+        if entry is not None and entry.model_format == "gguf":
+            return next(iter(EXTERNAL_ENGINES))
+        return None
 
     def _external_engine_for(
         self,
@@ -2097,7 +2161,7 @@ class EnginePool:
         A model that cannot run on its selected engine fails to load with the
         reason instead of falling back to MLX, since the user asked for it.
         """
-        engine_id = getattr(model_settings, "external_engine", None)
+        engine_id = self.external_engine_id(entry.model_id, model_settings)
         if not engine_id:
             return None
         if engine_id not in EXTERNAL_ENGINES:
@@ -4436,6 +4500,8 @@ class EnginePool:
                     "reasoning_efforts": e.reasoning_efforts,
                     "source_type": e.source_type,
                     "source_repo_id": e.source_repo_id,
+                    "model_format": e.model_format,
+                    "source_path": e.source_path,
                     "last_access": e.last_access if e.last_access > 0 else None,
                 }
             )

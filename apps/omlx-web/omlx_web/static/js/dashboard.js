@@ -301,6 +301,7 @@
                 qwen35_oq_a8_min_tokens: 128,
                 external_engine: '',
                 external_engines: [],
+                model_format: null,
                 trust_remote_code: false,
                 embedding_audio_enabled: false,
                 embedding_audio_max_seconds: null,
@@ -491,7 +492,9 @@
             hfRecommendedLoaded: false,
             hfRecommendedLoading: false,
             hfRecommendedTab: 'trending',
-            hfMlxOnly: true,
+            // Downloader repo filter: 'mlx', 'gguf' or 'all'.
+            hfModelFormat: ['mlx', 'gguf', 'all'].includes(localStorage.getItem('hfModelFormat'))
+                ? localStorage.getItem('hfModelFormat') : 'mlx',
 
             // Pagination state
             hfPage: { trending: 1, popular: 1, search: 1 },
@@ -526,6 +529,9 @@
             // Model detail modal
             hfModelDetail: null,
             hfModelDetailLoading: false,
+            hfDetailTab: 'card',
+            // File name -> picked for download, for the detail modal's Files tab.
+            hfSelectedFiles: {},
 
             // Recommended (hardware-aware oQ picks) state
             recommendations: null,
@@ -809,7 +815,8 @@
                     }
                 });
 
-                this.$watch('hfMlxOnly', () => {
+                this.$watch('hfModelFormat', (value) => {
+                    localStorage.setItem('hfModelFormat', value);
                     this.hfRecommended = { trending: [], popular: [] };
                     this.hfRecommendedLoaded = false;
                     this.hfSearchResults = [];
@@ -2219,6 +2226,7 @@
                     is_diffusion_model: isDiffusion,
                     external_engine: s.external_engine || '',
                     external_engines: model?.external_engines || [],
+                    model_format: model?.model_format || null,
                     trust_remote_code: s.trust_remote_code || false,
                     embedding_audio_enabled: s.embedding_audio_enabled || false,
                     embedding_audio_max_seconds: s.embedding_audio_max_seconds ?? null,
@@ -4341,9 +4349,48 @@
                 return usable ? usable.id : '';
             },
 
+            isGgufModel() {
+                return this.modelSettings.model_format === 'gguf';
+            },
+
+            // A GGUF runs on an external engine even when its settings pick none.
+            effectiveExternalEngine() {
+                if (this.modelSettings.external_engine) return this.modelSettings.external_engine;
+                if (!this.isGgufModel()) return '';
+                return this.firstUsableExternalEngine() || this.modelSettings.external_engines?.[0]?.id || '';
+            },
+
+            externalEngineDraftRepo() {
+                const engines = this.modelSettings.external_engines || [];
+                const engine = engines.find(e => e.id === this.effectiveExternalEngine()) || engines[0];
+                return engine && !engine.compatible ? engine.draft_repo || '' : '';
+            },
+
+            async downloadEngineDraft() {
+                const repoId = this.externalEngineDraftRepo();
+                if (!repoId) return;
+                try {
+                    const response = await fetch('/admin/api/hf/download', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ repo_id: repoId, hf_token: this.hfToken }),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        alert(data.detail || window.t('js.error.start_download_failed'));
+                        return;
+                    }
+                    alert(window.t('js.success.download_started').replace('{repo_id}', repoId));
+                    await this.loadHFTasks();
+                    this.startHFRefresh();
+                } catch (err) {
+                    alert(window.t('js.error.hf_connect_failed'));
+                }
+            },
+
             externalEngineReason() {
                 const engines = this.modelSettings.external_engines || [];
-                const selected = engines.find(e => e.id === this.modelSettings.external_engine);
+                const selected = engines.find(e => e.id === this.effectiveExternalEngine());
                 if (selected) return selected.compatible ? '' : selected.reason;
                 return engines.some(e => e.compatible) ? '' : (engines[0]?.reason || '');
             },
@@ -6992,8 +7039,14 @@
             // HuggingFace Downloader Functions
             // =================================================================
 
-            async startHFDownload() {
+            startHFDownload() {
                 const repoId = this.hfRepoId.trim();
+                if (!repoId) return;
+                this.openModelDetail(repoId, 'files');
+            },
+
+            async submitHFDownload(files) {
+                const repoId = this.hfModelDetail?.repo_id;
                 if (!repoId) return;
 
                 this.hfError = '';
@@ -7009,13 +7062,15 @@
                         body: JSON.stringify({
                             repo_id: repoId,
                             hf_token: this.hfToken,
+                            files,
                         }),
                         signal: controller.signal,
                     });
 
                     if (response.ok) {
                         this.hfSuccess = window.t('js.success.download_started').replace('{repo_id}', repoId);
-                        this.hfRepoId = '';
+                        if (this.hfRepoId.trim().toLowerCase() === repoId.toLowerCase()) this.hfRepoId = '';
+                        this.closeModelDetail();
                         await this.loadHFTasks();
                         this.startHFRefresh();
                         setTimeout(() => { this.hfSuccess = ''; }, 5000);
@@ -7616,7 +7671,7 @@
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
                 try {
-                    const response = await fetch(`/admin/api/hf/recommended?mlx_only=${this.hfMlxOnly}`, { signal: controller.signal });
+                    const response = await fetch(`/admin/api/hf/recommended?model_format=${this.hfModelFormat}`, { signal: controller.signal });
                     if (response.ok) {
                         const data = await response.json();
                         this.hfTokenInvalid = !!data.hf_token_invalid;
@@ -7652,9 +7707,25 @@
                 }
             },
 
+            // The GGUF model files a task fetches, shown beside its repo.
+            taskGgufFiles(task) {
+                return (task.files || [])
+                    .filter(name => !name.includes('/') && name.toLowerCase().endsWith('.gguf')
+                        && !name.toLowerCase().includes('mmproj'))
+                    .join(', ');
+            },
+
+            // The model ID a finished download serves under: a GGUF's file name.
+            taskModelId(task) {
+                const name = (task.files || []).find(f => !f.includes('/')
+                    && f.toLowerCase().endsWith('.gguf') && !f.toLowerCase().includes('mmproj'));
+                if (!name) return task.repo_id.split('/').pop();
+                return name.replace(/(-\d{5}-of-\d{5})?\.gguf$/i, '');
+            },
+
+            // Every download picks its files in the detail modal first.
             downloadRecommended(repoId) {
-                this.hfRepoId = repoId;
-                this.startHFDownload();
+                this.openModelDetail(repoId, 'files');
             },
 
             isModelDownloaded(repoId) {
@@ -8028,7 +8099,7 @@
                         q: this.hfSearchQuery,
                         sort: this.hfSearchSort,
                         limit: '100',
-                        mlx_only: this.hfMlxOnly,
+                        model_format: this.hfModelFormat,
                     });
                     // Add filter parameters if set. Sizes use binary GiB to match
                     // _format_model_size on the backend.
@@ -8123,30 +8194,40 @@
             },
 
             // Model detail modal
-            async openModelDetail(repoId) {
+            async openModelDetail(repoId, tab = 'card') {
                 this.hfModelDetailLoading = true;
                 this.hfModelDetail = null;
+                this.hfDetailTab = tab;
+                this.hfSelectedFiles = {};
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 15000);
+                // A download still starts when the file list does not load.
+                const unavailable = (message) => {
+                    if (tab !== 'files') {
+                        this.hfError = message;
+                        setTimeout(() => { this.hfError = ''; }, 5000);
+                        return;
+                    }
+                    this.hfModelDetail = { repo_id: repoId, files: [], tags: [], layout: 'other',
+                                           downloads: 0, likes: 0, download_all_size: 0,
+                                           unavailable: message };
+                };
                 try {
                     const params = new URLSearchParams({ repo_id: repoId });
-                    const response = await fetch(`/admin/api/hf/model-info?${params}`, { signal: controller.signal });
+                    const headers = this.hfToken ? { 'X-HF-Token': this.hfToken } : {};
+                    const response = await fetch(`/admin/api/hf/model-info?${params}`, { headers, signal: controller.signal });
                     if (response.ok) {
                         this.hfModelDetail = await response.json();
+                        this.resetHfSelection();
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
                     } else {
                         const data = await response.json().catch(() => ({}));
-                        this.hfError = data.detail || window.t('js.error.fetch_model_info_failed');
-                        setTimeout(() => { this.hfError = ''; }, 5000);
+                        unavailable(data.detail || window.t('js.error.fetch_model_info_failed'));
                     }
                 } catch (err) {
-                    if (err.name === 'AbortError') {
-                        this.hfError = window.t('js.error.hf_timeout');
-                    } else {
-                        this.hfError = window.t('js.error.hf_connect_failed');
-                    }
-                    setTimeout(() => { this.hfError = ''; }, 5000);
+                    unavailable(err.name === 'AbortError'
+                        ? window.t('js.error.hf_timeout') : window.t('js.error.hf_connect_failed'));
                     console.error('Failed to fetch model info:', err);
                 } finally {
                     clearTimeout(timeoutId);
@@ -8159,6 +8240,73 @@
                 this.hfModelDetailLoading = false;
                 this.msModelDetail = null;
                 this.msModelDetailLoading = false;
+            },
+
+            // A selection starts from what "download all" fetches; GGUF repos start empty.
+            resetHfSelection() {
+                const picked = {};
+                for (const file of this.hfModelDetail?.files || []) {
+                    if (file.preselected && !file.local) picked[file.name] = true;
+                }
+                this.hfSelectedFiles = picked;
+            },
+
+            isHfFileLocked(file) {
+                return file.required || file.local;
+            },
+
+            isHfFileSelected(file) {
+                return !file.local && (file.required || !!this.hfSelectedFiles[file.name]);
+            },
+
+            // A split GGUF's parts toggle together; a GGUF brings its vision projector.
+            toggleHfFile(file) {
+                if (this.isHfFileLocked(file)) return;
+                const files = this.hfModelDetail.files;
+                const on = !this.hfSelectedFiles[file.name];
+                const picked = { ...this.hfSelectedFiles };
+                const members = file.group ? files.filter(f => f.group === file.group) : [file];
+                for (const member of members) {
+                    if (!member.local) picked[member.name] = on;
+                }
+                const projector = on && file.mmproj && files.find(f => f.name === file.mmproj);
+                if (projector && !projector.local) picked[projector.name] = true;
+                this.hfSelectedFiles = picked;
+            },
+
+            hfSelectedNames() {
+                return (this.hfModelDetail?.files || [])
+                    .filter(file => this.isHfFileSelected(file))
+                    .map(file => file.name);
+            },
+
+            hfSelectionSize() {
+                return (this.hfModelDetail?.files || [])
+                    .filter(file => this.isHfFileSelected(file))
+                    .reduce((total, file) => total + (file.size || 0), 0);
+            },
+
+            // A split GGUF loads as one model: size the whole set.
+            hfFileSize(file) {
+                if (!file.group) return file.size || 0;
+                return this.hfModelDetail.files
+                    .filter(f => f.group === file.group)
+                    .reduce((total, f) => total + (f.size || 0), 0);
+            },
+
+            // What "download all" still has to fetch: its files not downloaded yet.
+            hfDownloadAllSize() {
+                const detail = this.hfModelDetail;
+                if (!detail?.files?.length) return detail?.download_all_size || 0;
+                const fetched = detail.layout === 'safetensors' ? (f => f.preselected) : (() => true);
+                return detail.files
+                    .filter(f => fetched(f) && !f.local)
+                    .reduce((total, f) => total + (f.size || 0), 0);
+            },
+
+            hfFitsDisk(bytes) {
+                const free = this.hfModelDetail?.disk_free;
+                return !free || bytes <= free;
             },
 
             formatFileSize(bytes) {

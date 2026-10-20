@@ -22,6 +22,8 @@ struct HFTaskDTO: Codable, Equatable, Sendable, Identifiable {
     let startedAt: Double
     let completedAt: Double
     let retryCount: Int
+    /// Repo paths the task fetches; nil for the whole repo.
+    let files: [String]?
 
     var id: String { taskId }
 
@@ -50,6 +52,14 @@ struct HFTaskDTO: Codable, Equatable, Sendable, Identifiable {
         return "\(s)s"
     }
 
+    /// The GGUF model files a selection fetches, shown beside the repo.
+    var ggufFilesText: String? {
+        let names = (files ?? []).filter {
+            !$0.contains("/") && $0.lowercased().hasSuffix(".gguf") && !$0.lowercased().contains("mmproj")
+        }
+        return names.isEmpty ? nil : names.joined(separator: ", ")
+    }
+
     enum Status: String {
         case pending, downloading, completed, failed, cancelled, paused
     }
@@ -60,9 +70,15 @@ struct HFTaskDTO: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// The Hugging Face downloader's repo filter for search and suggestions.
+enum HFModelFormat: String, CaseIterable, Hashable, Sendable {
+    case mlx, gguf, all
+}
+
 struct StartHFDownloadRequest: Encodable, Sendable {
     let repoId: String
     let hfToken: String
+    let files: [String]?
 }
 
 struct StartHFDownloadResponse: Decodable, Sendable {
@@ -97,6 +113,8 @@ struct HFModelInfo: Codable, Equatable, Sendable, Identifiable {
     let sizeFormatted: String?
     let params: Int64?
     let paramsFormatted: String?
+    /// GGUF architecture from the Hub metadata, e.g. "qwen35".
+    let architecture: String?
 
     var id: String { repoId }
 }

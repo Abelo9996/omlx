@@ -39,6 +39,7 @@ from omlx.admin.hf_downloader import (
     _make_cancellable_tqdm,
     _sum_safetensors_blob_bytes,
 )
+from omlx.engine_pool import EnginePool
 
 
 @pytest.fixture(autouse=True)
@@ -1877,6 +1878,79 @@ class TestHFDownloaderRoutes:
             assert plain.exists()
 
     @pytest.mark.asyncio
+    async def test_gguf_models_list_and_delete_one_file_at_a_time(
+        self, tmp_path, write_gguf
+    ):
+        models_dir = tmp_path / "models"
+        repo = models_dir / "unsloth" / "Q-GGUF"
+        for name, size in (("Q-Q4_K_M.gguf", 100), ("Q-Q8_0.gguf", 200)):
+            write_gguf(repo / name, {"general.architecture": "qwen35"}, size=size)
+        write_gguf(repo / "mmproj-BF16.gguf", {"general.architecture": "clip"}, size=10)
+        # Part 1 of an unfinished split download: no model stands for it.
+        write_gguf(repo / "Q-BF16-00001-of-00002.gguf", {}, size=50)
+        (repo / "README.md").write_text("card")
+        base = SimpleNamespace(base_path=tmp_path / "base")
+        pool = EnginePool()
+        settings = MagicMock()
+        settings.get_effective_model_dirs.return_value = [models_dir]
+        downloader = HFDownloader(model_dir=str(models_dir))
+        q8_download = DownloadTask(
+            task_id="t-q8",
+            repo_id="unsloth/Q-GGUF",
+            status=DownloadStatus.DOWNLOADING,
+            files=["Q-Q8_0.gguf"],
+        )
+        downloader._tasks[q8_download.task_id] = q8_download
+        downloader._active_tasks[q8_download.task_id] = asyncio.create_task(
+            asyncio.sleep(60)
+        )
+
+        with patch(
+            "omlx.engine_pool.get_global_settings", return_value=base
+        ), patch("omlx.admin.hf_downloader.abort_xet_session"), patch.multiple(
+            admin_routes,
+            _get_global_settings=lambda: settings,
+            _get_engine_pool=lambda: pool,
+            _get_settings_manager=lambda: None,
+            _hf_downloader=downloader,
+        ):
+            pool.discover_models([str(models_dir)])
+            rows = (await admin_routes.list_hf_models(is_admin=True))["models"]
+            listed = [
+                (r["display_name"], r["model_format"], r["repo_id"]) for r in rows
+            ]
+            assert listed == [
+                ("unsloth/Q-GGUF", "gguf", None),
+                ("unsloth/Q-Q4_K_M", "gguf", None),
+                ("unsloth/Q-Q8_0", "gguf", None),
+            ]
+
+            await admin_routes.delete_hf_model("Q-Q4_K_M", is_admin=True)
+            assert sorted(p.name for p in repo.iterdir()) == [
+                "Q-BF16-00001-of-00002.gguf",
+                "Q-Q8_0.gguf",
+                "README.md",
+                "mmproj-BF16.gguf",
+            ]
+            assert set(pool._entries) == {"Q-Q8_0"}
+            # A download of another file in the folder goes on.
+            assert q8_download.status == DownloadStatus.DOWNLOADING
+
+            # Its projector goes with the last model; the split part stays.
+            await admin_routes.delete_hf_model("Q-Q8_0", is_admin=True)
+            assert sorted(p.name for p in repo.iterdir()) == [
+                "Q-BF16-00001-of-00002.gguf",
+                "README.md",
+            ]
+            assert pool._entries == {}
+            assert q8_download.status == DownloadStatus.CANCELLED
+            assert list((tmp_path / "base" / "gguf").iterdir()) == []
+
+            # The folder row deletes what is left, and the empty org folder.
+            await admin_routes.delete_hf_model("Q-GGUF", is_admin=True)
+            assert not (models_dir / "unsloth").exists()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("target_inside_hub", [False, True])
     async def test_delete_refuses_symlinked_hf_cache_repo(
         self, tmp_path, target_inside_hub
@@ -3492,7 +3566,7 @@ class TestStallDetection:
         downloader, task = _downloading_task(model_dir, task_id="t1")
         calls = 0
 
-        def zero_byte_temp(_path):
+        def zero_byte_temp(_path, _only=None):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -3976,7 +4050,7 @@ class TestMtimeActivityDetection:
         downloader = HFDownloader(model_dir=str(model_dir))
         call_count = 0
 
-        def active_download(_path):
+        def active_download(_path, _only=None):
             nonlocal call_count
             call_count += 1
             return _DownloadActivity(
@@ -4045,7 +4119,7 @@ class TestDownloadSpeed:
         """
         state = {"allocated": 0}
 
-        def scan(_path):
+        def scan(_path, _only=None):
             state["allocated"] += step
             return _DownloadActivity(
                 file_count=1,
@@ -4094,7 +4168,7 @@ class TestDownloadSpeed:
         state = {"calls": 0, "allocated": 1_000_000}
         grew_at = []
 
-        def scan(_path):
+        def scan(_path, _only=None):
             state["calls"] += 1
             if state["calls"] > idle_ticks:
                 state["allocated"] += step
@@ -4138,7 +4212,7 @@ class TestDownloadSpeed:
         step = 1_000_000
         disk = {"allocated": 0}
 
-        def scan(_path):
+        def scan(_path, _only=None):
             return _DownloadActivity(
                 file_count=1,
                 logical_size=disk["allocated"],
@@ -4771,3 +4845,155 @@ class TestResolveEndpoint:
         assert r1 == r2 == "https://huggingface.co"
         # Second call was a cache hit — head() count unchanged from first probe.
         assert mock_client.head.call_count == 2
+
+
+def _sibling(name: str, size: int) -> SimpleNamespace:
+    return SimpleNamespace(rfilename=name, size=size)
+
+
+class TestFileSelection:
+    """Downloads of a chosen subset of a repo's files."""
+
+    @pytest.fixture
+    def model_dir(self, tmp_path):
+        d = tmp_path / "models"
+        d.mkdir()
+        return d
+
+    @staticmethod
+    def _gguf_api(siblings):
+        info = MagicMock()
+        info.safetensors = None
+        info.siblings = siblings
+        api = MagicMock()
+        api.model_info.return_value = info
+        return api
+
+    @pytest.mark.asyncio
+    async def test_selection_downloads_only_those_files(self, model_dir):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        siblings = [
+            _sibling("Q-UD-Q4_K_M.gguf", 100),
+            _sibling("Q-Q8_0.gguf", 200),
+            _sibling("mmproj-BF16.gguf", 10),
+        ]
+        files = ["mmproj-BF16.gguf", "Q-UD-Q4_K_M.gguf"]
+        calls = []
+
+        def fake_snapshot_download(**kwargs):
+            calls.append(kwargs)
+            if kwargs.get("dry_run"):
+                return [
+                    SimpleNamespace(
+                        filename=name,
+                        file_size=size,
+                        will_download=True,
+                        commit_hash="c",
+                    )
+                    for name, size in (
+                        ("Q-UD-Q4_K_M.gguf", 100),
+                        ("mmproj-BF16.gguf", 10),
+                    )
+                ]
+
+        with patch(
+            "omlx.admin.hf_downloader._get_hf_api",
+            return_value=(self._gguf_api(siblings), None),
+        ), patch(
+            "omlx.admin.hf_downloader.snapshot_download",
+            side_effect=fake_snapshot_download,
+        ):
+            task = await downloader.start_download("unsloth/Q-GGUF", files=files)
+            await downloader._active_tasks[task.task_id]
+
+        assert task.status == DownloadStatus.COMPLETED
+        assert task.files == sorted(files)
+        assert task.total_size == 110
+        assert [call["allow_patterns"] for call in calls] == [sorted(files)] * 2
+        assert all("ignore_patterns" not in call for call in calls)
+        # The HTTP fallback worker takes the same selection.
+        worker_kwargs = {
+            k: v for k, v in calls[-1].items() if k not in ("tqdm_class", "dry_run")
+        }
+        download = MagicMock()
+        _download_without_xet(worker_kwargs, download)
+        assert download.call_args.kwargs["allow_patterns"] == sorted(files)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("library", "files", "error"),
+        [
+            (None, ["Q-UD-Q4_K_M.gguf"], "Q-UD-Q4_K_M.gguf"),
+            ("splash", None, "Download mlx-community/Qwen3.8-27B-4bit instead"),
+        ],
+    )
+    async def test_refused_download_fails_before_transfer(
+        self, model_dir, library, files, error
+    ):
+        downloader = HFDownloader(model_dir=str(model_dir))
+        api = self._gguf_api([_sibling("Q-Q8_0.gguf", 200)])
+        info = api.model_info.return_value
+        info.library_name = library
+        info.card_data = SimpleNamespace(
+            base_model=["mlx-community/Qwen3.8-27B-4bit", "incoai/Qwen3.8-27B-DFlash2"]
+        )
+
+        with patch(
+            "omlx.admin.hf_downloader._get_hf_api", return_value=(api, None)
+        ), patch("omlx.admin.hf_downloader.snapshot_download") as snapshot:
+            task = await downloader.start_download("owner/model", files=files)
+            await downloader._active_tasks[task.task_id]
+
+        assert task.status == DownloadStatus.FAILED
+        assert error in task.error
+        snapshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_selection_survives_retry_and_restart(self, tmp_path, model_dir):
+        tasks_file = tmp_path / "download_tasks.json"
+        files = ["Q-UD-Q4_K_M.gguf", "mmproj-BF16.gguf"]
+
+        async def no_download(self, task_id, token):
+            return None
+
+        with patch.object(HFDownloader, "_run_download", no_download):
+            downloader = HFDownloader(model_dir=str(model_dir), tasks_file=tasks_file)
+            task = await downloader.start_download("unsloth/Q-GGUF", files=files)
+            with pytest.raises(ValueError, match="already in progress"):
+                await downloader.start_download("Unsloth/q-gguf")
+            task.status = DownloadStatus.FAILED
+            retried = await downloader.retry_download(task.task_id)
+            assert retried.files == files
+
+            restarted = HFDownloader(model_dir=str(model_dir), tasks_file=tasks_file)
+            await restarted.restore_tasks()
+        assert [t.files for t in restarted._tasks.values()] == [files]
+
+    def test_model_info_rows_describe_what_to_select(self):
+        mlx = [
+            {"name": name, "size": 1}
+            for name in (
+                "config.json",
+                "model.safetensors",
+                "README.md",
+                "pytorch_model.bin",
+            )
+        ]
+        assert hf_downloader_mod._describe_repo_files(mlx, None) == "safetensors"
+        required = {row["name"] for row in mlx if row["required"]}
+        assert required == {"config.json", "model.safetensors"}
+        skipped = {row["name"] for row in mlx if not row["preselected"]}
+        assert skipped == {"pytorch_model.bin"}
+
+        gguf = [
+            {"name": "Q-UD-Q4_K_M.gguf", "size": 4},
+            {"name": "BF16/Q-BF16-00001-of-00002.gguf", "size": 8},
+            {"name": "mmproj-F32.gguf", "size": 2},
+            {"name": "mmproj-BF16.gguf", "size": 1},
+        ]
+        assert hf_downloader_mod._describe_repo_files(gguf, None) == "gguf"
+        rows = {row["name"]: row for row in gguf}
+        assert rows["Q-UD-Q4_K_M.gguf"]["mmproj"] == "mmproj-BF16.gguf"
+        # Subfolders hold copies no engine loads as a model.
+        assert rows["BF16/Q-BF16-00001-of-00002.gguf"]["kind"] == "other"
+        assert not any(row["required"] for row in gguf)
