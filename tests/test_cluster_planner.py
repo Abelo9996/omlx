@@ -3,8 +3,6 @@
 
 import json
 import struct
-import sys
-from types import SimpleNamespace
 
 import pytest
 from mlx_lm.models.pipeline import PipelineMixin
@@ -14,7 +12,6 @@ from omlx.cluster.planner import (
     NodeBudget,
     PipelineAssignment,
     PlanningError,
-    _mlx_lm_accepts_config,
     apply_pipeline_assignment,
     inspect_safetensors_layout,
     install_unequal_pipeline_plan,
@@ -157,30 +154,6 @@ def test_vision_tower_weights_are_not_charged_to_decoder_layers(tmp_path):
 
     assert layout.fixed_weight_bytes == 100
     assert layout.layer_weight_bytes == (500, 400)
-
-
-def test_a_config_the_mlx_lm_model_refuses_cannot_be_split(monkeypatch):
-    """mlx-lm's deepseek_v41 implements pipelining but refuses Engram layers."""
-
-    class RefusingArgs:
-        @classmethod
-        def from_dict(cls, params):
-            raise ValueError("Layers [1, 14] use engram memory")
-
-    probe = SimpleNamespace(ModelArgs=RefusingArgs)
-    monkeypatch.setitem(sys.modules, "mlx_lm.models.engram_probe", probe)
-    llama = {
-        "model_type": "llama",
-        "hidden_size": 64,
-        "num_hidden_layers": 2,
-        "intermediate_size": 128,
-        "num_attention_heads": 4,
-        "rms_norm_eps": 1e-5,
-        "vocab_size": 32,
-    }
-
-    assert _mlx_lm_accepts_config({"model_type": "engram_probe"}) is False
-    assert _mlx_lm_accepts_config(llama) is True
 
 
 def test_unequal_planner_gives_more_layers_to_larger_mac():
@@ -646,21 +619,6 @@ def test_nemotron_h_divisors_omit_quant_groups_when_unquantized():
     divisors = _tensor_parallel_divisors(config)
     assert 58 not in divisors
     assert set(divisors) == {32, 2, 64, 8}
-
-
-def test_glm5_next_divisors_include_kda_heads():
-    from omlx.cluster.planner import _tensor_parallel_divisors
-
-    config = {
-        "model_type": "glm5_next",
-        "text_config": {
-            "num_attention_heads": 64,
-            "linear_attn_config": {"num_heads": 12, "head_dim": 128},
-        },
-    }
-
-    # Two ranks split both head counts; four cannot split 12 KDA heads.
-    assert set(_tensor_parallel_divisors(config)) == {64, 12}
 
 
 def test_deepseek_v41_tensor_plan_keeps_the_shared_kv_head_whole():

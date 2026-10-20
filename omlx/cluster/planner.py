@@ -1210,7 +1210,6 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
     tensor_names: set[str] = set()
     tensor_count = 0
     config = _model_config(root)
-    # Tensors the cluster rank never loads for this architecture.
     unloaded = _VISION_WEIGHT_PREFIXES + _cluster_unloaded_prefixes(config)
     engram_names, engram_files = _engram_tables(config)
     weight_files, table_files = _model_weight_files(root, engram_files)
@@ -1243,8 +1242,8 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
             if offsets[1] > offsets[0]:
                 intervals.append((offsets[0], offsets[1], name))
             if name.startswith(unloaded):
-                # Ranks load the text model only, and vision_tower.blocks.N
-                # would otherwise be charged to decoder layer N.
+                # Ranks never load these, and vision_tower.blocks.N would
+                # otherwise be charged to decoder layer N.
                 continue
             tensor_bytes = offsets[1] - offsets[0]
             layer_index = _tensor_layer_index(name)

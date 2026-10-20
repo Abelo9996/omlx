@@ -1,20 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """``mlx_lm.models.glm5_next``: GLM-5.3 in the shape an mlx-lm rank loads.
 
-Layers, attention, MoE and decode kernels all come from the vendored mlx-vlm
-tree that serves the model on one Mac. This module adds what a cluster rank
-needs on top of it:
-
-- A text-only root. The vision tower is never built, and parameter paths
-  (``language_model.model.layers.N``) match the checkpoint index that pipeline
-  loading reads, so per-layer quantization keys apply unchanged.
-- A pipeline stage. ``pipeline()`` is ``PipelineMixin``'s, which the worker
-  replaces with the planner's split. The forward walks only this rank's layers
-  and hands the hyper-connection streams to the next rank.
-- The rank-zero logits contract of the worker's sampling path.
-
-Single-node serving does not use this module: it runs the VLM engine and the
-MTP runtime's own ``Glm5NextModel.__call__``.
+The layers and kernels are the vendored mlx-vlm tree's. This adds a text-only
+root whose parameter paths match the checkpoint index, a forward over one
+pipeline stage, and the rank-zero logits contract. Single-node serving does not
+use this module.
 """
 
 from __future__ import annotations

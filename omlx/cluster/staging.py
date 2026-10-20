@@ -740,9 +740,8 @@ def _fabric_route(ssh_target: str, address: str | None) -> tuple[str, list[str]]
 def fabric_transfer_address(ssh_target: str, addresses: Sequence[str]) -> str | None:
     """The cluster fabric address to copy model files over, or None.
 
-    Collectives verified ``addresses`` with Thunderbolt and RDMA links first.
-    The paired SSH name is often the LAN address. A copy uses a fabric address
-    only when SSH answers there with the paired Mac's host key.
+    ``addresses`` are the ones the collectives verified, Thunderbolt and RDMA
+    first. One is used only when SSH answers there with the paired host key.
     """
 
     for address in addresses:

@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
-import socket
-import subprocess
-import sys
+
+import pytest
 
 from omlx.cluster.pipeline_compat import (
     install_pipeline_compatibility,
     pipeline_assignment_is_honored,
 )
 from omlx.cluster.planner import PipelineAssignment
+from tests.test_deepseek_v41 import run_two_ranks
 
 
 def _assignment():
@@ -75,21 +74,11 @@ def test_minimax_declares_its_wrapped_assigned_stage_contract(tmp_path):
     assert pipeline_assignment_is_honored(model)
 
 
-def test_glm5_next_inherits_the_pipeline_contract(tmp_path):
+@pytest.mark.parametrize("model_type", ["glm5_next", "deepseek_v41"])
+def test_cluster_adapters_inherit_the_pipeline_contract(tmp_path, model_type):
     from omlx.utils.model_loading import maybe_apply_pre_load_patches
 
-    model = _model_config(tmp_path, "glm5_next")
-    maybe_apply_pre_load_patches(str(model))
-
-    assert not pipeline_assignment_is_honored(model)
-    with install_pipeline_compatibility(_assignment()):
-        assert pipeline_assignment_is_honored(model)
-
-
-def test_deepseek_v41_inherits_the_pipeline_contract(tmp_path):
-    from omlx.utils.model_loading import maybe_apply_pre_load_patches
-
-    model = _model_config(tmp_path, "deepseek_v41")
+    model = _model_config(tmp_path, model_type)
     maybe_apply_pre_load_patches(str(model))
 
     assert not pipeline_assignment_is_honored(model)
@@ -174,117 +163,20 @@ def test_glm5_next_sanitize_maps_hf_and_mlx_names_to_the_text_model():
     assert expected <= {name for name, _ in tree_flatten(model.parameters())}
 
 
-# One rank of the GLM-5.3 test below: a tiny random model, run by the vendored
-# single-node forward and then as rank 1 [0, 3) -> rank 0 [3, 5).
+# One rank of the GLM-5.3 test below: a tiny random model against the vendored
+# single-node forward, as two pipeline stages and as two tensor-parallel ranks.
 _GLM5_NEXT_RANK = """
-import json
-import sys
-import mlx.core as mx
-group = mx.distributed.init(backend="ring", strict=True)
-from omlx.patches.glm5_next_mlx_lm import apply_glm5_next_mlx_lm_patch
-assert apply_glm5_next_mlx_lm_patch()
-from mlx_lm.models import glm5_next
-from mlx_vlm.models.glm5_next import language
-from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
-
-text = json.loads(sys.argv[1])
-args = glm5_next.ModelArgs.from_dict({"model_type": "glm5_next", "text_config": text})
-plan = (
-    PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
-    PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
-)
-mx.random.seed(7)
-prompt = mx.random.randint(0, 1024, (1, 265))
-# LayerPipeline prefill, a short block, then two deferred one-token decodes.
-steps = [prompt[:, :260], prompt[:, 260:263], prompt[:, 263:264], prompt[:, 264:]]
-
-def run(forward, make_cache):
-    # One evaluation per step, as in serving, keeps collectives in order.
-    cache = make_cache()
-    outs = []
-    for chunk in steps:
-        outs.append(forward(chunk, cache))
-        mx.eval(outs[-1])
-    return outs
-
-def compare(embed_dtype):
-    model = glm5_next.Model(args)
-    embed = model.language_model.model.embed_tokens
-    embed.weight = embed.weight.astype(embed_dtype)
-    mx.eval(model.parameters())
-    lm = model.language_model
-    lm.model.__class__ = language.Glm5NextModel
-    reference = run(lambda x, c: lm(x, cache=c).logits, lm.make_cache)
-    lm.model.__class__ = glm5_next.PipelinedTextModel
-    with install_unequal_pipeline_plan(plan):
-        model.model.pipeline(group)
-    got = run(lambda x, c: model(x, cache=c), model.make_cache)
-    return reference, got
-
-reference, got = compare(mx.float32)
-assert all(mx.array_equal(r, g).item() for r, g in zip(reference, got))
-# The layers return fp32 while recv_like takes the bf16 embedding dtype.
-reference, got = compare(mx.bfloat16)
-assert all(mx.isfinite(g).all().item() for g in got)
-assert all(
-    mx.array_equal(mx.argmax(r[:, -1], -1), mx.argmax(g[:, -1], -1)).item()
-    for r, g in zip(reference, got)
-)
-print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
-"""
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _run_glm5_next_ranks(tmp_path, script):
-    hostfile = tmp_path / "ring.json"
-    hostfile.write_text(
-        json.dumps([[f"127.0.0.1:{_free_port()}"], [f"127.0.0.1:{_free_port()}"]])
-    )
-    procs = [
-        subprocess.Popen(
-            [sys.executable, "-c", script, json.dumps(_GLM5_NEXT_TEXT)],
-            env=dict(os.environ, MLX_RANK=str(rank), MLX_HOSTFILE=str(hostfile)),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        for rank in (0, 1)
-    ]
-    outputs = []
-    for proc in procs:
-        try:
-            out, _ = proc.communicate(timeout=300)
-        except subprocess.TimeoutExpired:
-            for p in procs:
-                p.kill()
-            raise
-        outputs.append((proc.returncode, out))
-    for rank, (code, out) in enumerate(outputs):
-        assert code == 0, f"rank {rank} failed:\n{out[-2000:]}"
-        assert '"ok": true' in out
-
-
-def test_pipelined_glm5_next_forward_matches_single_process(tmp_path):
-    _run_glm5_next_ranks(tmp_path, _GLM5_NEXT_RANK)
-
-
-# One rank of the GLM-5.3 tensor-parallel test below: the same tiny model run
-# whole, then with each layer split across two ranks, unquantized and 4-bit.
-_GLM5_NEXT_TP_RANK = """
 import json
 import sys
 import mlx.core as mx
 import mlx.nn as nn
 group = mx.distributed.init(backend="ring", strict=True)
+from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
 from omlx.cluster.tensor_strategies import apply_tensor_strategy
 from omlx.patches.glm5_next_mlx_lm import apply_glm5_next_mlx_lm_patch
 assert apply_glm5_next_mlx_lm_patch()
 from mlx_lm.models import glm5_next
+from mlx_vlm.models.glm5_next import language
 
 text = json.loads(sys.argv[1])
 args = glm5_next.ModelArgs.from_dict({"model_type": "glm5_next", "text_config": text})
@@ -293,9 +185,11 @@ prompt = mx.random.randint(0, 1024, (1, 265))
 # LayerPipeline prefill, a short block, then two deferred one-token decodes.
 steps = [prompt[:, :260], prompt[:, 260:263], prompt[:, 263:264], prompt[:, 264:]]
 
-def build(bits):
+def build(embed_dtype=mx.float32, bits=None):
     mx.random.seed(11)
     model = glm5_next.Model(args)
+    embed = model.language_model.model.embed_tokens
+    embed.weight = embed.weight.astype(embed_dtype)
     if bits:
         nn.quantize(
             model,
@@ -307,24 +201,52 @@ def build(bits):
     mx.eval(model.parameters())
     return model
 
-def run(model):
-    cache = model.make_cache()
+def run(forward, make_cache):
+    # One evaluation per step, as in serving, keeps collectives in order.
+    cache = make_cache()
     outs = []
     for chunk in steps:
-        outs.append(model(chunk, cache=cache))
+        outs.append(forward(chunk, cache))
         mx.eval(outs[-1])
     return outs
 
+def vendored(model):
+    lm = model.language_model
+    lm.model.__class__ = language.Glm5NextModel
+    outs = run(lambda x, c: lm(x, cache=c).logits, lm.make_cache)
+    lm.model.__class__ = glm5_next.PipelinedTextModel
+    return outs
+
+# Rank 1 [0, 3) -> rank 0 [3, 5). The layers return fp32 while recv_like
+# takes the embedding dtype, so a bf16 embedding is checked too.
+plan = (
+    PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
+    PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
+)
+for embed_dtype in (mx.float32, mx.bfloat16):
+    model = build(embed_dtype)
+    reference = vendored(model)
+    with install_unequal_pipeline_plan(plan):
+        model.model.pipeline(group)
+    got = run(lambda x, c: model(x, cache=c), model.make_cache)
+    if embed_dtype == mx.float32:
+        assert all(mx.array_equal(r, g).item() for r, g in zip(reference, got))
+    assert all(mx.isfinite(g).all().item() for g in got)
+    assert all(
+        mx.array_equal(mx.argmax(r[:, -1], -1), mx.argmax(g[:, -1], -1)).item()
+        for r, g in zip(reference, got)
+    )
+
 for bits in (None, 4):
-    reference = run(build(bits))
-    model = build(bits)
+    reference = vendored(build(bits=bits))
+    model = build(bits=bits)
     apply_tensor_strategy(model, group, mx_module=mx)
-    got = run(model)
+    got = run(lambda x, c: model(x, cache=c), model.make_cache)
     for r, g in zip(reference, got):
         assert mx.allclose(r, g, atol=1e-4, rtol=1e-4).item(), mx.abs(r - g).max()
 print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
 """
 
 
-def test_tensor_parallel_glm5_next_forward_matches_single_process(tmp_path):
-    _run_glm5_next_ranks(tmp_path, _GLM5_NEXT_TP_RANK)
+def test_glm5_next_cluster_forwards_match_single_process(tmp_path):
+    run_two_ranks(tmp_path, _GLM5_NEXT_RANK, json.dumps(_GLM5_NEXT_TEXT))

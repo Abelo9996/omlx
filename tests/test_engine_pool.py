@@ -32,6 +32,7 @@ from omlx.patches.mlx_vlm_qwen4_exp_compat.residency import (
     Qwen4ExpResidencyEstimate,
 )
 from omlx.scheduler import PrefillEvictionRequest, SchedulerConfig
+from tests.test_cluster_engine_pool import _deployment
 
 
 def _make_pool(ceiling: int | None = None, **kwargs) -> EnginePool:
@@ -1182,27 +1183,11 @@ class TestVLMFallback:
         self, small_mock_model_dir
     ):
         """A coordinator holding a VLM checkpoint serves it through its ranks."""
-        from omlx.cluster.deployment import ClusterDeployment, ClusterHost
-        from omlx.cluster.planner import PipelineAssignment
-
         pool = _make_pool(ceiling=10 * 1024**3)
         pool.discover_models(str(small_mock_model_dir))
         entry = pool.get_entry("model-a")
         entry.model_type = entry.engine_type = "vlm"
-        deployment = ClusterDeployment(
-            deployment_id="vlm-test",
-            model=entry.model_path,
-            backend="ring",
-            hosts=(
-                ClusterHost("local", "127.0.0.1", ("10.0.0.1",)),
-                ClusterHost("peer", "peer.local", ("10.0.0.2",)),
-            ),
-            assignments=(
-                PipelineAssignment("local", 0, 1, 2, 80, 10, 8, 128),
-                PipelineAssignment("peer", 1, 0, 1, 40, 10, 8, 64),
-            ),
-            plan_hash="f" * 64,
-        )
+        deployment = _deployment(entry.model_path)
         pool._cluster_registry = SimpleNamespace(get_for_model=lambda _: deployment)
         distributed = MagicMock()
         distributed.start = AsyncMock()
