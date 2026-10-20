@@ -3820,6 +3820,30 @@ class TestResolveModelId:
         result = pool.resolve_model_id("omlx/MODEL-B", settings_manager=None)
         assert result == "model-b"
 
+    def test_claude_tier_alias_never_shadows_models_or_aliases(
+        self, small_mock_model_dir
+    ):
+        pool = _make_pool(ceiling=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+        settings_manager = MagicMock()
+        settings_manager.get_exposed_profile_source_model_id.return_value = None
+        settings_manager.get_all_settings.return_value = {
+            "model-a": ModelSettings(model_alias="claude-haiku"),
+        }
+        tiers = {
+            "claude-sonnet": "model-b",
+            "claude-haiku": "model-b",
+            "model-a": "model-b",
+        }
+
+        def resolve(name):
+            return pool.resolve_model_id(name, settings_manager, tiers)
+
+        assert resolve("claude-sonnet") == "model-b"
+        assert resolve("omlx/claude-sonnet") == "model-b"
+        assert resolve("claude-haiku") == "model-a"
+        assert resolve("model-a") == "model-a"
+
 class TestMemorySettleBarrier:
     """Tests for memory settle barrier in _unload_engine()."""
 
