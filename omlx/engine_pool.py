@@ -2201,6 +2201,26 @@ class EnginePool:
         # Only an explicit limit goes to Splash; otherwise Splash fits the
         # context to its budget and the server adopts what it planned.
         requested_context = getattr(model_settings, "max_context_window", None)
+        budget = self._splash_memory_budget(entry, model_settings, target)
+        if requested_context and budget < splash_memory_estimate(
+            entry.model_path,
+            target.draft_path,
+            requested_context,
+            integrations.splash_kv_format,
+        ):
+            # The budget cannot hold the explicit limit (the room under the
+            # memory limit shrank, or splash_max_memory_gb is small), and
+            # Splash refuses to start on a limit it cannot hold. Without it
+            # Splash fits the context to the budget, and the server still
+            # caps prompts at the configured limit.
+            logger.warning(
+                "Splash: a %.1fGB budget cannot hold the %d-token context of "
+                "%s; letting Splash fit the context to the budget",
+                budget / 1024**3,
+                requested_context,
+                entry.model_id,
+            )
+            requested_context = None
         return SplashEngine(
             model_name=entry.model_path,
             model_id=entry.model_id,
@@ -2209,9 +2229,7 @@ class EnginePool:
             log_dir=settings.logging.get_log_dir(settings.base_path) / "splash",
             options=SplashOptions(
                 max_context=requested_context,
-                max_memory_bytes=self._splash_memory_budget(
-                    entry, model_settings, target
-                ),
+                max_memory_bytes=budget,
                 kv_format=integrations.splash_kv_format,
                 ane_prefill=integrations.splash_ane_prefill,
                 cache_disk_bytes=cache_disk_bytes,

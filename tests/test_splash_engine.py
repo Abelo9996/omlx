@@ -1057,6 +1057,40 @@ class TestEnginePool:
         with pytest.raises(ModelLoadingError, match="leaves no memory"):
             pool._external_engine_for(entry, settings, "vlm")
 
+    def test_limit_the_shrunk_budget_cannot_hold_is_left_to_splash(
+        self, tmp_path, launchers, global_settings
+    ):
+        launchers("splash")
+        pool, entry = _pool(tmp_path)
+        pool._get_final_ceiling = lambda: 40 * GIB
+        settings = ModelSettings(external_engine="splash", max_context_window=262144)
+        engine = pool._external_engine_for(entry, settings, "vlm")
+        draft = engine._target.draft_path
+        wanted = splash_memory_estimate(entry.model_path, draft, 262144, "int8")
+
+        # Room for the whole window: the limit goes to Splash.
+        assert engine._options.max_memory_bytes == wanted
+        assert engine._options.max_context == 262144
+
+        # Other models take memory, and the room left cannot hold 256K:
+        # Splash would refuse --max-context 262144, so it fits the context.
+        pool._current_model_memory = 40 * GIB - (wanted - 1)
+        engine = pool._external_engine_for(entry, settings, "vlm")
+        assert engine._options.max_memory_bytes == wanted - 1
+        assert engine._options.max_context is None
+
+        # A smaller limit the shrunk room still holds goes to Splash.
+        small = ModelSettings(external_engine="splash", max_context_window=32768)
+        engine = pool._external_engine_for(entry, small, "vlm")
+        assert engine._options.max_context == 32768
+
+        # A configured budget too small for the limit leaves it to Splash too.
+        pool._current_model_memory = 0
+        global_settings.integrations.splash_max_memory_gb = 4
+        engine = pool._external_engine_for(entry, settings, "vlm")
+        assert engine._options.max_memory_bytes == 4 * GIB
+        assert engine._options.max_context is None
+
     async def test_load_counts_the_planned_budget_and_unload_skips_mlx_barrier(
         self, tmp_path, launchers, global_settings
     ):
