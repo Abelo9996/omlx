@@ -1233,3 +1233,160 @@ def test_ced_chunked_continuity_and_decode_seam():
     on(full[:, 6:], cache=cb)
     solo = np.asarray(on(mx.array([[11]]), cache=cb))[:, -1]
     np.testing.assert_array_equal(decoded, solo)
+
+
+_PIPELINE_RANK = """
+import json
+import sys
+import time
+
+import mlx.core as mx
+import numpy as np
+
+group = mx.distributed.init(backend="ring", strict=True)
+sys.path.insert(0, sys.argv[1])
+import test_deepseek_v41 as t
+from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
+
+# Engram layer 3 opens rank 0's stage, which keeps its own n-gram history.
+config = t.tiny(
+    engram_layer_ids=(1, 3),
+    engram_num_embeddings=(72, 204),
+    engram_vocab_size=5,
+    engram_max_ngram_size=4,
+    engram_n_heads=2,
+    engram_head_dim=32,
+    engram_compressed_vocab_size=64,
+)
+assert config.pipeline_stage_starts() == (1, 3)
+
+def build():
+    model = t.LanguageModel(config)
+    t.load_reference_weights(model)
+    model.set_token_map(np.arange(64))
+    return model
+
+# Two rows, so each forward makes one handoff and gather per row.
+ids = np.random.default_rng(16).integers(3, 60, (2, 14), dtype=np.int32)
+steps = [ids[:, :9], ids[:, 9:12], ids[:, 12:13], ids[:, 13:14]]
+
+def run(model):
+    cache = model.make_cache()
+    outs = []
+    for chunk in steps:
+        outs.append(model(mx.array(chunk), cache=cache))
+        mx.eval(outs[-1])
+    return outs
+
+reference = run(build())
+model = build()
+if group.rank() == 1:
+    # Rank 0 waits past the Metal watchdog (a few seconds) for this stage.
+    time.sleep(8)
+plan = (
+    PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
+    PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
+)
+with install_unequal_pipeline_plan(plan):
+    model.pipeline(group)
+assert all(mx.array_equal(r, g).item() for r, g in zip(reference, run(model)))
+print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
+"""
+
+
+def test_pipelined_forward_matches_single_process(tmp_path):
+    import json
+    import os
+    import socket
+    import subprocess
+
+    def free_port():
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    hostfile = tmp_path / "ring.json"
+    hostfile.write_text(
+        json.dumps([[f"127.0.0.1:{free_port()}"], [f"127.0.0.1:{free_port()}"]])
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _PIPELINE_RANK, str(Path(__file__).parent)],
+            env=dict(os.environ, MLX_RANK=str(rank), MLX_HOSTFILE=str(hostfile)),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for rank in (0, 1)
+    ]
+    outputs = []
+    for proc in procs:
+        try:
+            outputs.append(proc.communicate(timeout=300)[0])
+        except subprocess.TimeoutExpired:
+            for p in procs:
+                p.kill()
+            raise
+    for rank, (proc, out) in enumerate(zip(procs, outputs)):
+        assert proc.returncode == 0, f"rank {rank} failed:\n{out[-2000:]}"
+        assert '"ok": true' in out
+
+
+def test_cluster_stage_loads_only_its_text_weights(tmp_path):
+    from mlx.utils import tree_flatten
+
+    from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
+    from omlx.patches.deepseek_v41.convert import convert
+    from omlx.patches.deepseek_v41.loading import load
+    from omlx.patches.deepseek_v41_mlx_lm import apply_deepseek_v41_mlx_lm_patch
+
+    source, _ = write_checkpoint(tmp_path)
+    target = tmp_path / "converted"
+    convert(source, target)
+    full, _ = load(target)
+    reference = dict(tree_flatten(full.parameters()))
+    full.close()
+
+    assert apply_deepseek_v41_mlx_lm_patch()
+    from mlx_lm.models import deepseek_v41
+
+    plan = (
+        PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
+        PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
+    )
+    with install_unequal_pipeline_plan(plan):
+        stage = deepseek_v41.load_pipeline_stage(
+            target, SimpleNamespace(rank=lambda: 0, size=lambda: 2)
+        )
+    loaded = dict(tree_flatten(stage.parameters()))
+
+    assert stage.model.start_idx == 3
+    assert len(stage.make_cache()) == len(stage.layers) == 2
+    assert not any(
+        key.startswith(("vision", "aligner", "image_"))
+        or key.startswith(tuple(f"language_model.layers.{i}." for i in range(3)))
+        for key in loaded
+    )
+    assert any(key.startswith("language_model.layers.4.") for key in loaded)
+    assert all(
+        mx.array_equal(value, reference[key]).item() for key, value in loaded.items()
+    )
+    stage.close()
+
+
+def test_mlx_lm_tokenizer_gets_the_v41_protocol(tmp_path):
+    from mlx_lm.utils import load_tokenizer
+
+    from omlx.patches.deepseek_v41.processing import install_tokenizer_protocol
+
+    source, model = write_checkpoint(tmp_path)
+    config = {"model_type": "deepseek_v41", "text_config": asdict(model.config)}
+    tokenizer = load_tokenizer(source)
+    install_tokenizer_protocol(tokenizer, config)
+    messages = [{"role": "user", "content": "hello"}]
+
+    assert tokenizer.has_chat_template and tokenizer.has_tool_calling
+    assert tokenizer.tool_call_start == "<｜DSML｜ calls>"
+    assert tokenizer.apply_chat_template(
+        messages, tokenize=False, enable_thinking=False
+    ) == encode_messages(messages, thinking_mode="chat")

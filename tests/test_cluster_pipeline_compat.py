@@ -86,6 +86,17 @@ def test_glm5_next_inherits_the_pipeline_contract(tmp_path):
         assert pipeline_assignment_is_honored(model)
 
 
+def test_deepseek_v41_inherits_the_pipeline_contract(tmp_path):
+    from omlx.utils.model_loading import maybe_apply_pre_load_patches
+
+    model = _model_config(tmp_path, "deepseek_v41")
+    maybe_apply_pre_load_patches(str(model))
+
+    assert not pipeline_assignment_is_honored(model)
+    with install_pipeline_compatibility(_assignment()):
+        assert pipeline_assignment_is_honored(model)
+
+
 _GLM5_NEXT_TEXT = dict(
     model_type="glm5_next_text",
     hidden_size=256,

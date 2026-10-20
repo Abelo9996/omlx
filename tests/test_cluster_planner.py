@@ -18,6 +18,7 @@ from omlx.cluster.planner import (
     apply_pipeline_assignment,
     inspect_safetensors_layout,
     install_unequal_pipeline_plan,
+    plan_proportional_pipeline,
     plan_unequal_pipeline,
     synthetic_model_layout,
 )
@@ -202,6 +203,26 @@ def test_unequal_planner_gives_more_layers_to_larger_mac():
     assert studio.end_layer == 80
     assert all(item.headroom_bytes >= 0 for item in plan.assignments)
     assert len(plan.plan_hash) == 64
+
+
+def test_stages_start_only_where_the_architecture_allows():
+    """DeepSeek V4.1 layers read KV that an earlier source layer keeps."""
+
+    layers = (10 * GIB,) * 8
+    nodes = [
+        NodeBudget(node_id="studio", capacity_bytes=256 * GIB, rank=0),
+        NodeBudget(node_id="mobile", capacity_bytes=256 * GIB, rank=1),
+    ]
+    free = ModelLayout("free", 0, layers)
+    restricted = ModelLayout("restricted", 0, layers, pipeline_stage_starts=(2, 6))
+
+    assert plan_unequal_pipeline(free, nodes).assignments[1].end_layer == 4
+    assert plan_unequal_pipeline(restricted, nodes).assignments[1].end_layer in (2, 6)
+    with pytest.raises(PlanningError, match="only at layers 2, 6"):
+        plan_proportional_pipeline(restricted, nodes)
+    # An unrestricted layout keeps its serialized form, and so its plan hash.
+    assert "pipeline_stage_starts" not in free.to_dict()
+    assert ModelLayout.from_dict(restricted.to_dict()) == restricted
 
 
 def test_unequal_planner_accounts_for_replicated_fixed_weights_and_reserve():

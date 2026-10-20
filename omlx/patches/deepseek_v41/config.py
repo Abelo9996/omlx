@@ -215,6 +215,33 @@ class ModelConfig:
         if self.ced_prefill and not self.ced_layout_supported():
             raise ValueError("CED prefill is not supported by this layer layout")
 
+    def pipeline_stage_starts(self) -> tuple[int, ...]:
+        """Layers a later pipeline stage may start at.
+
+        A compressed-attention layer reads the KV, index and candidate state
+        of earlier source layers from the forward's shared state, so a stage
+        may not start between a source and a layer that reads it.
+        """
+
+        def sources(layer):
+            if not self.compress_ratios[layer]:
+                return ()
+            kv = max(i for i in self.kv_source_layers if i <= layer)
+            index = max(i for i in self.index_source_layers if i <= layer)
+            if 0 <= self.candidate_source_layer < index:
+                return (kv, index, self.candidate_source_layer)
+            return (kv, index)
+
+        return tuple(
+            start
+            for start in range(1, self.n_layers)
+            if all(
+                source >= start
+                for layer in range(start, self.n_layers)
+                for source in sources(layer)
+            )
+        )
+
     def ced_layout_supported(self) -> bool:
         # CED requires an even split whose midpoint CSA2 layer owns the whole
         # ratio-1 decoder half: it projects global KV from encoder-final

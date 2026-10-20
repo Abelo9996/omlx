@@ -33,6 +33,9 @@ from ..cluster.liveness import (
     read_marker,
 )
 from ..exceptions import InvalidRequestError
+from ..patches.deepseek_v41.processing import (
+    install_tokenizer_protocol as install_deepseek_v41_tokenizer_protocol,
+)
 from ..reasoning_effort import _fallback_candidate, _normalized_input
 from .base import GenerationOutput
 from .batched import BatchedEngine
@@ -464,6 +467,9 @@ raise SystemExit(2)
             {"trust_remote_code": self.deployment.trust_remote_code},
             config.get("eos_token_id"),
         )
+        if self._model_type == "deepseek_v41":
+            # The ranks encode with the same protocol (see inference_worker).
+            install_deepseek_v41_tokenizer_protocol(self._tokenizer, config)
 
         try:
             await asyncio.to_thread(self._supervisor.start)

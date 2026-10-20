@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 import re
+import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
@@ -120,6 +121,19 @@ def progressive_sharded_load(
         tokenizer_config or {"trust_remote_code": trust_remote_code},
         eos_token_ids=metadata_config.get("eos_token_id", None),
     )
+    # An architecture with its own checkpoint format loads its stage itself.
+    stage_loader = getattr(
+        sys.modules.get(f"mlx_lm.models.{metadata_config.get('model_type')}"),
+        "load_pipeline_stage",
+        None,
+    )
+    if stage_loader is not None:
+        if tensor_group is not None:
+            raise ValueError("this model supports pipeline parallelism only")
+        model = stage_loader(model_path, pipeline_group or mx_module.distributed.init())
+        if return_config:
+            return model, tokenizer, metadata_config
+        return model, tokenizer
     model, config = utils_module.load_model(
         model_path,
         lazy=True,

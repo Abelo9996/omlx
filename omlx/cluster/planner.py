@@ -9,6 +9,7 @@ import json
 import re
 import struct
 import subprocess
+import sys
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -115,6 +116,9 @@ class ModelLayout:
     # Whether mlx-lm can split this architecture into pipeline stages. False
     # means the model runs on one node or not at all, however well it fits.
     supports_pipeline: bool = False
+    # Layers a later stage may start at, for architectures whose layers read
+    # state that an earlier layer keeps in its own cache. Empty means any.
+    pipeline_stage_starts: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.fixed_weight_bytes < 0:
@@ -156,6 +160,11 @@ class ModelLayout:
             )
         if any(value < 1 for value in self.tensor_parallel_divisors):
             raise ValueError("tensor_parallel_divisors must be positive")
+        starts = self.pipeline_stage_starts
+        if list(starts) != sorted(set(starts)) or any(
+            not 0 < start < len(self.layer_weight_bytes) for start in starts
+        ):
+            raise ValueError("pipeline_stage_starts must be increasing inner layers")
 
     @property
     def layer_count(self) -> int:
@@ -166,7 +175,7 @@ class ModelLayout:
         return self.fixed_weight_bytes + sum(self.layer_weight_bytes)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "source": self.source,
             "tensor_count": self.tensor_count,
             "layer_count": self.layer_count,
@@ -182,6 +191,10 @@ class ModelLayout:
             "kv_bytes_per_token_per_layer": self.kv_bytes_per_token_per_layer,
             "kv_replicated_across_tp": self.kv_replicated_across_tp,
         }
+        # Omitted when unrestricted so existing plan hashes stay the same.
+        if self.pipeline_stage_starts:
+            payload["pipeline_stage_starts"] = list(self.pipeline_stage_starts)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> ModelLayout:
@@ -225,6 +238,9 @@ class ModelLayout:
                     payload.get("supports_tensor_parallel", False)
                 ),
                 supports_pipeline=bool(payload.get("supports_pipeline", False)),
+                pipeline_stage_starts=tuple(
+                    int(value) for value in payload.get("pipeline_stage_starts", ())
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise PlanningError(f"model layout is malformed: {exc}") from exc
@@ -756,6 +772,18 @@ def _model_source(model_type: str) -> str:
     return ""
 
 
+def _pipeline_stage_starts(config: dict[str, Any]) -> tuple[int, ...]:
+    """Layers a later stage may start at, when the model's module restricts them."""
+
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str):
+        return ()
+    starts = getattr(
+        sys.modules.get(f"mlx_lm.models.{model_type}"), "pipeline_stage_starts", None
+    )
+    return tuple(starts(config)) if callable(starts) else ()
+
+
 def _supports_pipeline(config: dict[str, Any]) -> bool:
     """Whether this architecture can be split into pipeline stages.
 
@@ -1156,6 +1184,7 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
             loadable and _supports_tensor_parallel(_model_config(root))
         ),
         supports_pipeline=loadable and _supports_pipeline(_model_config(root)),
+        pipeline_stage_starts=_pipeline_stage_starts(_model_config(root)),
         kv_bytes_per_token_per_layer=_kv_bytes_per_token_per_layer(_model_config(root)),
         kv_replicated_across_tp=_kv_cache_replicated_across_tp(_model_config(root)),
     )
@@ -1343,6 +1372,7 @@ def _partition_layers(
     activation_bytes_per_token: int = 0,
     workload_profile: ExecutionProfileName = "balanced",
     microbatch_size: int = 1,
+    stage_starts: Sequence[int] = (),
 ) -> tuple[tuple[int, int], ...]:
     """Minimize the bottleneck stage while retaining contiguous layers.
 
@@ -1375,6 +1405,7 @@ def _partition_layers(
         weight_prefix.append(weight_prefix[-1] + weight_size)
         resident_prefix.append(resident_prefix[-1] + resident_size)
 
+    allowed_starts = frozenset(stage_starts)
     performance_aware = all(node.performance is not None for node in pipeline_nodes)
     target_aware = any(node.target_weight_bytes > 0 for node in pipeline_nodes)
     # State value: (lexicographic score, cuts). The no-profile score is kept
@@ -1394,6 +1425,8 @@ def _partition_layers(
         for previous_end, (previous_score, cuts) in states.items():
             start = previous_end
             for end in range(max(start + 1, minimum_end), maximum_end + 1):
+                if stage_starts and end < layer_count and end not in allowed_starts:
+                    continue
                 layer_bytes = weight_prefix[end] - weight_prefix[start]
                 resident_layer_bytes = resident_prefix[end] - resident_prefix[start]
                 planned_weight_bytes = fixed_weight_bytes + layer_bytes
@@ -1563,6 +1596,7 @@ def plan_unequal_pipeline(
             activation_bytes_per_token=model.activation_bytes_per_token,
             workload_profile=workload_profile,
             microbatch_size=microbatch_size,
+            stage_starts=model.pipeline_stage_starts,
         )
     except PlanningError as exc:
         if kv_bytes_per_layer:
@@ -1660,6 +1694,14 @@ def plan_proportional_pipeline(
     for count in counts:
         ranges.append((start, start + count))
         start += count
+    if model.pipeline_stage_starts and any(
+        range_start not in model.pipeline_stage_starts for range_start, _ in ranges[1:]
+    ):
+        raise PlanningError(
+            "this model can start a pipeline stage only at layers "
+            f"{', '.join(map(str, model.pipeline_stage_starts))}; plan with the "
+            "balanced allocator"
+        )
     for node, (range_start, range_end) in zip(pipeline_nodes, ranges):
         layer_weight = sum(model.layer_weight_bytes[range_start:range_end])
         if model.fixed_weight_bytes + layer_weight > node.weight_ceiling_bytes:
@@ -2131,6 +2173,7 @@ def plan_hybrid(
             activation_bytes_per_token=model.activation_bytes_per_token,
             workload_profile=workload_profile,
             microbatch_size=microbatch_size,
+            stage_starts=model.pipeline_stage_starts,
         )
     except PlanningError as exc:
         if kv_bytes_per_layer:
