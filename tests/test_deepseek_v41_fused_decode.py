@@ -568,3 +568,66 @@ def test_tensor_parallel_decode_sums_rank_outputs(tmp_path):
     from tests.test_deepseek_v41 import run_two_ranks
 
     run_two_ranks(tmp_path, _TENSOR_RANK, Path(__file__).parent)
+
+
+# One rank of the pipeline test below. Layer 4's affine wo_b is a layout the
+# fused kernels do not cover, so only rank 0's stage [3, 5) lacks fused decode.
+_MIXED_STAGES_RANK = """
+import json
+import sys
+
+import mlx.core as mx
+import numpy as np
+
+group = mx.distributed.init(backend="ring", strict=True)
+sys.path.insert(0, sys.argv[1])
+import test_deepseek_v41_fused_decode as t
+from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
+from omlx.patches.deepseek_v41.cache import DeepseekV41Cache
+from omlx.patches.deepseek_v41.quantization import QuantizedProjection
+
+def build():
+    model = t.build()
+    att = model.layers[4].attn
+    weight = mx.dequantize(
+        att.wo_b.weight, att.wo_b.scales, None, group_size=32, bits=8, mode="mxfp8"
+    )
+    packed, scales, biases = mx.quantize(weight, group_size=64, bits=4)
+    att.wo_b = QuantizedProjection(packed, scales, 4, "affine", biases, group_size=64)
+    return model
+
+rng = np.random.default_rng(11)
+prompts = [rng.integers(3, 60, 13 + 2 * r).tolist() for r in range(2)]
+
+def run(model):
+    rows = []
+    for p in prompts:
+        cache = model.make_cache()
+        mx.eval(model(mx.array([p[:-1]]), cache=cache))
+        rows.append(cache)
+    batched = [DeepseekV41Cache.merge(list(pair)) for pair in zip(*rows)]
+    outs = []
+    for token in range(3, 6):
+        outs.append(model(mx.array([[token], [token + 1]]), cache=batched))
+        mx.eval(outs[-1])
+    return outs
+
+reference = run(build())
+model = build()
+plan = (
+    PipelineAssignment("a", 0, 3, 5, 1, 0, 0, 1),
+    PipelineAssignment("b", 1, 0, 3, 1, 0, 0, 1),
+)
+with install_unequal_pipeline_plan(plan):
+    model.pipeline(group)
+assert all(mx.array_equal(r, g).item() for r, g in zip(reference, run(model)))
+print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
+"""
+
+
+def test_pipeline_stages_agree_on_batched_decode(tmp_path):
+    from pathlib import Path
+
+    from tests.test_deepseek_v41 import run_two_ranks
+
+    run_two_ranks(tmp_path, _MIXED_STAGES_RANK, Path(__file__).parent)

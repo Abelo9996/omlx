@@ -1178,6 +1178,49 @@ class TestVLMFallback:
         assert entry.engine is mock_batched_engine
 
     @pytest.mark.asyncio
+    async def test_cluster_deployment_runs_a_vlm_checkpoint_distributed(
+        self, small_mock_model_dir
+    ):
+        """A coordinator holding a VLM checkpoint serves it through its ranks."""
+        from omlx.cluster.deployment import ClusterDeployment, ClusterHost
+        from omlx.cluster.planner import PipelineAssignment
+
+        pool = _make_pool(ceiling=10 * 1024**3)
+        pool.discover_models(str(small_mock_model_dir))
+        entry = pool.get_entry("model-a")
+        entry.model_type = entry.engine_type = "vlm"
+        deployment = ClusterDeployment(
+            deployment_id="vlm-test",
+            model=entry.model_path,
+            backend="ring",
+            hosts=(
+                ClusterHost("local", "127.0.0.1", ("10.0.0.1",)),
+                ClusterHost("peer", "peer.local", ("10.0.0.2",)),
+            ),
+            assignments=(
+                PipelineAssignment("local", 0, 1, 2, 80, 10, 8, 128),
+                PipelineAssignment("peer", 1, 0, 1, 40, 10, 8, 64),
+            ),
+            plan_hash="f" * 64,
+        )
+        pool._cluster_registry = SimpleNamespace(get_for_model=lambda _: deployment)
+        distributed = MagicMock()
+        distributed.start = AsyncMock()
+
+        with (
+            patch(
+                "omlx.engine.distributed.DistributedBatchedEngine",
+                return_value=distributed,
+            ) as cls,
+            patch("omlx.engine_pool.VLMBatchedEngine") as local,
+        ):
+            await pool._load_engine("model-a")
+
+        assert entry.engine is distributed
+        assert cls.call_args.kwargs["vision_checkpoint"] is True
+        local.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_non_vlm_failure_still_raises(self, small_mock_model_dir):
         """Test that non-VLM engine failures propagate normally."""
         pool = _make_pool(ceiling=10 * 1024**3)

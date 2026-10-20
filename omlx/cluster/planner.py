@@ -839,6 +839,20 @@ def _model_source(model_type: str) -> str:
     return ""
 
 
+def _cluster_unloaded_prefixes(config: dict[str, Any]) -> tuple[str, ...]:
+    """Weight prefixes an oMLX-registered rank module never loads."""
+
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str):
+        return ()
+    prefixes = getattr(
+        sys.modules.get(f"mlx_lm.models.{model_type}"),
+        "CLUSTER_UNLOADED_WEIGHT_PREFIXES",
+        (),
+    )
+    return tuple(prefixes)
+
+
 def _pipeline_stage_starts(config: dict[str, Any]) -> tuple[int, ...]:
     """Layers a later stage may start at, when the model's module restricts them."""
 
@@ -1195,7 +1209,10 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
     ssd_sizes: dict[int, int] = {}
     tensor_names: set[str] = set()
     tensor_count = 0
-    engram_names, engram_files = _engram_tables(_model_config(root))
+    config = _model_config(root)
+    # Tensors the cluster rank never loads for this architecture.
+    unloaded = _VISION_WEIGHT_PREFIXES + _cluster_unloaded_prefixes(config)
+    engram_names, engram_files = _engram_tables(config)
     weight_files, table_files = _model_weight_files(root, engram_files)
     for weight_file in (*weight_files, *table_files):
         # A table file outside the index may hold other source tensors too.
@@ -1225,7 +1242,7 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
                 raise PlanningError(f"invalid data offsets for tensor {name}")
             if offsets[1] > offsets[0]:
                 intervals.append((offsets[0], offsets[1], name))
-            if name.startswith(_VISION_WEIGHT_PREFIXES):
+            if name.startswith(unloaded):
                 # Ranks load the text model only, and vision_tower.blocks.N
                 # would otherwise be charged to decoder layer N.
                 continue
@@ -1259,7 +1276,7 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
     # the runtime model never instantiates them. Counting them as decoder
     # layers put a stage boundary over weights that do not exist at runtime,
     # and the last stage failed activation with end_layer beyond the model.
-    declared_depth = _config_int(_model_config(root), "num_hidden_layers", 0)
+    declared_depth = _config_int(config, "num_hidden_layers", 0)
     if declared_depth > 0 and max(layer_sizes) >= declared_depth:
         trimmed = {
             index: size for index, size in layer_sizes.items() if index < declared_depth
@@ -1276,7 +1293,7 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
         raise PlanningError(
             "safetensors layer indices must be contiguous and start at zero"
         )
-    loadable = _mlx_lm_accepts_config(_model_config(root))
+    loadable = _mlx_lm_accepts_config(config)
     return ModelLayout(
         source=str(root.resolve()),
         fixed_weight_bytes=fixed_bytes,
@@ -1284,17 +1301,13 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
         tensor_count=tensor_count,
         activation_bytes_per_token=_activation_bytes_per_token(root),
         tensor_parallel_heads=_attention_head_count(root),
-        tensor_parallel_kv_heads=_config_int(
-            _model_config(root), "num_key_value_heads", 0
-        ),
-        tensor_parallel_divisors=_tensor_parallel_divisors(_model_config(root)),
-        supports_tensor_parallel=(
-            loadable and _supports_tensor_parallel(_model_config(root))
-        ),
-        supports_pipeline=loadable and _supports_pipeline(_model_config(root)),
-        pipeline_stage_starts=_pipeline_stage_starts(_model_config(root)),
-        kv_bytes_per_token_per_layer=_kv_bytes_per_token_per_layer(_model_config(root)),
-        kv_replicated_across_tp=_kv_cache_replicated_across_tp(_model_config(root)),
+        tensor_parallel_kv_heads=_config_int(config, "num_key_value_heads", 0),
+        tensor_parallel_divisors=_tensor_parallel_divisors(config),
+        supports_tensor_parallel=(loadable and _supports_tensor_parallel(config)),
+        supports_pipeline=loadable and _supports_pipeline(config),
+        pipeline_stage_starts=_pipeline_stage_starts(config) if loadable else (),
+        kv_bytes_per_token_per_layer=_kv_bytes_per_token_per_layer(config),
+        kv_replicated_across_tp=_kv_cache_replicated_across_tp(config),
         tensor_parallel_ssd_layer_bytes=(
             tuple(ssd_sizes.get(index, 0) for index in expected_indices)
             if ssd_sizes

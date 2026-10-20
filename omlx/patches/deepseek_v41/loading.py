@@ -346,6 +346,9 @@ def load(
                         raise ValueError(f"Unexpected target tensor shape: {key}")
                 model.load_weights(list(values.items()), strict=False)
                 mx.eval(values)
+                if tensor is not None:
+                    # Release the whole tensors this rank sliced its part from.
+                    mx.clear_cache()
                 seen.update(values)
                 loaded_bytes += sum(value.nbytes for value in values.values())
                 if number % 25 == 0:

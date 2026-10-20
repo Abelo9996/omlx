@@ -3859,7 +3859,7 @@ class EnginePool:
 
             # An external engine replaces every in-process engine.
             engine = self._external_engine_for(entry, model_settings, effective_type)
-            deployment = deployment if effective_type == "batched" else None
+            deployment = deployment if effective_type in _CLUSTER_ENGINE_TYPES else None
             # Decision models never decode, so speculative decoding settings
             # saved for the same checkpoint do not apply.
             if (

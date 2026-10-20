@@ -34,6 +34,14 @@ class ModelArgs(ModelConfig):
         return super().from_dict(params)
 
 
+# Read by the planner: ranks load neither the vision tower nor the draft heads.
+CLUSTER_UNLOADED_WEIGHT_PREFIXES = (
+    "vision.",
+    "aligner.",
+    "image_",
+    "language_model.mtp.",
+)
+
 # Read by the planner, which would otherwise refuse a checkpoint with a vision
 # config. LanguageModel inherits PipelineMixin.pipeline, the method the worker
 # replaces with the planner's split.

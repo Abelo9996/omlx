@@ -1029,15 +1029,32 @@ class LanguageModel(DSparkMixin, PipelineMixin, nn.Module):
             and not capture
             and kwargs.get("mtp_verify_states") is None
             and not kwargs.get("_ced_prefill", False)
-            and all(
-                decode_fused.supported(layer, self._config)
-                for layer in self.pipeline_layers
-            )
         ):
             return False
         if masks is not None and not bool(np.all(np.asarray(masks))):
             return False
-        return all(not item.empty() for item in cache)
+        return all(not item.empty() for item in cache) and self._stages_decode_fused()
+
+    def _stages_decode_fused(self):
+        """Whether the fused decode supports the layers of every stage.
+
+        The batched path changes the stage transfers, so the stages agree once.
+        Each rank asks at the same forward: the checks before it read only the
+        requests, which every stage shares.
+        """
+        agreed = getattr(self, "_fused_stages", None)
+        if agreed is None:
+            agreed = all(
+                decode_fused.supported(layer, self._config)
+                for layer in self.pipeline_layers
+            )
+            if self.pipeline_size > 1:
+                # On the CPU stream: no GPU command buffer waits for a peer.
+                votes = mx.distributed.all_sum(mx.array(int(agreed)), stream=mx.cpu)
+                mx.eval(votes)
+                agreed = votes.item() == self.pipeline_size
+            self._fused_stages = agreed
+        return agreed
 
     def _forward_decode_batched(self, input_ids, cache, skip_logits=False):
         """_forward for B single-token requests with the weights read once per step.

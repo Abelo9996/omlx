@@ -121,6 +121,10 @@ def progressive_sharded_load(
         tokenizer_config or {"trust_remote_code": trust_remote_code},
         eos_token_ids=metadata_config.get("eos_token_id", None),
     )
+    if pipeline_group is not None and tensor_group is not None:
+        raise ValueError(
+            "progressive loading does not combine pipeline and tensor groups"
+        )
     # An architecture with its own checkpoint format loads its part itself.
     own_format = sys.modules.get(f"mlx_lm.models.{metadata_config.get('model_type')}")
     stage_loader = getattr(own_format, "load_pipeline_stage", None)
@@ -167,10 +171,6 @@ def progressive_sharded_load(
         )
     if not has_pipeline and not has_tensor and tensor_group is None:
         raise ValueError("The model does not support any sharding")
-    if pipeline_group is not None and tensor_group is not None:
-        raise ValueError(
-            "progressive loading does not combine pipeline and tensor groups"
-        )
     if pipeline_group is tensor_group is None:
         group = mx_module.distributed.init()
         if has_tensor:

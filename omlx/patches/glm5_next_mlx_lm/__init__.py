@@ -4,7 +4,8 @@
 A cluster rank is an ``mlx_lm.server``. Pinned mlx-lm has no ``glm5_next``,
 and oMLX serves the model on one Mac through its vendored mlx-vlm tree. This
 registers ``mlx_lm.models.glm5_next`` as a text-only adapter over that same
-tree, with a pipeline stage split. TP is not supported.
+tree. A rank holds one pipeline stage, or the tensor-parallel slice that
+``omlx.cluster.tensor_strategies`` cuts.
 """
 
 from __future__ import annotations

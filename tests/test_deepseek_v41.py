@@ -1383,18 +1383,25 @@ def test_cluster_stage_loads_only_its_text_weights(tmp_path):
     stage.close()
 
 
-def test_cluster_plans_converted_checkpoints_only(tmp_path):
-    from omlx.cluster.planner import complete_model_layout
+def test_cluster_plans_converted_checkpoints_only(tmp_path, monkeypatch):
+    from omlx.cluster.catalogue import assess_model_path
+    from omlx.cluster.planner import NodeBudget, complete_model_layout
     from omlx.patches.deepseek_v41.convert import convert
 
-    source, _ = write_checkpoint(tmp_path)
+    source, _ = write_checkpoint(tmp_path, **_ENGRAM)
     convert(source, tmp_path / "converted")
     raw = complete_model_layout(source)
-    layout = complete_model_layout(tmp_path / "converted")
+    # The catalogue may run before anything registers the rank module.
+    monkeypatch.delitem(sys.modules, "mlx_lm.models.deepseek_v41", raising=False)
+    nodes = [
+        NodeBudget(node_id=n, capacity_bytes=1024**3, rank=i)
+        for i, n in enumerate("ab")
+    ]
+    fit = assess_model_path(tmp_path / "converted", nodes)
 
     # Ranks load their part of converted shards only.
     assert not raw.supports_pipeline and not raw.supports_tensor_parallel
-    assert layout.supports_pipeline and layout.supports_tensor_parallel
+    assert fit.supports_pipeline and fit.supports_tensor_parallel
 
 
 def test_cluster_layout_counts_engram_tables_of_converted_checkpoints(tmp_path):

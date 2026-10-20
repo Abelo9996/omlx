@@ -231,7 +231,12 @@ def test_copies_take_a_verified_fabric_address_with_the_paired_host_key(
     )
     assert address == "169.254.3.2"
     assert commands[-1][-2:] == ["me@169.254.3.2", "true"]
-    assert "HostKeyAlias=studio.local" in commands[-1]
+    # OpenSSH keeps the first value, so the strict check precedes accept-new.
+    probe = commands[-1]
+    assert "HostKeyAlias=studio.local" in probe
+    assert probe.index("StrictHostKeyChecking=yes") < probe.index(
+        "StrictHostKeyChecking=accept-new"
+    )
 
     commands.clear()
     scp_push(

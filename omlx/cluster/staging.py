@@ -719,15 +719,22 @@ class StagingResult:
 
 
 def _fabric_route(ssh_target: str, address: str | None) -> tuple[str, list[str]]:
-    """The scp host and extra options that reach ``ssh_target``.
+    """The scp host and leading options that reach ``ssh_target``.
 
-    A fabric address keeps the paired user, and the paired name's host key.
+    A fabric address keeps the paired user and accepts only the host key
+    recorded for the paired name. OpenSSH keeps the first value of an option,
+    so these go before ``cluster_ssh_options``.
     """
 
     if address is None:
         return ssh_target, []
     user, _, host = ssh_target.rpartition("@")
-    return (f"{user}@{address}" if user else address), ["-o", f"HostKeyAlias={host}"]
+    return (f"{user}@{address}" if user else address), [
+        "-o",
+        f"HostKeyAlias={host}",
+        "-o",
+        "StrictHostKeyChecking=yes",
+    ]
 
 
 def fabric_transfer_address(ssh_target: str, addresses: Sequence[str]) -> str | None:
@@ -751,8 +758,8 @@ def fabric_transfer_address(ssh_target: str, addresses: Sequence[str]) -> str | 
             probe = subprocess.run(
                 [
                     "ssh",
-                    *cluster_ssh_options(connect_timeout=3),
                     *route_options,
+                    *cluster_ssh_options(connect_timeout=3),
                     target,
                     "true",
                 ],
@@ -819,8 +826,8 @@ def scp_push(
                 "scp",
                 "-s",
                 "-q",
-                *cluster_ssh_options(connect_timeout=10),
                 *route_options,
+                *cluster_ssh_options(connect_timeout=10),
                 "-c",
                 cipher,
                 str(source),
@@ -915,8 +922,8 @@ def scp_copy(
                     "scp",
                     "-s",
                     "-q",
-                    *cluster_ssh_options(connect_timeout=10),
                     *route_options,
+                    *cluster_ssh_options(connect_timeout=10),
                     "-c",
                     cipher,
                     f"{scp_host}:{remote_source}",
