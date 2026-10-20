@@ -1621,6 +1621,7 @@ def test_chat_routes_reuse_final_prepared_prompt(
     assert prepared == ("canonical prompt", [11, 12, 13])
     generated = streamed_kwargs[0] if stream else engine.chat.call_args.kwargs
     assert generated["_prepared_prompt"] is prepared
+    assert generated["_request_id"] == response.headers["x-omlx-request-id"]
     assert generated["chat_template_kwargs"]["preserve_thinking"] is True
     if path == "/v1/messages" and stream:
         events = [

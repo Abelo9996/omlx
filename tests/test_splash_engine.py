@@ -608,6 +608,7 @@ class TestStreaming:
                 live = engine.get_live_requests()
                 assert live["generating"] == []
                 row = live["prefilling"][0]
+                assert row["request_id"] == "req-1"
                 assert (row["total"], row["processed"]) == (100, 60)
                 assert row["speed"] == (60 - 20) / 0.2
                 assert row["eta"] == (100 - 60) / 200.0
@@ -620,7 +621,7 @@ class TestStreaming:
             tmp_path, lambda request: httpx.Response(200, stream=StreamingBody())
         )
         async for out in engine.stream_chat(
-            [{"role": "user", "content": "hi"}], max_tokens=128
+            [{"role": "user", "content": "hi"}], max_tokens=128, _request_id="req-1"
         ):
             if not out.finished:
                 live = engine.get_live_requests()

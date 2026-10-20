@@ -1091,7 +1091,9 @@ class SplashEngine(BaseEngine):
             body["thinking_token_budget"] = budget
         return body
 
-    async def _stream(self, body: dict[str, Any]) -> AsyncIterator[GenerationOutput]:
+    async def _stream(
+        self, body: dict[str, Any], request_id: str | None = None
+    ) -> AsyncIterator[GenerationOutput]:
         """POST a streaming chat request to Splash and yield oMLX outputs.
 
         Timestamps use time.perf_counter(), the clock oMLX measures time to
@@ -1106,7 +1108,7 @@ class SplashEngine(BaseEngine):
             "stream_options": {"include_usage": True},
         }
         state = _StreamState()
-        request_id = uuid.uuid4().hex
+        request_id = request_id or uuid.uuid4().hex
         live = _LiveRequest(time.monotonic(), body.get("max_tokens"))
         self._live[request_id] = live
         self._active += 1
@@ -1221,7 +1223,7 @@ class SplashEngine(BaseEngine):
         effort = splash_effort(kwargs.get("chat_template_kwargs"))
         if effort:
             body["reasoning_effort"] = effort
-        async for output in self._stream(body):
+        async for output in self._stream(body, kwargs.get("_request_id")):
             yield output
 
     async def chat(self, messages: list[dict[str, Any]], **kwargs) -> GenerationOutput:

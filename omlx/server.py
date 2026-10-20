@@ -2836,29 +2836,26 @@ async def _with_prompt_progress(
         await _aclose_async_iterator(outputs)
 
 
-def _request_abort_id(engine: BaseEngine) -> str | None:
-    """Mint an opaque id only for engines with targeted abort semantics."""
-
-    if not getattr(engine, "supports_request_scoped_abort", False):
-        return None
-    abort = getattr(engine, "abort_request", None)
-    if not callable(abort):
-        return None
-    return f"transport-{uuid.uuid4().hex}"
+# Carries the engine request id, the id /admin/api/stats lists.
+_REQUEST_ID_HEADER = "X-oMLX-Request-ID"
 
 
 async def _with_request_disconnect_abort(
     generator: AsyncIterator[str],
     http_request: FastAPIRequest,
     engine: BaseEngine,
-    request_id: str | None,
+    request_id: str,
 ) -> AsyncIterator[str]:
     """Bind one public response transport to one inference request."""
 
     signal = http_request.scope.get(_DISCONNECT_SIGNAL_SCOPE_KEY)
+    abort = getattr(engine, "abort_request", None)
     token: int | None = None
-    if request_id is not None and isinstance(signal, _ClientDisconnectSignal):
-        abort = getattr(engine, "abort_request")
+    if (
+        getattr(engine, "supports_request_scoped_abort", False)
+        and callable(abort)
+        and isinstance(signal, _ClientDisconnectSignal)
+    ):
 
         async def abort_disconnected_request() -> None:
             await abort(
@@ -4381,7 +4378,7 @@ async def create_completion(
         for prompt in prompts:
             await engine.preflight_completion(prompt, request_id=upstream_request_id)
         await _raise_if_llm_lease_abort_requested(lease)
-        inference_request_id = _request_abort_id(engine)
+        inference_request_id = str(uuid.uuid4())
 
         if request.stream:
             response_id = f"cmpl-{uuid.uuid4().hex[:8]}"
@@ -4412,7 +4409,11 @@ async def create_completion(
                     lease,
                 ),
                 media_type="text/event-stream",
-                headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+                headers={
+                    "X-Accel-Buffering": "no",
+                    "Cache-Control": "no-cache",
+                    _REQUEST_ID_HEADER: inference_request_id,
+                },
             )
 
         # Non-streaming response with keepalive during prefill
@@ -4453,7 +4454,8 @@ async def create_completion(
             thinking_budget = _resolve_thinking_budget(request, request.model)
             if thinking_budget is not None:
                 gen_kwargs["thinking_budget"] = thinking_budget
-            if inference_request_id is not None:
+            # A list prompt runs one engine request per prompt, so no single id.
+            if len(prompts) == 1:
                 gen_kwargs["_request_id"] = inference_request_id
             # Widen the repetition-penalty look-back window when the client
             # asks for it (mlx-lm default window is 20 tokens).
@@ -4556,7 +4558,14 @@ async def create_completion(
             ).model_dump_json(exclude_none=True)
 
         return await _json_response_or_keepalive(
-            http_request, _build_completion(), lease=lease
+            http_request,
+            _build_completion(),
+            lease=lease,
+            headers=(
+                {_REQUEST_ID_HEADER: inference_request_id}
+                if len(prompts) == 1
+                else None
+            ),
         )
     except BaseException:
         await lease.release()
@@ -5019,9 +5028,8 @@ async def create_chat_completion(
         )
 
         await _raise_if_llm_lease_abort_requested(lease)
-        inference_request_id = _request_abort_id(engine)
-        if inference_request_id is not None:
-            chat_kwargs["_request_id"] = inference_request_id
+        inference_request_id = str(uuid.uuid4())
+        chat_kwargs["_request_id"] = inference_request_id
 
         if request.stream:
             # Pre-mint the completion id so the keepalive frame (emitted before the
@@ -5030,7 +5038,11 @@ async def create_chat_completion(
             keepalive = _resolve_keepalive("openai_chat")
             if keepalive == _KEEPALIVE_CHAT_CHUNK:
                 keepalive = _chat_keepalive_chunk(response_id)
-            sse_headers = {"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+            sse_headers = {
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                _REQUEST_ID_HEADER: inference_request_id,
+            }
             if response_format_warning:
                 sse_headers["Warning"] = response_format_warning
             return StreamingResponse(
@@ -5216,9 +5228,9 @@ async def create_chat_completion(
                 ),
             ).model_dump_json(exclude_none=True)
 
-        json_headers = (
-            {"Warning": response_format_warning} if response_format_warning else None
-        )
+        json_headers = {_REQUEST_ID_HEADER: inference_request_id}
+        if response_format_warning:
+            json_headers["Warning"] = response_format_warning
         return await _json_response_or_keepalive(
             http_request, _build_chat_completion(), lease=lease, headers=json_headers
         )
@@ -7656,9 +7668,8 @@ async def create_anthropic_message(
             **chat_kwargs,
         )
         await _raise_if_llm_lease_abort_requested(lease)
-        inference_request_id = _request_abort_id(engine)
-        if inference_request_id is not None:
-            chat_kwargs["_request_id"] = inference_request_id
+        inference_request_id = str(uuid.uuid4())
+        chat_kwargs["_request_id"] = inference_request_id
 
         if request.stream:
             return StreamingResponse(
@@ -7682,7 +7693,11 @@ async def create_anthropic_message(
                     lease,
                 ),
                 media_type="text/event-stream",
-                headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+                headers={
+                    "X-Accel-Buffering": "no",
+                    "Cache-Control": "no-cache",
+                    _REQUEST_ID_HEADER: inference_request_id,
+                },
             )
 
         # Non-streaming response with keepalive during prefill
@@ -7784,7 +7799,10 @@ async def create_anthropic_message(
             return response.model_dump_json()
 
         return await _json_response_or_keepalive(
-            http_request, _build_anthropic_message(), lease=lease
+            http_request,
+            _build_anthropic_message(),
+            lease=lease,
+            headers={_REQUEST_ID_HEADER: inference_request_id},
         )
 
     except BaseException:
@@ -8413,12 +8431,15 @@ async def create_response(
             **chat_kwargs,
         )
         await _raise_if_llm_lease_abort_requested(lease)
-        inference_request_id = _request_abort_id(engine)
-        if inference_request_id is not None:
-            chat_kwargs["_request_id"] = inference_request_id
+        inference_request_id = str(uuid.uuid4())
+        chat_kwargs["_request_id"] = inference_request_id
 
         if request.stream:
-            sse_headers = {"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+            sse_headers = {
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+                _REQUEST_ID_HEADER: inference_request_id,
+            }
             if response_format_warning:
                 sse_headers["Warning"] = response_format_warning
             stream_state = _ResponsesStreamState()
@@ -8622,9 +8643,9 @@ async def create_response(
 
             return response_obj.model_dump_json()
 
-        json_headers = (
-            {"Warning": response_format_warning} if response_format_warning else None
-        )
+        json_headers = {_REQUEST_ID_HEADER: inference_request_id}
+        if response_format_warning:
+            json_headers["Warning"] = response_format_warning
         return await _json_response_or_keepalive(
             http_request, _build_responses_api(), lease=lease, headers=json_headers
         )
