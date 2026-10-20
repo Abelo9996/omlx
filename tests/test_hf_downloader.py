@@ -1906,10 +1906,11 @@ class TestHFDownloaderRoutes:
         ):
             pool.discover_models([str(models_dir)])
             rows = (await admin_routes.list_hf_models(is_admin=True))["models"]
-            assert [(r["name"], r["model_format"], r["repo_id"]) for r in rows] == [
-                ("Q-Q4_K_M", "gguf", None),
-                ("Q-Q8_0", "gguf", None),
-                ("Q-GGUF", "gguf", None),  # Displayed as unsloth/Q-GGUF.
+            listed = [(r["display_name"], r["model_format"], r["repo_id"]) for r in rows]
+            assert listed == [
+                ("unsloth/Q-GGUF", "gguf", None),
+                ("unsloth/Q-Q4_K_M", "gguf", None),
+                ("unsloth/Q-Q8_0", "gguf", None),
             ]
 
             await admin_routes.delete_hf_model("Q-Q4_K_M", is_admin=True)

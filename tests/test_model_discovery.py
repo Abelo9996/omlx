@@ -29,6 +29,7 @@ from omlx.model_discovery import (
     is_helper_config_model_type,
     is_helper_model_config,
     model_directory_access_error,
+    model_display_name,
 )
 
 
@@ -2506,6 +2507,13 @@ class TestGgufDiscovery:
             "qwen3_5",
         )
         assert model.source_path == str(repo / "Q-UD-Q4_K_M.gguf")
+        name = model_display_name(
+            model.model_id,
+            model.model_path,
+            [models_dir],
+            source_path=model.source_path,
+        )
+        assert name == "unsloth/Q-UD-Q4_K_M"
         assert model.estimated_size == 4000 + 500
         assert model.model_context_length == 262144
         assert models["Q-BF16"].estimated_size == 18000 + 500
@@ -2545,8 +2553,19 @@ class TestGgufDiscovery:
         models = discover_models(hub, tmp_path / "gguf")
 
         model = models["Llama-Q4_K_M"]
-        # Named by its file, not the repo every GGUF in it shares.
-        assert (model.source_type, model.source_repo_id) == ("hf_cache", None)
+        assert (model.source_type, model.source_repo_id) == (
+            "hf_cache",
+            "bartowski/Llama-GGUF",
+        )
+        # Named <owner>/<file>: the repo holds other GGUFs too.
+        name = model_display_name(
+            model.model_id,
+            model.model_path,
+            [hub],
+            source_repo_id=model.source_repo_id,
+            source_path=model.source_path,
+        )
+        assert name == "bartowski/Llama-Q4_K_M"
         assert (model.model_type, model.config_model_type) == ("llm", "llama")
         link = Path(model.model_path) / "Llama-Q4_K_M.gguf"
         assert link.resolve() == blob.resolve()

@@ -1823,6 +1823,7 @@ def _register_gguf_model(
     gguf_root: Path,
     *,
     source_type: str,
+    source_repo_id: str | None,
 ) -> None:
     if model.model_id in models:
         logger.warning(
@@ -1846,8 +1847,8 @@ def _register_gguf_model(
             preserve_thinking_default=detect_preserve_thinking(folder, template_text),
             reasoning_efforts=detect_reasoning_effort(folder, template_text),
             model_context_length=_read_model_context_length(folder),
-            # No repo id: it would name every GGUF of the repo alike.
             source_type=source_type,
+            source_repo_id=source_repo_id,
             model_format="gguf",
             source_path=str(model.path),
         )
@@ -1865,6 +1866,7 @@ def _register_gguf_folder(
     gguf_root: Path | None,
     *,
     source_type: str = "local",
+    source_repo_id: str | None = None,
 ) -> bool:
     """Register each GGUF model in ``folder``; False if it is no GGUF folder.
 
@@ -1875,7 +1877,13 @@ def _register_gguf_folder(
         return False
     if gguf_root is not None:
         for model in gguf.find_models(folder):
-            _register_gguf_model(models, model, gguf_root, source_type=source_type)
+            _register_gguf_model(
+                models,
+                model,
+                gguf_root,
+                source_type=source_type,
+                source_repo_id=source_repo_id,
+            )
     return True
 
 
@@ -1885,6 +1893,7 @@ def model_display_name(
     model_dirs: list[Path],
     *,
     source_repo_id: str | None = None,
+    source_path: str | Path | None = None,
 ) -> str:
     """Return the org-qualified display name for a discovered model.
 
@@ -1895,6 +1904,11 @@ def model_display_name(
     same leaf directory name stay distinguishable.
     """
     repo_id = (source_repo_id or "").strip()
+    if source_path:
+        # A GGUF is <owner>/<file>: a repo holds several of them.
+        owner = repo_id.split("/", 1)[0] if "/" in repo_id else None
+        owner = owner or _owner_folder(Path(source_path), model_dirs)
+        return f"{owner}/{model_id}" if owner else model_id
     if "/" in repo_id:
         return repo_id
 
@@ -1922,6 +1936,22 @@ def model_display_name(
         return model_id
 
     return model_id
+
+
+def _owner_folder(path: Path, model_dirs: list[Path]) -> str | None:
+    """The owner folder of ``<model dir>/<owner>/<repo>/<file>``, or None."""
+    try:
+        # The file itself may link elsewhere; its folder places it.
+        folder = path.expanduser().parent.resolve()
+    except (OSError, RuntimeError):
+        return None
+    for model_dir in model_dirs:
+        try:
+            parts = folder.relative_to(Path(model_dir).expanduser().resolve()).parts
+        except (OSError, RuntimeError, ValueError):
+            continue
+        return parts[0] if len(parts) >= 2 else None
+    return None
 
 
 def discover_models(
@@ -1989,7 +2019,11 @@ def discover_models(
             hf_resolved = _resolve_hf_cache_entry(subdir)
             if hf_resolved is not None:
                 if _register_gguf_folder(
-                    models, hf_resolved.snapshot_path, gguf_root, source_type="hf_cache"
+                    models,
+                    hf_resolved.snapshot_path,
+                    gguf_root,
+                    source_type="hf_cache",
+                    source_repo_id=hf_resolved.source_repo_id,
                 ) or _skip_splash_package(hf_resolved.snapshot_path):
                     pass
                 elif _is_hf_cache_mlx_compatible(

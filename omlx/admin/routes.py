@@ -2477,6 +2477,7 @@ async def list_models(is_admin: bool = Depends(require_admin)):
                 model_info.get("model_path", ""),
                 model_dirs,
                 source_repo_id=model_info.get("source_repo_id"),
+                source_path=model_info.get("source_path"),
             ),
             "loaded": model_info.get("loaded", False),
             "is_loading": model_info.get("is_loading", False),
@@ -8133,7 +8134,13 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
             {
                 "name": info["id"],
                 "path": info.get("source_path"),
-                "display_name": info["id"],
+                "display_name": _model_display_name(
+                    info["id"],
+                    None,
+                    model_dirs,
+                    source_repo_id=info.get("source_repo_id"),
+                    source_path=info.get("source_path"),
+                ),
                 "size": info.get("estimated_size", 0),
                 "size_formatted": format_size(info.get("estimated_size", 0)),
                 "repo_id": None,
