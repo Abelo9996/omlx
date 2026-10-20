@@ -808,6 +808,8 @@ class HFDownloadRequest(BaseModel):
 
     repo_id: str
     hf_token: str = ""
+    # Repo paths to fetch; None fetches the whole repo.
+    files: list[str] | None = None
 
 
 class HFRetryRequest(BaseModel):
@@ -7758,7 +7760,9 @@ async def start_hf_download(
         raise HTTPException(status_code=503, detail="Downloader not initialized")
 
     try:
-        task = await _hf_downloader.start_download(request.repo_id, request.hf_token)
+        task = await _hf_downloader.start_download(
+            request.repo_id, request.hf_token, files=request.files
+        )
         return {"success": True, "task": task.to_dict()}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -7820,14 +7824,30 @@ async def remove_hf_task(
     return {"success": True}
 
 
+def _hf_model_format(model_format: str | None, mlx_only: bool) -> str:
+    """The downloader's format filter; ``mlx_only`` is the older spelling."""
+    from .hf_downloader import MODEL_FORMATS
+
+    if model_format is None:
+        return "mlx" if mlx_only else "all"
+    if model_format not in MODEL_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"model_format must be one of {', '.join(MODEL_FORMATS)}",
+        )
+    return model_format
+
+
 @router.get("/api/hf/recommended")
 async def get_recommended_models(
     mlx_only: bool = True,
+    model_format: str | None = None,
     is_admin: bool = Depends(require_admin),
 ):
     """Get recommended models filtered by system memory."""
     if _hf_downloader is None:
         raise HTTPException(status_code=503, detail="Downloader not initialized")
+    resolved_format = _hf_model_format(model_format, mlx_only)
 
     memory_info = get_system_memory_info()
     max_memory = memory_info["total_bytes"] or 16 * 1024**3
@@ -7836,7 +7856,9 @@ async def get_recommended_models(
 
     try:
         result = await HFDownloader.get_recommended_models(
-            max_memory_bytes=max_memory, result_limit=50, mlx_only=mlx_only
+            max_memory_bytes=max_memory,
+            result_limit=50,
+            model_format=resolved_format,
         )
         return result
     except TimeoutError:
@@ -7894,6 +7916,7 @@ async def search_hf_models(
     sort: str = "trending",
     limit: int = 100,
     mlx_only: bool = True,
+    model_format: str | None = None,
     # Filtering
     min_params: Optional[int] = None,
     max_params: Optional[int] = None,
@@ -7910,7 +7933,8 @@ async def search_hf_models(
         q: Search query string (required)
         sort: Sort order - trending/downloads/created/updated/most_params/least_params/largest/smallest
         limit: Maximum results (max 100)
-        mlx_only: Restrict to MLX library models
+        mlx_only: Restrict to MLX library models (older spelling of model_format)
+        model_format: mlx, gguf or all
         min_params: Minimum parameter count
         max_params: Maximum parameter count
         min_size: Minimum model size in bytes
@@ -7920,6 +7944,7 @@ async def search_hf_models(
     """
     if not q.strip():
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
+    resolved_format = _hf_model_format(model_format, mlx_only)
 
     from .hf_downloader import HFDownloader
 
@@ -7928,7 +7953,7 @@ async def search_hf_models(
             query=q.strip(),
             sort=sort,
             limit=min(limit, 100),
-            mlx_only=mlx_only,
+            model_format=resolved_format,
             min_params=min_params,
             max_params=max_params,
             min_size=min_size,
@@ -7961,8 +7986,19 @@ async def get_hf_model_info(
 
     from .hf_downloader import HFDownloader
 
+    repo_id = repo_id.strip()
+    parts = repo_id.split("/")
+    local_dir = None
+    if _hf_downloader is not None and len(parts) == 2 and not {".", ".."} & set(parts):
+        local_dir = _hf_downloader.model_dir / repo_id
     try:
-        result = await HFDownloader.get_model_info(repo_id=repo_id.strip())
+        result = await HFDownloader.get_model_info(
+            repo_id=repo_id, local_dir=local_dir
+        )
+        if _hf_downloader is not None:
+            result["disk_free"] = await asyncio.to_thread(
+                _free_disk_bytes, _hf_downloader.model_dir
+            )
         return result
     except TimeoutError:
         raise HTTPException(
@@ -7970,9 +8006,7 @@ async def get_hf_model_info(
             detail="HuggingFace API request timed out. The service may be temporarily unavailable.",
         )
     except RepositoryNotFoundError:
-        raise HTTPException(
-            status_code=404, detail=f"Model '{repo_id.strip()}' not found"
-        )
+        raise HTTPException(status_code=404, detail=f"Model '{repo_id}' not found")
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
