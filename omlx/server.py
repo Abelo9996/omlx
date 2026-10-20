@@ -4844,6 +4844,7 @@ async def create_chat_completion(
             structured_outputs is not None or response_format
         ):
             await engine.start()
+            reasoning_parser = _grammar_reasoning_parser(engine, reasoning_parser)
         compiled_grammar = (
             None
             if native_response_format is not None
@@ -5459,6 +5460,27 @@ def _allow_reasoning_opener(tag_dict: dict) -> None:
         content["excludes"] = [x for x in content["excludes"] if x != opener]
 
 
+def _end_harmony_final_on_stop(tag_dict: dict) -> None:
+    """Let the Harmony final message end with the model's stop token.
+
+    ``<|return|>`` is the gpt-oss EOS, so xgrammar accepts it only as a stop
+    token and never as tag end text. The builtin end list then leaves only
+    ``<|end|>``, after which the model opens another message.
+    """
+    for tag in tag_dict["format"]["tags"]:
+        if tag.get("begin") == "<|channel|>final<|message|>":
+            tag["end"] = ""
+
+
+def _grammar_reasoning_parser(engine, reasoning_parser: str | None) -> str | None:
+    """Return the structural tag parser for a grammar-constrained request."""
+    # gpt-oss output always goes through the Harmony parser, which needs the
+    # channel headers that a bare grammar would mask.
+    if reasoning_parser is None and engine.model_type == "gpt_oss":
+        return "harmony"
+    return reasoning_parser
+
+
 def _compile_with_structural_tag(
     compiler, fmt: dict, reasoning_parser: str, chat_template_kwargs: dict | None
 ):
@@ -5481,6 +5503,8 @@ def _compile_with_structural_tag(
     tag = xgr.get_builtin_structural_tag(reasoning_parser, reasoning=reasoning)
     tag_dict = tag.model_dump()
     _allow_reasoning_opener(tag_dict)
+    if reasoning_parser == "harmony":
+        _end_harmony_final_on_stop(tag_dict)
     # Compiling the tag without the user grammar would leave the answer
     # unconstrained, so fail and let the caller report it.
     if not _patch_output_format(tag_dict, fmt):
@@ -8214,6 +8238,9 @@ async def create_response(
                 )
                 if native_response_format is None:
                     await engine.start()
+                    reasoning_parser = _grammar_reasoning_parser(
+                        engine, reasoning_parser
+                    )
                     rf = ResponseFormat(**response_format)
                     compiled_grammar = _compile_grammar_for_request(
                         engine,
