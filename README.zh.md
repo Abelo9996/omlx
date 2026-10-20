@@ -196,7 +196,7 @@ brew services info omlx     # 查看状态
 
 ### 模型下载器
 
-在管理后台中直接搜索和下载 HuggingFace 上的 MLX 模型。浏览模型卡片、查看文件大小，一键下载。
+在管理后台中直接搜索和下载 HuggingFace 上的 MLX、GGUF 或所有格式的模型。浏览模型卡片后选择要下载的文件：MLX 检查点始终下载所需文件，GGUF 会一并下载其视觉投影器。
 
 <p align="center">
   <img src="docs/images/downloader_omlx.png" alt="oMLX 模型下载器" width="720">

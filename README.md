@@ -212,7 +212,7 @@ Configure sampling parameters, chat template kwargs, TTL, model alias, model typ
 
 - **Model alias**: set a custom API-visible name. `/v1/models` returns the alias, and requests accept both the alias and directory name.
 - **Model type override**: manually set a model as LLM or VLM regardless of auto-detection.
-- **External engine**: serve Qwen3.8-27B and Qwen3.6-35B-A3B MLX checkpoints from your model directories with [Splash](https://github.com/incoai/splash)'s Metal engine in its own process (official build on M3 or later, Splash M1 on M1/M2). See [docs/Splash.md](docs/Splash.md).
+- **External engine**: serve Qwen3.8-27B and Qwen3.6-35B-A3B MLX, NVFP4 and GGUF checkpoints from your model directories with [Splash](https://github.com/incoai/splash)'s Metal engine in its own process (official build on M3 or later, Splash M1 on M1/M2). See [docs/Splash.md](docs/Splash.md).
 - **Profiles**: save named bundles of per-model settings and switch between them from the admin panel. A profile can optionally be exposed as its own model: `/v1/models` then also lists `<model>:<profile>` (e.g. `qwen3-8b:thinking`), which serves on the same engine as the base model with the profile's settings overlaid per request — no extra memory, no reload. When the base model has an alias, the exposed ID is advertised as `<alias>:<profile>`; the directory-name form keeps working, just like for the base model.
 
 <p align="center">
@@ -230,7 +230,7 @@ Chat directly with any loaded model from the admin panel. Supports conversation 
 
 ### Model Downloader
 
-Search and download MLX models from HuggingFace directly in the admin dashboard. Browse model cards, check file sizes, and download with one click.
+Search and download models from HuggingFace directly in the admin dashboard, in MLX, GGUF or all formats. Browse model cards, then pick the files to download: an MLX checkpoint keeps the files it needs, and a GGUF brings its vision projector.
 
 <p align="center">
   <img src="docs/images/downloader_omlx.png" alt="oMLX Model Downloader" width="720">
@@ -301,7 +301,7 @@ A bare JSON, EBNF, or regex grammar constrains the answer from the first generat
 
 ## Models
 
-Point `--model-dir` at a directory containing MLX-format model subdirectories. Two-level organization folders (e.g., `mlx-community/model-name/`) are also supported.
+Point `--model-dir` at a directory containing MLX-format model subdirectories. Two-level organization folders (e.g., `mlx-community/model-name/`) are also supported. GGUF files in these folders are listed one model per file and run on an [external engine](docs/Splash.md#gguf-models).
 
 ```
 ~/models/

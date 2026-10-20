@@ -67,12 +67,13 @@ Inference responses (`/v1/chat/completions`, `/v1/completions`, `/v1/messages`, 
 
 | Endpoint | Description |
 |---|---|
-| `GET /admin/api/hf/search?q=`, `GET /admin/api/hf/model-info?repo_id=` | Search Hugging Face and read a model card |
+| `GET /admin/api/hf/search?q=&model_format=`, `GET /admin/api/hf/recommended?model_format=` | Search Hugging Face, or list trending and popular repos; `model_format` is `mlx` (default), `gguf` or `all` |
+| `GET /admin/api/hf/model-info?repo_id=` | A model card, with per-file download hints: `required`, `preselected`, `group` (split GGUF), `mmproj` (paired projector) and `local` |
 | `GET /admin/api/hf/recommendations` | oQ builds that fit this Mac's memory guard and Metal limit, grouped as best match, bigger, more bits, faster, and builds that need a higher limit |
-| `POST /admin/api/hf/download` | Start a download, `{"repo_id": "mlx-community/..."}` |
+| `POST /admin/api/hf/download` | Start a download, `{"repo_id": "mlx-community/..."}`; `"files": [...]` fetches only those repo paths. One download runs per repo |
 | `GET /admin/api/hf/tasks` | Download progress |
 | `POST /admin/api/hf/cancel/{task_id}`, `POST .../retry/{task_id}`, `DELETE .../task/{task_id}` | Cancel, retry, or remove a task |
-| `GET /admin/api/hf/models`, `DELETE /admin/api/hf/models/{model_name}` | List or delete downloaded models |
+| `GET /admin/api/hf/models`, `DELETE /admin/api/hf/models/{model_name}` | List or delete downloaded models; a GGUF lists and deletes per file |
 | `/admin/api/ms/...` | The same for ModelScope |
 | `/admin/api/upload/...` | Upload oQ models to Hugging Face |
 
