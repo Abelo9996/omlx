@@ -725,15 +725,16 @@ class MoE(nn.Module):
         )
 
 
-# Cross-rank waits run on the CPU stream and finish on the host. A GPU command
-# buffer that waits for a slower rank is killed by the Metal watchdog after a
-# few seconds, and this model's stages are uneven by design.
+# Each cross-rank transfer finishes on the host before GPU work reads it. A
+# GPU command buffer that waits for a slower rank fails after about 5 s, and
+# this model's stages are uneven by design. It also fixes the order in which
+# rows pair their transfers across ranks.
 
 
 def _receive_stage(h, pre, source):
     """(h, pre) from the rank holding the preceding layers; h keeps its dtype."""
     payload = mx.distributed.recv_like(
-        mx.zeros((*h.shape[:-1], h.shape[-1] + 1), mx.float32), source, stream=mx.cpu
+        mx.zeros((*h.shape[:-1], h.shape[-1] + 1), mx.float32), source
     )
     mx.eval(payload)
     return payload[..., :-1].astype(h.dtype), payload[..., -1]
@@ -742,12 +743,12 @@ def _receive_stage(h, pre, source):
 def _send_stage(h, pre, destination):
     """One transfer: pre must stay fp32, and bf16 h widens without loss."""
     payload = mx.concatenate([h.astype(mx.float32), pre[..., None]], axis=-1)
-    mx.eval(mx.distributed.send(payload, destination, stream=mx.cpu))
+    mx.eval(mx.distributed.send(payload, destination))
 
 
 def _gather_stage(x):
     """Rank 0's rows of ``x``: it holds the last layers."""
-    gathered = mx.distributed.all_gather(x, stream=mx.cpu)
+    gathered = mx.distributed.all_gather(x)
     mx.eval(gathered)
     return gathered[: x.shape[0]]
 
