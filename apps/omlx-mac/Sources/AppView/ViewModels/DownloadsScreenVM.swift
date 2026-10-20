@@ -398,8 +398,7 @@ final class DownloadsScreenVM {
 
     /// Starts a download against the active source. `repo` lets the
     /// suggested-models grid pass a repo id without having to first stuff
-    /// it into the input box. `files` limits an HF download to those repo
-    /// paths; nil fetches the whole repo.
+    /// it into the input box.
     func startDownload(repo: String? = nil, files: [String]? = nil, client: OMLXClient) {
         let target = (repo ?? (source == .hf ? repoText : msRepoText))
             .trimmingCharacters(in: .whitespacesAndNewlines)

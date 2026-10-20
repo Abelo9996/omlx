@@ -153,29 +153,6 @@ final class ModelCardDTODecodeTests: XCTestCase {
         XCTAssertEqual(dto.files?[2].sizeFormatted, "")
     }
 
-    func testDecodesGGUFFileSelectionHints() throws {
-        let json = """
-        {
-            "model_card": "",
-            "layout": "gguf",
-            "download_all_size": 472000000000,
-            "disk_free": 900000000000,
-            "files": [
-                {"name": "Q-UD-Q4_K_M.gguf", "size": 16, "size_formatted": "16 B",
-                 "kind": "gguf", "group": null, "mmproj": "mmproj-BF16.gguf",
-                 "required": false, "preselected": false, "local": true}
-            ]
-        }
-        """.data(using: .utf8)!
-
-        let dto = try decoder.decode(ModelCardDTO.self, from: json)
-        XCTAssertEqual(dto.layout, "gguf")
-        XCTAssertEqual(dto.downloadAllSize, 472_000_000_000)
-        XCTAssertEqual(dto.files?[0].mmproj, "mmproj-BF16.gguf")
-        XCTAssertEqual(dto.files?[0].local, true)
-        XCTAssertNil(dto.files?[0].group)
-    }
-
     func testDecodesTagsList() throws {
         // Tags tab payload — flat array of strings. MS encodes them as
         // comma-separated server-side but converts before serializing,

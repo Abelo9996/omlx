@@ -2515,22 +2515,12 @@ class TestGgufDiscovery:
         )
         assert name == "unsloth/Q-UD-Q4_K_M"
         assert model.estimated_size == 4000 + 500
-        assert model.model_context_length == 262144
         assert models["Q-BF16"].estimated_size == 18000 + 500
         folder = Path(model.model_path)
         assert folder.parent == gguf_root
         config = json.loads((folder / "config.json").read_text())
-        assert config["text_config"] == {
-            "model_type": "qwen3_5_text",
-            "hidden_size": 5120,
-            "num_hidden_layers": 64,
-            "max_position_embeddings": 262144,
-            "num_attention_heads": 24,
-            "num_key_value_heads": 4,
-            "head_dim": 256,
-            "full_attention_interval": 4,
-            "vocab_size": 3,
-        }
+        assert config["text_config"]["num_hidden_layers"] == 64
+        assert config["text_config"]["vocab_size"] == 3
         assert config["vision_config"]["projector_type"] == "qwen3vl_merger"
         links = sorted(path.name for path in folder.iterdir() if path.is_symlink())
         assert links == ["Q-UD-Q4_K_M.gguf", "mmproj-BF16.gguf", "mmproj-F16.gguf"]

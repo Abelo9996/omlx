@@ -78,7 +78,6 @@ enum HFModelFormat: String, CaseIterable, Hashable, Sendable {
 struct StartHFDownloadRequest: Encodable, Sendable {
     let repoId: String
     let hfToken: String
-    /// Repo paths to fetch; nil fetches the whole repo.
     let files: [String]?
 }
 

@@ -74,8 +74,6 @@ MIXED_QUANTIZATION_VERSION = (1, 3, 1)
 THINKING_BUDGET_VERSION = (1, 3, 2)
 # Splash loads Model Optimizer and compressed-tensors NVFP4/FP8 from 1.3.2 on.
 NVIDIA_QUANTIZATION_VERSION = (1, 3, 2)
-# The formats Splash reads from them: Model Optimizer algorithms and
-# compressed-tensors group formats.
 _MODELOPT_ALGOS = frozenset({"NVFP4", "W4A16_NVFP4", "FP8"})
 _COMPRESSED_TENSORS_FORMATS = frozenset({"nvfp4-pack-quantized", "float-quantized"})
 SPLASH_MAX_CONTEXT = 262144

@@ -810,7 +810,6 @@ class HFDownloadRequest(BaseModel):
 
     repo_id: str
     hf_token: str = ""
-    # Repo paths to fetch; None fetches the whole repo.
     files: list[str] | None = None
 
 

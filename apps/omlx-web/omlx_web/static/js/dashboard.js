@@ -4360,7 +4360,6 @@
                 return this.firstUsableExternalEngine() || this.modelSettings.external_engines?.[0]?.id || '';
             },
 
-            // The draft the selected engine lacks, when a download provides it.
             externalEngineDraftRepo() {
                 const engines = this.modelSettings.external_engines || [];
                 const engine = engines.find(e => e.id === this.effectiveExternalEngine()) || engines[0];
@@ -7046,7 +7045,6 @@
                 this.openModelDetail(repoId, 'files');
             },
 
-            // files: repo paths to fetch, or null for the whole repo.
             async submitHFDownload(files) {
                 const repoId = this.hfModelDetail?.repo_id;
                 if (!repoId) return;

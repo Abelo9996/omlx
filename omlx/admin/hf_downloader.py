@@ -237,7 +237,6 @@ class _UnsupportedRepoError(ValueError):
 
 
 def _unsupported_repo_reason(model_info) -> str | None:
-    """Why no engine oMLX runs loads this repo, or None."""
     if getattr(model_info, "library_name", None) != "splash":
         return None
     card = getattr(model_info, "card_data", None)
@@ -252,7 +251,6 @@ def _unsupported_repo_reason(model_info) -> str | None:
 
 
 def _check_selected_files(task: "DownloadTask", model_info) -> None:
-    """Fail a file selection the repo does not hold, before any transfer."""
     siblings = getattr(model_info, "siblings", None)
     if not task.files or not isinstance(siblings, (list, tuple)):
         return
@@ -652,7 +650,6 @@ def _sum_snapshot_bytes(
 
 
 def _normalize_files(files) -> list[str] | None:
-    """Validate requested repo paths; None keeps the whole-repo download."""
     if files is None:
         return None
     cleaned: set[str] = set()
@@ -674,7 +671,6 @@ def _file_patterns(files: list[str]) -> list[str]:
     return [glob.escape(name) for name in files]
 
 
-# Search and recommendation filters of the downloader.
 MODEL_FORMATS = ("mlx", "gguf", "all")
 
 # PyTorch copies a whole-repo download skips when safetensors exist.
@@ -731,10 +727,6 @@ def _describe_repo_files(files: list[dict], local_dir: Path | None) -> str:
     """Add download hints to model-info file rows; return the repo layout.
 
     Only root GGUFs are models (subfolders hold split copies and MTP heads).
-    ``required`` marks the files a safetensors checkpoint cannot load
-    without, ``preselected`` the files a selection starts with, ``group``
-    the split GGUF a part belongs to, ``mmproj`` the projector a GGUF pairs
-    with, and ``local`` a file already downloaded.
     """
     names = [row["name"] for row in files]
     layout = _repo_layout(names)

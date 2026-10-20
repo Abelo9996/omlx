@@ -270,8 +270,6 @@ def mock_model_config() -> MockModelConfig:
 
 
 def _gguf_value(value) -> bytes:
-    if isinstance(value, bool):
-        return struct.pack("<I?", 7, value)
     if isinstance(value, int):
         return struct.pack("<II", 4, value)
     if isinstance(value, float):

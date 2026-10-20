@@ -1505,7 +1505,6 @@ private struct ExternalEngineRow: View {
 
     private var isGGUF: Bool { vm.model?.isGGUF == true }
 
-    /// The draft the selected engine lacks, when a download provides it.
     private var draftRepo: String? {
         let engine = engines.first(where: { $0.id == vm.effectiveExternalEngine }) ?? engines.first
         guard let engine, !engine.compatible else { return nil }
