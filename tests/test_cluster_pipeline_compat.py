@@ -240,14 +240,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def test_pipelined_glm5_next_forward_matches_single_process(tmp_path):
+def _run_glm5_next_ranks(tmp_path, script):
     hostfile = tmp_path / "ring.json"
     hostfile.write_text(
         json.dumps([[f"127.0.0.1:{_free_port()}"], [f"127.0.0.1:{_free_port()}"]])
     )
     procs = [
         subprocess.Popen(
-            [sys.executable, "-c", _GLM5_NEXT_RANK, json.dumps(_GLM5_NEXT_TEXT)],
+            [sys.executable, "-c", script, json.dumps(_GLM5_NEXT_TEXT)],
             env=dict(os.environ, MLX_RANK=str(rank), MLX_HOSTFILE=str(hostfile)),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -267,3 +267,64 @@ def test_pipelined_glm5_next_forward_matches_single_process(tmp_path):
     for rank, (code, out) in enumerate(outputs):
         assert code == 0, f"rank {rank} failed:\n{out[-2000:]}"
         assert '"ok": true' in out
+
+
+def test_pipelined_glm5_next_forward_matches_single_process(tmp_path):
+    _run_glm5_next_ranks(tmp_path, _GLM5_NEXT_RANK)
+
+
+# One rank of the GLM-5.3 tensor-parallel test below: the same tiny model run
+# whole, then with each layer split across two ranks, unquantized and 4-bit.
+_GLM5_NEXT_TP_RANK = """
+import json
+import sys
+import mlx.core as mx
+import mlx.nn as nn
+group = mx.distributed.init(backend="ring", strict=True)
+from omlx.cluster.tensor_strategies import apply_tensor_strategy
+from omlx.patches.glm5_next_mlx_lm import apply_glm5_next_mlx_lm_patch
+assert apply_glm5_next_mlx_lm_patch()
+from mlx_lm.models import glm5_next
+
+text = json.loads(sys.argv[1])
+args = glm5_next.ModelArgs.from_dict({"model_type": "glm5_next", "text_config": text})
+mx.random.seed(7)
+prompt = mx.random.randint(0, 1024, (1, 265))
+# LayerPipeline prefill, a short block, then two deferred one-token decodes.
+steps = [prompt[:, :260], prompt[:, 260:263], prompt[:, 263:264], prompt[:, 264:]]
+
+def build(bits):
+    mx.random.seed(11)
+    model = glm5_next.Model(args)
+    if bits:
+        nn.quantize(
+            model,
+            64,
+            bits,
+            class_predicate=lambda path, module: hasattr(module, "to_quantized")
+            and module.weight.shape[-1] % 64 == 0,
+        )
+    mx.eval(model.parameters())
+    return model
+
+def run(model):
+    cache = model.make_cache()
+    outs = []
+    for chunk in steps:
+        outs.append(model(chunk, cache=cache))
+        mx.eval(outs[-1])
+    return outs
+
+for bits in (None, 4):
+    reference = run(build(bits))
+    model = build(bits)
+    apply_tensor_strategy(model, group, mx_module=mx)
+    got = run(model)
+    for r, g in zip(reference, got):
+        assert mx.allclose(r, g, atol=1e-4, rtol=1e-4).item(), mx.abs(r - g).max()
+print(json.dumps({"rank": group.rank(), "ok": True}), flush=True)
+"""
+
+
+def test_tensor_parallel_glm5_next_forward_matches_single_process(tmp_path):
+    _run_glm5_next_ranks(tmp_path, _GLM5_NEXT_TP_RANK)

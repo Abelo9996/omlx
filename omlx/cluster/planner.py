@@ -687,6 +687,14 @@ def _tensor_parallel_divisors(config: dict[str, Any]) -> tuple[int, ...]:
                 _config_int(config, "linear_num_value_heads", 1),
             )
         )
+    if model_type == "glm5_next":
+        # KDA heads, read the way the model's TextConfig reads them.
+        linear_heads = _config_int(config, "linear_num_heads", 64)
+        text = config.get("text_config")
+        linear = text.get("linear_attn_config") if isinstance(text, dict) else None
+        if isinstance(linear, dict):
+            linear_heads = _config_int(linear, "num_heads", linear_heads)
+        values.append(linear_heads)
     if model_type == "nemotron_h":
         values.extend(
             (

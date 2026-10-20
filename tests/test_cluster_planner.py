@@ -648,6 +648,21 @@ def test_nemotron_h_divisors_omit_quant_groups_when_unquantized():
     assert set(divisors) == {32, 2, 64, 8}
 
 
+def test_glm5_next_divisors_include_kda_heads():
+    from omlx.cluster.planner import _tensor_parallel_divisors
+
+    config = {
+        "model_type": "glm5_next",
+        "text_config": {
+            "num_attention_heads": 64,
+            "linear_attn_config": {"num_heads": 12, "head_dim": 128},
+        },
+    }
+
+    # Two ranks split both head counts; four cannot split 12 KDA heads.
+    assert set(_tensor_parallel_divisors(config)) == {64, 12}
+
+
 def test_complete_model_layout_cache_invalidates_on_shard_overwrite(
     tmp_path, monkeypatch
 ):
