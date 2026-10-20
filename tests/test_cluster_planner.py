@@ -695,6 +695,30 @@ def test_deepseek_v41_tensor_plan_keeps_the_shared_kv_head_whole():
     assert set(_tensor_parallel_divisors(config)) == {64, 8, 128, 36, 72}
 
 
+def test_tensor_plan_leaves_ssd_tables_out_of_rank_memory():
+    from omlx.cluster.planner import plan_hybrid
+
+    layout = ModelLayout(
+        source="tables",
+        fixed_weight_bytes=10,
+        layer_weight_bytes=(100, 300, 100),
+        tensor_parallel_ssd_layer_bytes=(0, 200, 0),
+        tensor_parallel_heads=2,
+        supports_tensor_parallel=True,
+        supports_pipeline=True,
+    )
+    nodes = [
+        NodeBudget(node_id=n, capacity_bytes=1000, rank=i) for i, n in enumerate("ab")
+    ]
+
+    tensor = plan_hybrid(layout, nodes, tensor_parallel_size=2)
+    pipeline = plan_hybrid(layout, nodes, tensor_parallel_size=1)
+
+    assert [item.layer_weight_bytes for item in tensor.assignments] == [150, 150]
+    assert sum(item.layer_weight_bytes for item in pipeline.assignments) == 500
+    assert ModelLayout.from_dict(layout.to_dict()) == layout
+
+
 def test_complete_model_layout_cache_invalidates_on_shard_overwrite(
     tmp_path, monkeypatch
 ):

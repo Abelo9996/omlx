@@ -1397,6 +1397,30 @@ def test_cluster_plans_converted_checkpoints_only(tmp_path):
     assert layout.supports_pipeline and layout.supports_tensor_parallel
 
 
+def test_cluster_layout_counts_engram_tables_of_converted_checkpoints(tmp_path):
+    from omlx.cluster.planner import complete_model_layout
+    from omlx.patches.deepseek_v41.convert import convert
+
+    source, _ = write_checkpoint(tmp_path, **_ENGRAM)
+    target = tmp_path / "converted"
+    convert(source, target)
+    layout = complete_model_layout(target)
+
+    # The converter keeps the tables outside the index, in a file that holds
+    # other tensors too. Stages hold the tables; tensor ranks read them from SSD.
+    tables = mx.load(str(target / "engram" / "model.safetensors"))
+    expected = [0] * 5
+    for layer in (1, 3):
+        expected[layer] = tables[f"layers.{layer}.engram.embed.weight"].nbytes
+    assert list(layout.tensor_parallel_ssd_layer_bytes) == expected
+    assert all(
+        whole > part
+        for whole, part in zip(
+            layout.layer_weight_bytes, layout.tensor_parallel_ssd_layer_bytes
+        )
+    )
+
+
 # One rank of the tensor-parallel test below: the whole model, then this rank's
 # slice of it, read from the same converted checkpoint.
 _TENSOR_RANK = """

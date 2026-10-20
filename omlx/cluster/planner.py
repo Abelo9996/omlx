@@ -119,6 +119,9 @@ class ModelLayout:
     # Layers a later stage may start at, for architectures whose layers read
     # state that an earlier layer keeps in its own cache. Empty means any.
     pipeline_stage_starts: tuple[int, ...] = ()
+    # Per-layer bytes a tensor-parallel rank reads from SSD instead of holding
+    # (DeepSeek V4.1 Engram tables). Pipeline stages hold them. Empty means 0.
+    tensor_parallel_ssd_layer_bytes: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.fixed_weight_bytes < 0:
@@ -165,6 +168,15 @@ class ModelLayout:
             not 0 < start < len(self.layer_weight_bytes) for start in starts
         ):
             raise ValueError("pipeline_stage_starts must be increasing inner layers")
+        ssd = self.tensor_parallel_ssd_layer_bytes
+        if ssd and (
+            len(ssd) != len(self.layer_weight_bytes)
+            or any(
+                not 0 <= part <= whole
+                for part, whole in zip(ssd, self.layer_weight_bytes)
+            )
+        ):
+            raise ValueError("tensor_parallel_ssd_layer_bytes must fit each layer")
 
     @property
     def layer_count(self) -> int:
@@ -173,6 +185,13 @@ class ModelLayout:
     @property
     def total_weight_bytes(self) -> int:
         return self.fixed_weight_bytes + sum(self.layer_weight_bytes)
+
+    @property
+    def tensor_parallel_layer_bytes(self) -> tuple[int, ...]:
+        """Per-layer bytes a tensor-parallel group holds in memory."""
+
+        ssd = self.tensor_parallel_ssd_layer_bytes or (0,) * self.layer_count
+        return tuple(whole - part for whole, part in zip(self.layer_weight_bytes, ssd))
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -194,6 +213,10 @@ class ModelLayout:
         # Omitted when unrestricted so existing plan hashes stay the same.
         if self.pipeline_stage_starts:
             payload["pipeline_stage_starts"] = list(self.pipeline_stage_starts)
+        if any(self.tensor_parallel_ssd_layer_bytes):
+            payload["tensor_parallel_ssd_layer_bytes"] = list(
+                self.tensor_parallel_ssd_layer_bytes
+            )
         return payload
 
     @classmethod
@@ -240,6 +263,10 @@ class ModelLayout:
                 supports_pipeline=bool(payload.get("supports_pipeline", False)),
                 pipeline_stage_starts=tuple(
                     int(value) for value in payload.get("pipeline_stage_starts", ())
+                ),
+                tensor_parallel_ssd_layer_bytes=tuple(
+                    int(value)
+                    for value in payload.get("tensor_parallel_ssd_layer_bytes", ())
                 ),
             )
         except (KeyError, TypeError, ValueError) as exc:
@@ -1084,7 +1111,21 @@ def _bounded_json_object(path: Path, *, limit: int) -> dict[str, Any]:
     return value
 
 
-def _model_weight_files(model_path: Path) -> tuple[Path, ...]:
+def _weight_file(root: Path, name: str) -> Path:
+    relative = Path(name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise PlanningError(f"weight file escapes model directory: {name}")
+    candidate = root / relative
+    if not candidate.is_file():
+        raise PlanningError(f"weight file is missing: {name}")
+    return candidate
+
+
+def _model_weight_files(
+    model_path: Path, side_files: Sequence[str] = ()
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """The weight files the index lists, and those of ``side_files`` it does not."""
+
     index_path = model_path / "model.safetensors.index.json"
     names: set[str] = set()
     if index_path.is_file():
@@ -1110,18 +1151,36 @@ def _model_weight_files(model_path: Path) -> tuple[Path, ...]:
         names = {path.name for path in model_path.glob("*.safetensors")}
 
     root = model_path.resolve()
-    files: list[Path] = []
-    for name in sorted(names):
-        relative = Path(name)
-        if relative.is_absolute() or ".." in relative.parts:
-            raise PlanningError(f"weight file escapes model directory: {name}")
-        candidate = root / relative
-        if not candidate.is_file():
-            raise PlanningError(f"weight file is missing: {name}")
-        files.append(candidate)
+    files = tuple(_weight_file(root, name) for name in sorted(names))
     if not files:
         raise PlanningError(f"no safetensors weights found in {model_path}")
-    return tuple(files)
+    side = tuple(_weight_file(root, name) for name in sorted(set(side_files) - names))
+    return files, side
+
+
+def _engram_tables(config: dict[str, Any]) -> tuple[frozenset[str], tuple[str, ...]]:
+    """DeepSeek V4.1 Engram table tensors and the files that hold them.
+
+    oMLX's converter writes the tables to their own file, outside the index.
+    """
+
+    spec = config.get("omlx_deepseek_v41")
+    tables = spec.get("engram_tables") if isinstance(spec, dict) else None
+    names: set[str] = set()
+    files: set[str] = set()
+    for table in (tables or {}).values():
+        if not isinstance(table, dict):
+            continue
+        for key, into in (
+            ("weight_key", names),
+            ("scale_key", names),
+            ("bias_key", names),
+            ("weight_file", files),
+            ("scale_file", files),
+        ):
+            if isinstance(table.get(key), str):
+                into.add(table[key])
+    return frozenset(names), tuple(sorted(files))
 
 
 def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
@@ -1133,13 +1192,18 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
 
     fixed_bytes = 0
     layer_sizes: dict[int, int] = {}
+    ssd_sizes: dict[int, int] = {}
     tensor_names: set[str] = set()
     tensor_count = 0
-    for weight_file in _model_weight_files(root):
+    engram_names, engram_files = _engram_tables(_model_config(root))
+    weight_files, table_files = _model_weight_files(root, engram_files)
+    for weight_file in (*weight_files, *table_files):
+        # A table file outside the index may hold other source tensors too.
+        tables_only = weight_file in table_files
         header, payload_bytes = _safetensors_header(weight_file)
         intervals: list[tuple[int, int, str]] = []
         for name, spec in header.items():
-            if name == "__metadata__":
+            if name == "__metadata__" or (tables_only and name not in engram_names):
                 continue
             if name in tensor_names:
                 raise PlanningError(f"duplicate tensor name: {name}")
@@ -1173,6 +1237,10 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
                 layer_sizes[layer_index] = (
                     layer_sizes.get(layer_index, 0) + tensor_bytes
                 )
+                if name in engram_names:
+                    ssd_sizes[layer_index] = (
+                        ssd_sizes.get(layer_index, 0) + tensor_bytes
+                    )
             tensor_count += 1
         intervals.sort()
         for previous, current in zip(intervals, intervals[1:]):
@@ -1227,6 +1295,11 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
         pipeline_stage_starts=_pipeline_stage_starts(_model_config(root)),
         kv_bytes_per_token_per_layer=_kv_bytes_per_token_per_layer(_model_config(root)),
         kv_replicated_across_tp=_kv_cache_replicated_across_tp(_model_config(root)),
+        tensor_parallel_ssd_layer_bytes=(
+            tuple(ssd_sizes.get(index, 0) for index in expected_indices)
+            if ssd_sizes
+            else ()
+        ),
     )
 
 
@@ -2201,14 +2274,14 @@ def plan_hybrid(
     kv_bytes_per_layer = _kv_bytes_for_stage(model, 1, context_tokens)
     if model.kv_replicated_across_tp:
         kv_bytes_per_layer *= tensor_parallel_size
+    layer_bytes = model.tensor_parallel_layer_bytes
     try:
         ranges = _partition_layers(
-            model.layer_weight_bytes,
+            layer_bytes,
             stage_budgets,
             fixed_weight_bytes=model.fixed_weight_bytes,
             layer_resident_sizes=tuple(
-                weight_bytes + kv_bytes_per_layer
-                for weight_bytes in model.layer_weight_bytes
+                weight_bytes + kv_bytes_per_layer for weight_bytes in layer_bytes
             ),
             activation_bytes_per_token=model.activation_bytes_per_token,
             workload_profile=workload_profile,
@@ -2227,7 +2300,7 @@ def plan_hybrid(
     assignments: list[PipelineAssignment] = []
     for stage, group in enumerate(stage_groups):
         start, end = stage_ranges[stage]
-        stage_layer_bytes = sum(model.layer_weight_bytes[start:end])
+        stage_layer_bytes = sum(layer_bytes[start:end])
         # The stage's layer weights are split across its TP members; the first
         # `remainder` ranks carry one extra byte so the parts sum exactly.
         per_member = stage_layer_bytes // tensor_parallel_size
