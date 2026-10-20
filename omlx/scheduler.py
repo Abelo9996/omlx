@@ -11306,6 +11306,7 @@ class Scheduler:
             extract_cache_states=self._extract_cache_states,
             sync_and_clear_cache=lambda: Scheduler._clear_cache(self),
             log=logger,
+            use_hot_cache=not self._bypass_hot_cache_under_pressure(),
         )
 
     def _cleanup_specprefill(self, request_id: str) -> None:
