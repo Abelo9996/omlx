@@ -87,6 +87,26 @@ def test_a_stage_gets_only_its_shards_plus_shared(tmp_path):
     assert "model-00000.safetensors" not in names, "must not ship other stages' layers"
 
 
+def test_vision_only_shards_are_not_staged_or_required(tmp_path):
+    """Ranks load the text model only, so the vision tower never travels."""
+
+    root = _model(tmp_path / "m", layers=8, per_file=2, with_index=True)
+    vision = [
+        "vision_tower.blocks.6.attn.qkv.weight",
+        "vision_tower.patch_embed.weight",
+    ]
+    _write_shard(root, "model-vision.safetensors", vision)
+    index = json.loads((root / "model.safetensors.index.json").read_text())
+    index["weight_map"].update(dict.fromkeys(vision, "model-vision.safetensors"))
+    (root / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    staged = {s.name for s in shards_for_stage(index_shards(root), 6, 8)}
+    (root / "model-vision.safetensors").unlink()
+
+    assert "model-vision.safetensors" not in staged
+    assert validate_staged_model(root, 6, 8)["stage_ready"] is True
+
+
 def test_plan_reports_the_saving(tmp_path):
     root = _model(tmp_path / "m", layers=8, per_file=2)
     plan = plan_staging(root, node_id="mbp", start_layer=6, end_layer=8)

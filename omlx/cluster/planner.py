@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import re
 import struct
@@ -16,6 +17,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from ..model_discovery import _VISION_WEIGHT_PREFIXES
 from .node_role import ROLES
 from .performance import ExecutionProfileName, NodePerformanceProfile
 from .staging import DEFAULT_REMOTE_PYTHON, is_local_host, run_remote_python
@@ -622,8 +624,6 @@ def _supports_tensor_parallel(config: dict[str, Any]) -> bool:
     if not model_type.replace("_", "").isalnum():
         return False
     try:
-        import importlib
-
         module = importlib.import_module(f"mlx_lm.models.{model_type}")
         model_class = getattr(module, "Model", None)
         shard = getattr(model_class, "shard", None)
@@ -631,6 +631,30 @@ def _supports_tensor_parallel(config: dict[str, Any]) -> bool:
         return False
     supported, _reason = native_shard_is_layer_local(shard)
     return supported
+
+
+def _mlx_lm_accepts_config(config: dict[str, Any]) -> bool:
+    """Whether the mlx-lm model a rank builds accepts this checkpoint's config.
+
+    A module can implement pipelining and still refuse the checkpoint: the
+    mlx-lm ``deepseek_v41`` raises for Engram layers, which V4.1-Flash has.
+    """
+
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str) or not model_type.replace("_", "").isalnum():
+        return False
+    try:
+        module = importlib.import_module(f"mlx_lm.models.{model_type}")
+    except ImportError:
+        return False
+    from_dict = getattr(getattr(module, "ModelArgs", None), "from_dict", None)
+    if from_dict is None:
+        return True
+    try:
+        from_dict(config)
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _tensor_parallel_divisors(config: dict[str, Any]) -> tuple[int, ...]:
@@ -1069,6 +1093,10 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
                 raise PlanningError(f"invalid data offsets for tensor {name}")
             if offsets[1] > offsets[0]:
                 intervals.append((offsets[0], offsets[1], name))
+            if name.startswith(_VISION_WEIGHT_PREFIXES):
+                # Ranks load the text model only, and vision_tower.blocks.N
+                # would otherwise be charged to decoder layer N.
+                continue
             tensor_bytes = offsets[1] - offsets[0]
             layer_index = _tensor_layer_index(name)
             if layer_index is None:
@@ -1112,6 +1140,7 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
         raise PlanningError(
             "safetensors layer indices must be contiguous and start at zero"
         )
+    loadable = _mlx_lm_accepts_config(_model_config(root))
     return ModelLayout(
         source=str(root.resolve()),
         fixed_weight_bytes=fixed_bytes,
@@ -1123,8 +1152,10 @@ def inspect_safetensors_layout(model_path: str | Path) -> ModelLayout:
             _model_config(root), "num_key_value_heads", 0
         ),
         tensor_parallel_divisors=_tensor_parallel_divisors(_model_config(root)),
-        supports_tensor_parallel=_supports_tensor_parallel(_model_config(root)),
-        supports_pipeline=_supports_pipeline(_model_config(root)),
+        supports_tensor_parallel=(
+            loadable and _supports_tensor_parallel(_model_config(root))
+        ),
+        supports_pipeline=loadable and _supports_pipeline(_model_config(root)),
         kv_bytes_per_token_per_layer=_kv_bytes_per_token_per_layer(_model_config(root)),
         kv_replicated_across_tp=_kv_cache_replicated_across_tp(_model_config(root)),
     )

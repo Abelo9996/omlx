@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ..model_discovery import _VISION_WEIGHT_PREFIXES
 from .ssh_policy import cluster_ssh_options
 from .worker_shim import CLUSTER_PYTHON_SHIM
 
@@ -102,6 +103,26 @@ def _safetensors_tensor_names(path: Path) -> list[str]:
     return [name for name in header if name != "__metadata__"]
 
 
+def _shard_coverage(names: Sequence[str]) -> tuple[frozenset[int], bool]:
+    """Decoder layers a file holds, and whether it holds shared text tensors.
+
+    Vision tensors are ignored: ranks load the text model only, and
+    ``vision_tower.blocks.N`` is not decoder layer N.
+    """
+
+    layers: set[int] = set()
+    shared = False
+    for name in names:
+        if name.startswith(_VISION_WEIGHT_PREFIXES):
+            continue
+        match = _LAYER.search(name)
+        if match:
+            layers.add(int(match.group(1)))
+        else:
+            shared = True
+    return frozenset(layers), shared
+
+
 def index_shards(model_path: str | Path) -> tuple[ShardInfo, ...]:
     """Describe every weight file in a model directory.
 
@@ -130,19 +151,12 @@ def index_shards(model_path: str | Path) -> tuple[ShardInfo, ...]:
         names = names_by_file.get(path.name)
         if names is None:
             names = _safetensors_tensor_names(path)
-        layers = set()
-        shared = False
-        for name in names:
-            match = _LAYER.search(name)
-            if match:
-                layers.add(int(match.group(1)))
-            else:
-                shared = True
+        layers, shared = _shard_coverage(names)
         shards.append(
             ShardInfo(
                 name=path.name,
                 size_bytes=path.stat().st_size,
-                layers=frozenset(layers),
+                layers=layers,
                 has_shared_tensors=shared,
             )
         )
@@ -238,19 +252,12 @@ def _indexed_shards(model_path: str | Path) -> tuple[ShardInfo, ...] | None:
     shards: list[ShardInfo] = []
     for filename, names in sorted(names_by_file.items()):
         path = root / filename
-        layers: set[int] = set()
-        shared = False
-        for name in names:
-            match = _LAYER.search(name)
-            if match:
-                layers.add(int(match.group(1)))
-            else:
-                shared = True
+        layers, shared = _shard_coverage(names)
         shards.append(
             ShardInfo(
                 name=filename,
                 size_bytes=path.stat().st_size if path.is_file() else 0,
-                layers=frozenset(layers),
+                layers=layers,
                 has_shared_tensors=shared,
             )
         )

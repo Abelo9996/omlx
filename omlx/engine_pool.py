@@ -63,6 +63,7 @@ from .exceptions import (
 )
 from .model_discovery import (
     VLM_NATIVE_TEXT_MODEL_TYPES,
+    detect_model_type,
     discover_models,
     format_size,
     is_realtime_stt_model,
@@ -151,6 +152,9 @@ def build_claude_tier_aliases(claude_code_settings) -> dict[str, str]:
 _FP16_BYTES = 2
 _MAX_AFFINE_BYTES_PER_WEIGHT = 1.0625  # q8 plus fp16 scale/bias per group
 _CPU_SHARE_MATERIALIZATION_HEADROOM = 1.5
+# Cluster ranks load the text model through mlx-lm, so a VLM-classified
+# checkpoint is served text-only while its deployment is active.
+_CLUSTER_ENGINE_TYPES = frozenset({"batched", "vlm"})
 
 
 def _positive_int(value: object) -> int:
@@ -544,7 +548,7 @@ class EnginePool:
             deployment = getattr(entry.engine, "deployment", None)
             return deployment if isinstance(deployment, ClusterDeployment) else None
         registry = self._cluster_registry
-        if registry is None or entry.engine_type != "batched":
+        if registry is None or entry.engine_type not in _CLUSTER_ENGINE_TYPES:
             return None
         return registry.get_for_model(entry.model_path)
 
@@ -1610,10 +1614,10 @@ class EnginePool:
         if not matches:
             raise ModelNotFoundError(model_path, list(self._entries.keys()))
         model_id, entry = self._select_cluster_path_match(matches)
-        if entry.engine_type != "batched":
+        if entry.engine_type not in _CLUSTER_ENGINE_TYPES:
             raise ValueError(
                 f"Model '{model_id}' is a {entry.model_type} model. "
-                "Distributed cluster inference currently supports text LLM "
+                "Distributed cluster inference supports text generation "
                 "models only."
             )
         return model_id
@@ -1648,11 +1652,11 @@ class EnginePool:
         ]
         if exact:
             model_id, entry = self._select_cluster_path_match(exact)
-            if entry.engine_type != "batched":
+            if entry.engine_type not in _CLUSTER_ENGINE_TYPES:
                 raise ValueError(
                     f"Model '{model_id}' is already registered as "
                     f"{entry.model_type}; stop or remove that local model "
-                    "before activating it as a text cluster model."
+                    "before activating it as a cluster model."
                 )
             return model_id, False
 
@@ -1678,7 +1682,8 @@ class EnginePool:
         self._entries[model_id] = EngineEntry(
             model_id=model_id,
             model_path=str(path),
-            model_type="llm",
+            # Matches the local entry, so media input is refused the same way.
+            model_type="vlm" if detect_model_type(path) == "vlm" else "llm",
             engine_type="batched",
             estimated_size=int(estimated_size),
             config_model_type=str(config.get("model_type") or ""),
@@ -3931,6 +3936,7 @@ class EnginePool:
                             model_settings, "enable_thinking", None
                         ),
                         model_settings=model_settings,
+                        vision_checkpoint=entry.model_type == "vlm",
                     )
                     logger.info(
                         "Distributed inference enabled for %s: ranks=%d "
