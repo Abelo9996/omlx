@@ -390,6 +390,7 @@
   "models.browse.mlx_only": "Pouze MLX",
   "models.queue.section_label": "Fronta stahování",
   "models.queue.downloading": "Stahování…",
+  "models.queue.eta": "zbývá {time}",
   "models.queue.cancel_tooltip": "Zrušit stahování",
   "models.queue.remove_tooltip": "Odebrat ze seznamu",
   "models.queue.copy_model_name_tooltip": "Kopírovat název modelu",

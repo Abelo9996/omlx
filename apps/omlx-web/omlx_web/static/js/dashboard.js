@@ -7088,8 +7088,18 @@
                 const pct = Math.round(task.progress || 0);
                 const dlGB = (task.downloaded_size / (1024 ** 3)).toFixed(1);
                 const totalGB = (task.total_size / (1024 ** 3)).toFixed(1);
-                const base = `${pct}% \u00b7 ${dlGB} GB / ${totalGB} GB`;
-                return `${base} \u00b7 ${this.formatSpeed(task)}`;
+                const base = `${pct}% \u00b7 ${dlGB} GB / ${totalGB} GB \u00b7 ${this.formatSpeed(task)}`;
+                const eta = this.formatEta(task.eta_seconds);
+                return eta ? `${base} \u00b7 ${eta}` : base;
+            },
+
+            formatEta(seconds) {
+                if (seconds == null) return '';
+                const h = Math.floor(seconds / 3600);
+                const m = Math.floor((seconds % 3600) / 60);
+                const s = seconds % 60;
+                const time = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+                return window.t('models.queue.eta').replace('{time}', time);
             },
 
             formatSpeed(task) {

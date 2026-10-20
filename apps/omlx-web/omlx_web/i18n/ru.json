@@ -390,6 +390,7 @@
   "models.browse.mlx_only": "только MLX",
   "models.queue.section_label": "Очередь загрузок",
   "models.queue.downloading": "Загрузка...",
+  "models.queue.eta": "осталось {time}",
   "models.queue.cancel_tooltip": "Отменить загрузку",
   "models.queue.remove_tooltip": "Убрать из списка",
   "models.queue.copy_model_name_tooltip": "Скопировать название модели",

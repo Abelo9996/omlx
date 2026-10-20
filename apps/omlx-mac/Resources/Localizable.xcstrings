@@ -6703,6 +6703,30 @@
         }
       }
     },
+    "downloads.progress.eta" : {
+      "comment" : "Remaining download time after the progress line. Placeholder: duration such as 2h 30m",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ left"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "осталось %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "剩余 %@"
+          }
+        }
+      }
+    },
     "downloads.recent.subtitle" : {
       "comment" : "Subtitle for Recent Tasks; placeholder is the count of recent terminal tasks",
       "extractionState" : "extracted_with_value",

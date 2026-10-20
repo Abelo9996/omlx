@@ -390,6 +390,7 @@
   "models.browse.mlx_only": "MLX only",
   "models.queue.section_label": "Download Queue",
   "models.queue.downloading": "Downloading...",
+  "models.queue.eta": "{time} left",
   "models.queue.cancel_tooltip": "Cancel download",
   "models.queue.remove_tooltip": "Remove from list",
   "models.queue.copy_model_name_tooltip": "Copy model name",

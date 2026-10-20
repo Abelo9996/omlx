@@ -66,6 +66,12 @@ _REAP_INTERVAL = 0.5
 # Seconds of byte-count history the reported speed averages over.
 _SPEED_WINDOW = 1.0
 
+# Seconds of byte-count history the ETA averages over.
+_ETA_WINDOW = 60.0
+
+# Seconds of transfer before the ETA shows; the slow start reads as hours.
+_ETA_WARMUP = 10.0
+
 
 class _SlidingRate:
     """Mean bytes/second over a sliding window of cumulative byte samples."""
@@ -404,6 +410,8 @@ class DownloadTask:
     downloaded_size: int = 0
     # Bytes/second over the last _SPEED_WINDOW; 0.0 when not transferring.
     speed_bps: float = 0.0
+    # Bytes/second over the last _ETA_WINDOW. Never in to_dict().
+    eta_speed_bps: float = 0.0
     error: str = ""
     # Request-supplied HF/MS token for restart resume. Never in to_dict().
     token: str = ""
@@ -411,6 +419,13 @@ class DownloadTask:
     started_at: float = 0.0
     completed_at: float = 0.0
     retry_count: int = 0
+
+    def eta_seconds(self) -> int | None:
+        """Seconds left at the _ETA_WINDOW rate, or None when unknown."""
+        remaining = self.total_size - self.downloaded_size
+        if self.total_size <= 0 or remaining <= 0 or self.eta_speed_bps <= 0:
+            return None
+        return round(remaining / self.eta_speed_bps)
 
     def to_dict(self) -> dict:
         """Serialize task to a JSON-compatible dict."""
@@ -422,6 +437,7 @@ class DownloadTask:
             "total_size": self.total_size,
             "downloaded_size": self.downloaded_size,
             "speed_bps": round(self.speed_bps, 1),
+            "eta_seconds": self.eta_seconds(),
             "error": self.error,
             "created_at": self.created_at,
             "started_at": self.started_at,
@@ -1848,6 +1864,10 @@ class HFDownloader(_QueuePersistenceMixin):
         speed_meter.add(last_activity.files, now=last_activity_at)
         wire_meter = _WireSpeedMeter()
         wire_meter.add(wire.value, now=last_activity_at)
+        # Rate of the reported bytes, so a disk flush of fetched bytes does not
+        # count twice. Fed from the first moving tick to skip startup idle time.
+        eta_meter = _WireSpeedMeter(window=_ETA_WINDOW)
+        eta_started_at: float | None = None
         last_wire = wire.value
         # A resume fetches only missing bytes, so wire bytes add to this.
         base_logical = last_activity.logical_size - _stale_bytes(
@@ -1881,6 +1901,12 @@ class HFDownloader(_QueuePersistenceMixin):
                 wire_bps = wire_meter.add(wire_now)
                 # Both meters see the same payload, so never sum them.
                 task.speed_bps = max(disk_bps, wire_bps)
+                if eta_started_at is None and task.speed_bps > 0:
+                    eta_started_at = time.monotonic()
+                if eta_started_at is not None:
+                    eta_bps = eta_meter.add(task.downloaded_size)
+                    if time.monotonic() - eta_started_at >= _ETA_WARMUP:
+                        task.eta_speed_bps = eta_bps
 
                 wire_moved = wire_now > last_wire
                 last_wire = wire_now
@@ -1931,6 +1957,7 @@ class HFDownloader(_QueuePersistenceMixin):
             pass
         finally:
             task.speed_bps = 0.0
+            task.eta_speed_bps = 0.0
 
     @staticmethod
     def _get_dir_size(path: Path) -> int:

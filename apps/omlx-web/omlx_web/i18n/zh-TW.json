@@ -390,6 +390,7 @@
   "models.browse.mlx_only": "僅 MLX",
   "models.queue.section_label": "下載佇列",
   "models.queue.downloading": "下載中...",
+  "models.queue.eta": "剩餘 {time}",
   "models.queue.cancel_tooltip": "取消下載",
   "models.queue.remove_tooltip": "從列表移除",
   "models.queue.copy_model_name_tooltip": "複製模型名稱",

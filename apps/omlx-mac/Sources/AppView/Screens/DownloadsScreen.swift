@@ -652,6 +652,13 @@ private struct ActiveDownloadsSection: View {
                                             comment: "Per-row progress line during downloads. Placeholders: percent, bytes downloaded, total bytes"))
                                     .font(.omlxMono(11))
                                     .foregroundStyle(theme.textSecondary)
+                                if let eta = task.etaText {
+                                    Text(String(localized: "downloads.progress.eta",
+                                                defaultValue: "\(eta) left",
+                                                comment: "Remaining download time after the progress line. Placeholder: duration such as 2h 30m"))
+                                        .font(.omlxMono(11))
+                                        .foregroundStyle(theme.textSecondary)
+                                }
                                 Button {
                                     if task.statusEnum == .pending || task.statusEnum == .downloading {
                                         onCancel(task.taskId)
