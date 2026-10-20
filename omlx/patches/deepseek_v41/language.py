@@ -8,6 +8,7 @@ Batch rows are evaluated independently so late admission cannot share history.
 
 import math
 from contextlib import nullcontext
+from functools import cache, lru_cache
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -18,7 +19,7 @@ from omlx.custom_kernels.attention import fast as attention_fast
 from omlx.custom_kernels.quant_matmul import fast as quant_fast
 
 from ..deepseek_v4.switch_layers import _block_config, _build_mxfp4_blocks
-from . import growth
+from . import decode_fused, growth
 from .activation import quantize_paired_swiglu_activation, quantize_swiglu_activation
 from .cache import DeepseekV41Cache
 from .engram import Engram, NgramHash, build_compressed_token_map
@@ -53,51 +54,98 @@ class RMSNorm(nn.Module):
         return norm(x, self.weight, self.eps)
 
 
+def _rope_freqs(d, base, original_seq_len, factor, beta_fast, beta_slow):
+    """DeepSeek-V4.1-Flash-1017 inference/model.py precompute_freqs_cis frequencies, fp32.
+
+    Every elementwise step is the reference's own fp32 operation in the reference's order
+    (exponent i/d, reciprocal, YaRN ramp and blend). The one transcendental, base**e, is
+    taken correctly rounded. The reference evaluates it with CUDA powf, which is not
+    correctly rounded, so its accuracy is unspecified; Metal's pow (upstream oMLX computed
+    the table on the GPU) is within 1 ulp on these exponents, i.e. at most 0.0015 rad of
+    angle at position 200k. The exact value is the closest to the reference formula and the
+    same on every platform; the table is built once per parameter set on the host.
+    """
+    return _rope_freqs_cached(int(d), float(base), int(original_seq_len), float(factor), float(beta_fast), float(beta_slow))
+
+
+@cache
+def _rope_freqs_cached(d, base, original_seq_len, factor, beta_fast, beta_slow):
+    exps = (np.arange(0, d, 2, dtype=np.float32) / np.float32(d)).astype(np.float32)
+    try:
+        import mpmath
+
+        mpmath.mp.prec = 128
+        powers = np.array(
+            [float(mpmath.power(mpmath.mpf(base), mpmath.mpf(float(e)))) for e in exps],
+            np.float64,
+        )
+    except ImportError:  # float64 pow: < 1 ulp(double), so fp32 rounding is correct
+        powers = np.power(np.float64(base), exps.astype(np.float64))
+    freqs = (np.float32(1.0) / powers.astype(np.float32)).astype(np.float32)
+    if original_seq_len > 0:
+        def corrected(rotations):
+            return d * math.log(original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
+
+        low = max(math.floor(corrected(beta_fast)), 0)
+        high = min(math.ceil(corrected(beta_slow)), d - 1)
+        ramp = np.clip(
+            ((np.arange(d // 2, dtype=np.float32) - np.float32(low)) / np.float32(max(high - low, 1e-3))).astype(np.float32),
+            0, 1,
+        ).astype(np.float32)
+        smooth = (np.float32(1) - ramp).astype(np.float32)
+        freqs = (
+            ((freqs / np.float32(factor)).astype(np.float32) * (np.float32(1) - smooth)).astype(np.float32)
+            + (freqs * smooth).astype(np.float32)
+        ).astype(np.float32)
+    return freqs
+
+
+def _rope_positions(positions):
+    if isinstance(positions, range):
+        return positions.start, positions.stop, positions.step
+    values = np.asarray(positions, np.int64).reshape(-1)  # host sync; callers pass ranges
+    if len(values) > 1 and np.all(np.diff(values) == values[1] - values[0]):
+        return int(values[0]), int(values[-1]) + int(values[1] - values[0]), int(values[1] - values[0])
+    return tuple(int(v) for v in values)
+
+
+@lru_cache(maxsize=32)   # a decode step or verify block needs one range per RoPE variant
+def _rope_table(params, key):
+    """cos/sin of the reference's fp32 angles fl32(pos * freq) (torch.outer output is fp32),
+    evaluated in float64 and rounded once to fp32: correctly rounded except when the exact
+    value lies within ~2^-29 relative of an fp32 midpoint. Computed once per position range
+    and shared by every layer of the step."""
+    freqs = _rope_freqs(*params)
+    pos = np.arange(*key) if len(key) == 3 else np.array(key)
+    angles = (pos.astype(np.float32)[:, None] * freqs[None, :]).astype(np.float32).astype(np.float64)
+    return mx.array(np.cos(angles).astype(np.float32)), mx.array(np.sin(angles).astype(np.float32))
+
+
 @mx.compile
-def _rope(x, positions, params, compressed, inverse):
-    d, base, original_seq_len, beta_fast, beta_slow, rope_factor = params
-    freq = 1 / mx.power(base, mx.arange(0, d, 2).astype(mx.float32) / d)
-    if compressed and original_seq_len:
-
-        def correction(rotations):
-            return (
-                d
-                * math.log(original_seq_len / (rotations * 2 * math.pi))
-                / (2 * math.log(base))
-            )
-
-        low = max(math.floor(correction(beta_fast)), 0)
-        high = min(math.ceil(correction(beta_slow)), d - 1)
-        smooth = 1 - mx.clip((mx.arange(d // 2) - low) / max(high - low, 1e-3), 0, 1)
-        freq = freq / rope_factor * (1 - smooth) + freq * smooth
-    angles = positions.astype(mx.float32)[:, None] * freq
-    angles = angles.reshape(1, len(positions), *([1] * (x.ndim - 3)), d // 2)
+def _rope_apply(x, cos, sin, inverse):
+    d = cos.shape[-1] * 2
+    shape = (1, cos.shape[0], *([1] * (x.ndim - 3)), d // 2)
+    cos, sin = cos.reshape(shape), sin.reshape(shape)
     if inverse:
-        angles = -angles
+        sin = -sin  # freqs_cis.conj()
     tail = x[..., -d:].astype(mx.float32).reshape(*x.shape[:-1], d // 2, 2)
     a, b = tail[..., 0], tail[..., 1]
-    rotated = mx.stack(
-        [
-            a * mx.cos(angles) - b * mx.sin(angles),
-            a * mx.sin(angles) + b * mx.cos(angles),
-        ],
-        -1,
-    )
-    return mx.concatenate(
-        [x[..., :-d], rotated.reshape(*x.shape[:-1], d).astype(x.dtype)], -1
-    )
+    # Complex product in fp32 (fusion/FMA of a*c - b*s is unspecified in the reference).
+    rotated = mx.stack([a * cos - b * sin, a * sin + b * cos], -1)
+    return mx.concatenate([x[..., :-d], rotated.reshape(*x.shape[:-1], d).astype(x.dtype)], -1)
 
 
 def rope(x, positions, config, compressed, inverse=False):
     params = (
         config.rope_head_dim,
         config.compress_rope_theta if compressed else config.rope_theta,
-        config.original_seq_len,
+        config.original_seq_len if compressed else 0,
+        config.rope_factor,
         config.beta_fast,
         config.beta_slow,
-        config.rope_factor,
     )
-    return _rope(x, positions, params, compressed, inverse)
+    cos, sin = _rope_table(params, _rope_positions(positions))
+    return _rope_apply(x, cos, sin, inverse)
 
 
 def candidate_block_ids(scores, lengths, count, block):
@@ -199,7 +247,7 @@ class Indexer(nn.Module):
                 )
             )
             if latent is not None:
-                pos = mx.arange(kv_start // ratio, kv_end // ratio) * ratio
+                pos = range(kv_start // ratio * ratio, kv_end // ratio * ratio, ratio)
                 key = pack_activation(
                     rope(self.k_norm(self.wk(latent)), pos, c, True), bits=4
                 )
@@ -207,10 +255,12 @@ class Indexer(nn.Module):
             shared["index_k"] = cache[3] = previous
         key = shared["index_k"]
         q = self.wq_b(qr).reshape(1, x.shape[1], c.index_n_heads, c.index_head_dim)
-        q = quantize_activation(rope(q, mx.arange(start, end), c, True), bits=4)
-        weights = self.weights_proj(x).astype(mx.float32) * (
-            c.index_head_dim**-0.5 * c.index_n_heads**-0.5
-        )
+        q = quantize_activation(rope(q, range(start, end), c, True), bits=4)
+        # Reference: weights_proj(x) * scale is a tensor of the activation dtype (bf16).
+        weights = (
+            self.weights_proj(x)
+            * mx.array(c.index_head_dim**-0.5 * c.index_n_heads**-0.5, mx.float32)
+        ).astype(x.dtype).astype(mx.float32)
         candidates = None
         if 0 <= c.candidate_source_layer < layer:
             blocks = shared["candidates"]
@@ -280,15 +330,16 @@ class Attention(nn.Module):
         c, layer = self._config, self._layer
         ratio, length = c.compress_ratios[layer], x.shape[1]
         positions = mx.arange(start, start + length)
+        rope_positions = range(start, start + length)
         query, kv_input = self._input_projections(x)
         qr = self.q_norm(query)
         q = rope(
             self.wq_b(qr).reshape(1, length, c.n_heads, c.head_dim),
-            positions,
+            rope_positions,
             c,
             bool(ratio),
         )
-        new = pack_activation(rope(self.kv_norm(kv_input), positions, c, bool(ratio)))
+        new = pack_activation(rope(self.kv_norm(kv_input), rope_positions, c, bool(ratio)))
         old = cache[1]
         # CED clears the stale window whenever bounded replay skips tokens.
         old_len = min(start, c.window_size, 0 if old is None else int(old.shape[1]))
@@ -330,8 +381,7 @@ class Attention(nn.Module):
             if latent is not None:
                 compressed = rope(
                     latent,
-                    mx.arange(kv_start // ratio, (kv_start + kv_x.shape[1]) // ratio)
-                    * ratio,
+                    range(kv_start // ratio * ratio, (kv_start + kv_x.shape[1]) // ratio * ratio, ratio),
                     c,
                     True,
                 )
@@ -364,8 +414,11 @@ class Attention(nn.Module):
             out = packed_sparse_attention(
                 q, kv, pooled, idx, ci, self.attn_sink, c.head_dim**-0.5
             )
-        out = rope(out, positions, c, bool(ratio), inverse=True)
-        grouped = out.reshape(1, length, c.o_groups, -1)
+        out = rope(out, rope_positions, c, bool(ratio), inverse=True)
+        # DeepSeek-V4.1-Flash model.py Attention.forward (1017, and the current Flash repo):
+        # "quantize/dequantize o before einsum", act_quant(o, 32, ue8m0, inplace=True) over
+        # each group's values. At df42c109 it fed bf16 o to wo_a directly, as upstream oMLX did.
+        grouped = quantize_activation(out.reshape(1, length, c.o_groups, -1))
         weight = self.wo_a.weight.reshape(c.o_groups, c.o_lora_rank, -1)
         return self.wo_b(mx.einsum("bsgd,grd->bsgr", grouped, weight).flatten(-2))
 
@@ -774,6 +827,22 @@ class Block(nn.Module):
             self.engram = Engram(c, list(c.engram_layer_ids).index(layer))
 
     def __call__(self, h, pre, cache, shared, start, image_mask, ced_tail=None):
+        if (
+            ced_tail is None
+            and image_mask is None
+            and h.shape[0] == 1
+            and h.shape[1] == 1
+            and getattr(cache, "_mtp_verify_state", None) is None
+            and decode_fused.supported(self, self._config)
+        ):
+            return decode_fused.decode_block(self, h, pre, cache, shared, start, self._config)
+        if (
+            shared.get("_verify_rows")
+            and ced_tail is None
+            and image_mask is None
+            and getattr(cache, "_mtp_verify_state", None) is not None
+        ):
+            return decode_fused.decode_block_verify(self, h, pre, cache, shared, start, self._config)
         ced_kv = ced_kv_start = None
         if ced_tail is not None:
             # CED bounded replay: queries, SWA KV and MoE run on the tail
@@ -887,6 +956,92 @@ class LanguageModel(DSparkMixin, nn.Module):
             for i in range(len(self.layers))
         ]
 
+    def _batched_decode_ok(self, input_ids, cache, masks, inputs_embeds, capture, kwargs):
+        """One token for each of 2..MAX_BATCH requests, all at a valid position, through
+        layers the fused decode supports: run the layers once for the whole batch."""
+        b_n = input_ids.shape[0]
+        if not (
+            input_ids.shape[1] == 1
+            and 2 <= b_n <= decode_fused.MAX_BATCH
+            and inputs_embeds is None
+            and not capture
+            and kwargs.get("mtp_verify_states") is None
+            and not kwargs.get("_ced_prefill", False)
+            and all(decode_fused.supported(layer, self._config) for layer in self.layers)
+        ):
+            return False
+        if masks is not None and not bool(np.all(np.asarray(masks))):
+            return False
+        return all(not item.empty() for item in cache)
+
+    def _forward_decode_batched(self, input_ids, cache):
+        """_forward for B single-token requests with the weights read once per step.
+
+        Same per-request semantics as the row loop below (positions, caches, Engram history,
+        cache bookkeeping). decode_fused.decode_block_nb, Engram (each request's row projected
+        on its own) and project_logits give each request its single-request result: bit for
+        bit below decode_moe.MMA_MIN_BATCH requests, and within the fp32 summation rounding of
+        the simdgroup-matrix GEMVs from there on.
+        """
+        c = self._config
+        b_n = input_ids.shape[0]
+        rcs = [[item.extract(row) for item in cache] for row in range(b_n)]
+        starts = []
+        for rc in rcs:
+            start = rc[0].size()
+            if any(item.size() != start for item in rc):
+                raise ValueError("DeepSeek V4.1 cache offsets diverged across layers")
+            starts.append(start)
+        hashes, histories = None, None
+        if self._hasher is not None:
+            per_row = [self._hasher(input_ids[r : r + 1], rcs[r][0][6], None) for r in range(b_n)]
+            hashes = np.concatenate([p[0] for p in per_row], 0)
+            histories = [p[1] for p in per_row]
+        h = self.embed(input_ids)
+        h = mx.repeat(h[..., None, :], c.hc_mult, -2)
+        pre = mx.broadcast_to((mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1])
+        shareds = [{} for _ in range(b_n)]
+        prefetch = getattr(self, "_engram_prefetch", None)
+        with prefetch.forward() if prefetch is not None else nullcontext():
+            if prefetch is not None and c.engram_layer_ids:
+                prefetch.submit(self.layers[c.engram_layer_ids[0]].engram.embed, hashes[:, :, 0])
+            for i, layer in enumerate(self.layers):
+                if "engram" in layer:
+                    ix = list(c.engram_layer_ids).index(i)
+                    if prefetch is not None:
+                        mx.async_eval(h, pre)
+                    h = layer.engram(h, hashes[:, :, ix], None)
+                    if prefetch is not None and ix + 1 < len(c.engram_layer_ids):
+                        prefetch.submit(
+                            self.layers[c.engram_layer_ids[ix + 1]].engram.embed, hashes[:, :, ix + 1]
+                        )
+                h, pre = decode_fused.decode_block_nb(
+                    layer, h, pre, [rcs[r][i] for r in range(b_n)], shareds, starts, c
+                )
+                if prefetch is not None and "engram" in layer:
+                    mx.async_eval(h, pre)
+                for r in range(b_n):
+                    rc = rcs[r]
+                    rc[i][0] = mx.array([starts[r] + 1], mx.int32)
+                    if histories is not None and i == 0:
+                        rc[i][6] = mx.array(histories[r], mx.int64)
+                    for slot in range(1, 7):
+                        if rc[i][slot] is None:
+                            width = c.index_head_dim if slot == 3 else c.head_dim
+                            empty = mx.zeros((1, 0, width), h.dtype)
+                            if slot == 1:
+                                empty = pack_activation(empty)
+                            elif slot == 2:
+                                empty = pack_activation(empty, 4, 16, True)
+                            elif slot == 3:
+                                empty = pack_activation(empty, 4)
+                            rc[i][slot] = mx.zeros((1, 0), mx.int64) if slot == 6 else empty
+        logits = project_logits(self.norm(hc_pre(h, pre)), self.head.weight)
+        for i, item in enumerate(cache):
+            item.adopt_rows([rcs[r][i] for r in range(b_n)])
+            item.advance(1)
+        return logits
+
     def _forward(
         self, input_ids, cache=None, inputs_embeds=None, token_types=None, **kwargs
     ):
@@ -906,6 +1061,8 @@ class LanguageModel(DSparkMixin, nn.Module):
             )
         masks = cache[0].make_mask(input_ids.shape[1])
         capture = bool(kwargs.get("return_dspark_hidden", False))
+        if self._batched_decode_ok(input_ids, cache, masks, inputs_embeds, capture, kwargs):
+            return self._forward_decode_batched(input_ids, cache)
         if capture and input_ids.shape[0] != 1:
             raise ValueError(
                 "DSpark target capture currently requires one unpadded row"
@@ -952,6 +1109,16 @@ class LanguageModel(DSparkMixin, nn.Module):
                 (mx.arange(c.hc_mult) == 0).astype(mx.float32), h.shape[:-1]
             )
             shared = {}
+            # An MTP verify block runs through the fused decode kernels token-exactly
+            # (decode_fused.decode_block_verify: each token gets its single-token decode
+            # result, so speculation cannot change greedy output) when every layer has them.
+            if (
+                verify_states is not None
+                and inputs_embeds is None
+                and 1 <= end - begin <= decode_fused.MAX_BATCH
+                and all(decode_fused.supported(layer, c) for layer in self.layers)
+            ):
+                shared["_verify_rows"] = True
             # Only cache-only scheduler calls may omit decoder logits. A short
             # contiguous suffix retains its existing window rather than
             # pretending that a full replay window was present in this chunk.
@@ -1043,8 +1210,9 @@ class LanguageModel(DSparkMixin, nn.Module):
                 )
             )
         for i, item in enumerate(cache):
-            merged = DeepseekV41Cache.merge(rows[i])
-            item.cache = merged.cache
+            # Rows ran in place on the copies extract() handed out; a batch keeps them as
+            # rows rather than re-concatenating every slot of every layer each step.
+            item.adopt_rows(rows[i])
             item.advance(input_ids.shape[1])
         logits = mx.concatenate(results, 0)
         if capture:
