@@ -72,6 +72,9 @@ MIN_SPLASH_VERSION = (1, 3, 0)
 MIXED_QUANTIZATION_VERSION = (1, 3, 1)
 # Splash reads a per-request thinking_token_budget from 1.3.2 on.
 THINKING_BUDGET_VERSION = (1, 3, 2)
+# Splash loads Model Optimizer and compressed-tensors NVFP4/FP8 from 1.3.2 on.
+NVIDIA_QUANTIZATION_VERSION = (1, 3, 2)
+_NVIDIA_QUANT_METHODS = frozenset({"modelopt", "compressed-tensors"})
 SPLASH_MAX_CONTEXT = 262144
 SPLASH_INSTALL_HINT = (
     "Splash is not installed: brew install incoai/tap/splash (M3 or later), "
@@ -147,6 +150,10 @@ class SplashBinary:
     @property
     def accepts_thinking_budget(self) -> bool:
         return self.version_tuple >= THINKING_BUDGET_VERSION
+
+    @property
+    def loads_nvidia_quantization(self) -> bool:
+        return self.version_tuple >= NVIDIA_QUANTIZATION_VERSION
 
 
 def _version_tuple(version: str) -> tuple[int, int, int] | None:
@@ -310,6 +317,18 @@ def _is_affine_4bit_group64(quant: dict) -> bool:
 def _quantization_problem(config: dict, binary: SplashBinary) -> str:
     quant = config.get("quantization")
     if not isinstance(quant, dict):
+        method = (config.get("quantization_config") or {}).get("quant_method")
+        if binary.loads_nvidia_quantization:
+            # Splash checks the layers' formats itself.
+            if method in _NVIDIA_QUANT_METHODS:
+                return ""
+            return "Splash needs a quantized MLX, NVFP4 or FP8 checkpoint"
+        if method in _NVIDIA_QUANT_METHODS:
+            minimum = ".".join(str(part) for part in NVIDIA_QUANTIZATION_VERSION)
+            return (
+                f"{binary.label} {binary.version} serves MLX checkpoints only; "
+                f"Splash {minimum} also serves NVFP4 and FP8 checkpoints"
+            )
         return "Splash needs a quantized MLX checkpoint"
     # Splash validates the bit widths and modules it accepts itself.
     if binary.loads_mixed_quantization or _is_affine_4bit_group64(quant):

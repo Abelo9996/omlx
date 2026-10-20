@@ -250,6 +250,30 @@ class TestCompatibility:
         launchers("splash", version="1.3.1")
         assert resolve_splash_target(model, None, [str(draft)])[0] is not None
 
+    @pytest.mark.parametrize(
+        "quantization_config",
+        [
+            {"quant_method": "modelopt", "quant_algo": "NVFP4"},
+            {"quant_method": "compressed-tensors", "format": "mixed-precision"},
+        ],
+    )
+    def test_nvfp4_and_fp8_checkpoints_need_splash_1_3_2(
+        self, tmp_path, launchers, quantization_config
+    ):
+        model = _write_model(tmp_path / "Qwen3.8-27B-NVFP4")
+        config = json.loads((model / "config.json").read_text())
+        del config["quantization"]
+        config["quantization_config"] = quantization_config
+        (model / "config.json").write_text(json.dumps(config))
+        draft = _write_draft(tmp_path / "draft")
+
+        launchers("splash", version="1.3.1")
+        _, reason = resolve_splash_target(model, None, [str(draft)])
+        assert "Splash 1.3.2 also serves NVFP4 and FP8" in reason
+        launchers("splash", version="1.3.2")
+        target, reason = resolve_splash_target(model, None, [str(draft)])
+        assert target is not None and reason == ""
+
     def test_missing_files_and_draft_explain_why(self, tmp_path, launchers):
         launchers("splash")
         model = _write_model(tmp_path / "m")
