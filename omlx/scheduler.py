@@ -10485,15 +10485,10 @@ class Scheduler:
                 original_tokens = block_table.num_tokens
                 reconstruct_started = time.perf_counter()
                 with self._phase_timer("prefix_cache_reconstruct"):
-                    if bypass_hot_cache:
-                        reconstructed = self.block_aware_cache.reconstruct_cache(
-                            block_table,
-                            promote_to_hot_cache=False,
-                        )
-                    else:
-                        reconstructed = self.block_aware_cache.reconstruct_cache(
-                            block_table
-                        )
+                    reconstructed = self.block_aware_cache.reconstruct_cache(
+                        block_table,
+                        promote_to_hot_cache=not bypass_hot_cache,
+                    )
                 reconstruct_ms = (time.perf_counter() - reconstruct_started) * 1000.0
                 if block_table.num_tokens < minimum_prefix:
                     reconstructed = None
