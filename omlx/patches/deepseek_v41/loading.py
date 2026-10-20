@@ -146,7 +146,8 @@ def load(
             memory_scope.enter_context(wired_limit(model))
         engram_keys = set()
         for module, spec in format_spec.get("engram_tables", {}).items():
-            if not in_scope(spec["weight_key"]):
+            # Converted tables may live in their own file under another key.
+            if not in_scope(f"{module}.weight"):
                 continue
             for key_field, file_field in (
                 ("weight_key", "weight_file"),

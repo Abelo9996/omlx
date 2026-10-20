@@ -1249,15 +1249,7 @@ import test_deepseek_v41 as t
 from omlx.cluster.planner import PipelineAssignment, install_unequal_pipeline_plan
 
 # Engram layer 3 opens rank 0's stage, which keeps its own n-gram history.
-config = t.tiny(
-    engram_layer_ids=(1, 3),
-    engram_num_embeddings=(72, 204),
-    engram_vocab_size=5,
-    engram_max_ngram_size=4,
-    engram_n_heads=2,
-    engram_head_dim=32,
-    engram_compressed_vocab_size=64,
-)
+config = t.tiny(**t._ENGRAM)
 assert config.pipeline_stage_starts() == (1, 3)
 
 def build():
@@ -1332,6 +1324,17 @@ def test_pipelined_forward_matches_single_process(tmp_path):
         assert '"ok": true' in out
 
 
+_ENGRAM = dict(
+    engram_layer_ids=(1, 3),
+    engram_num_embeddings=(72, 204),
+    engram_vocab_size=5,
+    engram_max_ngram_size=4,
+    engram_n_heads=2,
+    engram_head_dim=32,
+    engram_compressed_vocab_size=64,
+)
+
+
 def test_cluster_stage_loads_only_its_text_weights(tmp_path):
     from mlx.utils import tree_flatten
 
@@ -1340,7 +1343,8 @@ def test_cluster_stage_loads_only_its_text_weights(tmp_path):
     from omlx.patches.deepseek_v41.loading import load
     from omlx.patches.deepseek_v41_mlx_lm import apply_deepseek_v41_mlx_lm_patch
 
-    source, _ = write_checkpoint(tmp_path)
+    # Converted Engram tables live in their own file under unprefixed keys.
+    source, _ = write_checkpoint(tmp_path, **_ENGRAM)
     target = tmp_path / "converted"
     convert(source, target)
     full, _ = load(target)
