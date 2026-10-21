@@ -747,9 +747,8 @@ def _describe_repo_files(files: list[dict], local_dir: Path | None) -> str:
             if row["kind"] == "gguf":
                 split = gguf.SPLIT_RE.match(name)
                 row["group"] = split["prefix"] if split else None
-                row["mmproj"] = projectors.get(
-                    name.rpartition("/")[0]
-                ) or projectors.get("")
+                # Discovery pairs every GGUF with a root projector.
+                row["mmproj"] = projectors.get("")
         elif lower.endswith(".safetensors"):
             row["kind"] = "weights"
         else:

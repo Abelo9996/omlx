@@ -2498,10 +2498,12 @@ class TestGgufDiscovery:
 
         repo = tmp_path / "models" / "ISTA-DASLab" / "Flash-Next-GGUF"
         for index, count in parts:
-            write_gguf(
+            part = write_gguf(
                 repo / "Q2_0" / f"Flash-Next-Q2_0-{index:05d}-of-{count:05d}.gguf",
                 {"general.architecture": "qwen4exp"},
             )
+            # AppleDouble sidecar an exFAT or SMB volume keeps beside each file.
+            (part.parent / f"._{part.name}").write_bytes(b"\0" * 8)
         write_gguf(repo / "MTP" / "draft.gguf", {})
         write_gguf(repo / "other" / "Flash-Next-Q2_0-00001-of-00001.gguf", {})
         write_gguf(repo / "mmproj-BF16.gguf", PROJECTOR_GGUF)
@@ -2509,6 +2511,9 @@ class TestGgufDiscovery:
         models = discover_models(tmp_path / "models", tmp_path / "gguf")
 
         assert set(models) == ({"Flash-Next-Q2_0"} if complete else set())
+        assert [model.model_id for model in gguf.find_models(repo)] == (
+            ["Flash-Next-Q2_0"] if complete else []
+        )
         if complete:
             model = models["Flash-Next-Q2_0"]
             info = gguf.source_info(model.model_path)
@@ -2517,6 +2522,23 @@ class TestGgufDiscovery:
                 f"Q2_0/Flash-Next-Q2_0-{part:05d}-of-00002.gguf" for part in (1, 2)
             ]
             assert info["projectors"] == ["mmproj-BF16.gguf"]
+
+    def test_split_variant_beside_a_checkpoint_stays_in_its_org_folder(
+        self, tmp_path, write_gguf
+    ):
+        org = tmp_path / "models" / "unsloth"
+        for part in (1, 2):
+            write_gguf(
+                org / "UD-Q4_K_XL" / f"Q-UD-Q4_K_XL-{part:05d}-of-00002.gguf",
+                QWEN_GGUF,
+            )
+        (org / "Tiny-4bit").mkdir()
+        (org / "Tiny-4bit" / "config.json").write_text('{"model_type": "llama"}')
+        (org / "Tiny-4bit" / "model.safetensors").write_bytes(b"0" * 1000)
+
+        models = discover_models(tmp_path / "models", tmp_path / "gguf")
+
+        assert sorted(models) == ["Q-UD-Q4_K_XL", "Tiny-4bit"]
 
     def test_gguf_folder_lists_one_model_per_gguf(self, tmp_path, write_gguf):
         models_dir = tmp_path / "models"

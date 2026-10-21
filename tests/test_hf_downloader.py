@@ -1976,6 +1976,7 @@ class TestHFDownloaderRoutes:
             alias = tmp_path / "model-link"
             alias.symlink_to(models_dir, target_is_directory=True)
             discover_models(alias, tmp_path / "base" / "gguf")
+            alias.unlink()
         pool = EnginePool()
         settings = MagicMock()
         settings.get_effective_model_dirs.return_value = [models_dir]
@@ -2005,7 +2006,7 @@ class TestHFDownloaderRoutes:
             assert set(pool._entries) == {"Flash-Next-Q4_K_M"}
             if not cached:
                 downloader.cancel_download_for_dir.assert_awaited_once_with(
-                    alias / folder.relative_to(models_dir) if aliased else folder,
+                    folder,
                     [
                         f"Q2_0/Flash-Next-Q2_0-{part:05d}-of-00002.gguf"
                         for part in (1, 2)
@@ -2014,6 +2015,37 @@ class TestHFDownloaderRoutes:
             await admin_routes.delete_hf_model("Flash-Next-Q4_K_M", is_admin=True)
             assert not repo.exists()
             assert pool._entries == {}
+
+    @pytest.mark.asyncio
+    async def test_gguf_delete_keeps_a_checkpoint_beside_it(self, tmp_path, write_gguf):
+        models_dir = tmp_path / "models"
+        org = models_dir / "unsloth"
+        write_gguf(org / "Q-Q4_K_M.gguf", {"general.architecture": "qwen35"})
+        checkpoint = org / "Tiny-4bit"
+        checkpoint.mkdir()
+        (checkpoint / "config.json").write_text('{"model_type": "llama"}')
+        (checkpoint / "model.safetensors").write_bytes(b"0" * 1000)
+        pool = EnginePool()
+        settings = MagicMock()
+        settings.get_effective_model_dirs.return_value = [models_dir]
+        with (
+            patch(
+                "omlx.engine_pool.get_global_settings",
+                return_value=SimpleNamespace(base_path=tmp_path / "base"),
+            ),
+            patch.multiple(
+                admin_routes,
+                _get_global_settings=lambda: settings,
+                _get_engine_pool=lambda: pool,
+                _get_settings_manager=lambda: None,
+                _hf_downloader=None,
+            ),
+        ):
+            pool.discover_models([str(models_dir)])
+            await admin_routes.delete_hf_model("Q-Q4_K_M", is_admin=True)
+
+        assert [path.name for path in org.iterdir()] == ["Tiny-4bit"]
+        assert (checkpoint / "model.safetensors").exists()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("target_inside_hub", [False, True])

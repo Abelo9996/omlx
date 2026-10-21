@@ -454,7 +454,7 @@ def _check_model(
             len(source.get("parts") or []) > 1
             and binary.version_tuple < SPLIT_GGUF_VERSION
         ):
-            return "Splash serves single-file GGUFs only"
+            return "Split GGUFs need Splash 1.4.0 or later"
     else:
         problem = _quantization_problem(config, binary)
         if problem:

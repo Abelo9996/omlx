@@ -519,7 +519,7 @@ class TestGguf:
         split = models["Qwen3.8-27B-BF16"].model_path
         assert resolve_splash_target(split, None, [str(draft)]) == (
             None,
-            "Splash serves single-file GGUFs only",
+            "Split GGUFs need Splash 1.4.0 or later",
         )
 
         # The tokenizer comes from the GGUF header, chat template included.

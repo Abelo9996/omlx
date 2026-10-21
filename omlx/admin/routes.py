@@ -8136,7 +8136,7 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
         source = Path(info.get("source_path") or "")
         gguf_info = gguf.source_info(info["model_path"]) or {}
         folder = Path(gguf_info.get("directory") or source.parent)
-        parts = gguf_info.get("source_parts") or gguf_info.get("parts") or []
+        parts = gguf_info.get("source_parts") or []
         registered.update((folder / name).resolve() for name in parts)
         models.append(
             {
@@ -8351,9 +8351,7 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
         for model_dir in model_dirs
     ):
         raise HTTPException(status_code=400, detail="Invalid model name")
-    names = (
-        info.get("source_parts") or info.get("parts") or [Path(entry.source_path).name]
-    )
+    names = info.get("source_parts") or [Path(entry.source_path).name]
     parts = [folder / name for name in names]
 
     hf_cache = entry.source_type == "hf_cache"
@@ -8398,7 +8396,11 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
                 is_model_dir = any(
                     folder.resolve() == model_dir.resolve() for model_dir in model_dirs
                 )
-                if not is_model_dir and not any(folder.rglob("*.gguf")):
+                if (
+                    not is_model_dir
+                    and not gguf.holds_checkpoint(folder)
+                    and not any(folder.rglob("*.gguf"))
+                ):
                     shutil.rmtree(folder)
                     parent = folder.parent
                     if (

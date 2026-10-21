@@ -115,7 +115,7 @@ class GgufModel:
     model_id: str
     parts: tuple[Path, ...]
     projectors: tuple[Path, ...]
-    source_folder: Path | None = None
+    source_folder: Path
 
     @property
     def path(self) -> Path:
@@ -169,14 +169,33 @@ def is_split_variant(name: str) -> bool:
     )
 
 
-def _model_ggufs(folder: Path) -> list[Path]:
-    files = _root_ggufs(folder)
-    files.extend(
+def _variant_ggufs(folder: Path) -> list[Path]:
+    try:
+        variants = sorted(path for path in folder.iterdir() if path.is_dir())
+    except OSError:
+        return []
+    return [
         path
-        for path in sorted(folder.glob("*/*.gguf"))
-        if is_split_variant(path.relative_to(folder).as_posix()) and path.is_file()
-    )
-    return files
+        for variant in variants
+        for path in _root_ggufs(variant)
+        if is_split_variant(f"{variant.name}/{path.name}")
+    ]
+
+
+def _model_ggufs(folder: Path) -> list[Path]:
+    return _root_ggufs(folder) + _variant_ggufs(folder)
+
+
+def holds_checkpoint(folder: Path) -> bool:
+    """Whether a subfolder of ``folder`` is a model checkpoint."""
+    try:
+        return any(
+            (path / "config.json").is_file()
+            for path in folder.iterdir()
+            if path.is_dir()
+        )
+    except OSError:
+        return False
 
 
 def find_models(folder: Path) -> list[GgufModel]:
@@ -229,7 +248,10 @@ def is_gguf_folder(folder: Path) -> bool:
             return False
     except OSError:
         return False
-    return any(file_kind(path.name) == "gguf" for path in _model_ggufs(folder))
+    if any(file_kind(path.name) == "gguf" for path in _root_ggufs(folder)):
+        return True
+    # Split variants do not make an organization folder of checkpoints a repo.
+    return bool(_variant_ggufs(folder)) and not holds_checkpoint(folder)
 
 
 # -- header -------------------------------------------------------------------
@@ -451,8 +473,9 @@ def _generation_config(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _folder_name(model: GgufModel) -> str:
-    """Name that changes whenever the model's files change."""
-    digest = hashlib.sha1(f"layout {_FOLDER_LAYOUT}\n".encode())
+    """Name that changes whenever the model's files or source folder change."""
+    # The config records the source folder, so another path to it rebuilds.
+    digest = hashlib.sha1(f"layout {_FOLDER_LAYOUT}\n{model.source_folder}\n".encode())
     for path in (*model.parts, *model.projectors):
         stat = path.stat()
         line = f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\n"
@@ -488,11 +511,10 @@ def prepare_model_folder(model: GgufModel, root: Path) -> Path:
         ],
         "projectors": [path.name for path in model.projectors],
     }
-    if model.source_folder is not None:
-        config["omlx_gguf"]["directory"] = str(model.source_folder)
-        config["omlx_gguf"]["source_parts"] = [
-            part.relative_to(model.source_folder).as_posix() for part in model.parts
-        ]
+    config["omlx_gguf"]["directory"] = str(model.source_folder)
+    config["omlx_gguf"]["source_parts"] = [
+        part.relative_to(model.source_folder).as_posix() for part in model.parts
+    ]
     partial = root / f".{folder.name}.partial"
     shutil.rmtree(partial, ignore_errors=True)
     partial.mkdir(parents=True)
