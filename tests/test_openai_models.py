@@ -11,6 +11,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from omlx.api.anthropic_models import MessagesRequest as AnthropicMessagesRequest
+from omlx.api.audio_models import AudioSpeechRequest
 from omlx.api.openai_models import (
     AssistantMessage,
     ChatCompletionChoice,
@@ -33,6 +35,7 @@ from omlx.api.openai_models import (
     ToolDefinition,
     Usage,
 )
+from omlx.api.responses_models import ResponsesRequest
 
 
 class TestContentPart:
@@ -475,31 +478,6 @@ class TestChatCompletionRequest:
         )
 
         assert req.max_tokens == 4096
-
-    def test_max_tokens_must_be_positive(self):
-        """max_tokens=0/-1 must fail validation, not flow into the engine."""
-        for bad in (0, -1):
-            with pytest.raises(ValidationError):
-                ChatCompletionRequest(
-                    model="gpt-4",
-                    messages=[Message(role="user", content="Hello")],
-                    max_tokens=bad,
-                )
-            with pytest.raises(ValidationError):
-                ChatCompletionRequest.model_validate(
-                    {
-                        "model": "gpt-4",
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_completion_tokens": bad,
-                    }
-                )
-
-    def test_completion_request_max_tokens_must_be_positive(self):
-        """/v1/completions shares the same bound as /v1/chat/completions."""
-        with pytest.raises(ValidationError):
-            CompletionRequest(model="gpt-4", prompt="Hello", max_tokens=0)
-        with pytest.raises(ValidationError):
-            CompletionRequest(model="gpt-4", prompt="Hello", max_tokens=-8)
 
     def test_request_validation_requires_model(self):
         """Test that model is required."""
@@ -986,3 +964,25 @@ class TestStopCoercion:
             stop=["a"],
         )
         assert req.stop == ["a"]
+
+
+_USER_MESSAGES = [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "payload"),
+    [
+        (ChatCompletionRequest, {"messages": _USER_MESSAGES, "max_tokens": 0}),
+        (
+            ChatCompletionRequest,
+            {"messages": _USER_MESSAGES, "max_completion_tokens": -1},
+        ),
+        (CompletionRequest, {"prompt": "hi", "max_tokens": -1}),
+        (AnthropicMessagesRequest, {"messages": _USER_MESSAGES, "max_tokens": 0}),
+        (ResponsesRequest, {"input": "hi", "max_output_tokens": -1}),
+        (AudioSpeechRequest, {"input": "hi", "max_tokens": 0}),
+    ],
+)
+def test_output_token_caps_must_be_positive(model_cls, payload):
+    with pytest.raises(ValidationError):
+        model_cls.model_validate({"model": "m", **payload})
