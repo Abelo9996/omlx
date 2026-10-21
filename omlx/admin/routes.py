@@ -8134,8 +8134,10 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
             continue
         seen_names.add(info["id"])
         source = Path(info.get("source_path") or "")
-        parts = (gguf.source_info(info["model_path"]) or {}).get("parts") or []
-        registered.update(source.parent / name for name in parts)
+        gguf_info = gguf.source_info(info["model_path"]) or {}
+        folder = Path(gguf_info.get("directory") or source.parent)
+        parts = gguf_info.get("source_parts") or gguf_info.get("parts") or []
+        registered.update((folder / name).resolve() for name in parts)
         models.append(
             {
                 "name": info["id"],
@@ -8161,7 +8163,7 @@ async def list_hf_models(is_admin: bool = Depends(require_admin)):
         stranded = [
             path
             for path in folder.rglob("*.gguf")
-            if path not in registered
+            if path.resolve() not in registered
             and not (path.parent == folder and gguf.file_kind(path.name) != "gguf")
         ]
         if stranded and name not in seen_names:
@@ -8343,13 +8345,15 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
     Vision projectors stay while another GGUF in the folder pairs with them.
     """
     info = gguf.source_info(entry.model_path) or {}
-    folder = Path(entry.source_path).parent
+    folder = Path(info.get("directory") or Path(entry.source_path).parent)
     if not any(
         folder.resolve().is_relative_to(model_dir.resolve())
         for model_dir in model_dirs
     ):
         raise HTTPException(status_code=400, detail="Invalid model name")
-    names = info.get("parts") or [Path(entry.source_path).name]
+    names = (
+        info.get("source_parts") or info.get("parts") or [Path(entry.source_path).name]
+    )
     parts = [folder / name for name in names]
 
     hf_cache = entry.source_type == "hf_cache"
@@ -8364,7 +8368,12 @@ async def _delete_gguf_model(entry, model_dirs: list[Path], engine_pool) -> None
         # The folder goes with its last GGUF, and with it every download
         # into it; otherwise only a download of these files stops.
         await _hf_downloader.cancel_download_for_dir(
-            folder, [part.name for part in parts] if remaining else None
+            folder,
+            (
+                [part.relative_to(folder).as_posix() for part in parts]
+                if remaining
+                else None
+            ),
         )
     if entry.model_id in engine_pool.get_loaded_model_ids():
         try:

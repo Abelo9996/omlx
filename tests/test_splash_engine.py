@@ -61,6 +61,18 @@ from omlx.settings import GlobalSettings
 from omlx.utils.proc_memory import list_process_group_pids
 
 QWEN38_TEXT = dict(splash_mod.SPLASH_FAMILIES["Qwen3.8-27B"])
+FLASH_NEXT_TEXT = {
+    "model_type": "qwen4_exp_text",
+    "max_position_embeddings": 262144,
+    "hidden_size": 2560,
+    "num_hidden_layers": 48,
+    "vocab_size": 248320,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 2,
+    "head_dim": 256,
+    "num_experts": 512,
+    "num_experts_per_tok": 10,
+}
 REPO_ID = splash_repo_id("Qwen3.8-27B-4bit")
 MLX_4BIT = {"mode": "affine", "bits": 4, "group_size": 64}
 GIB = 1024**3
@@ -225,6 +237,19 @@ class TestBinary:
 
 
 class TestCompatibility:
+
+    def test_flash_next_mlx_checkpoint_explains_gguf_requirement(
+        self, tmp_path, launchers
+    ):
+        launchers("splash", version="1.4.0")
+        model = _write_model(tmp_path / "Flash-Next-MLX", FLASH_NEXT_TEXT)
+
+        target, reason = resolve_splash_target(model, None, [])
+
+        assert target is None
+        assert "Qwen3.8-Flash-Next needs a GGUF" in reason
+        assert splash_mod.splash_draft_to_download(model, None, []) is None
+
     def test_supported_checkpoint_resolves_with_its_draft(self, tmp_path, launchers):
         launchers("splash")
         model = _write_model(tmp_path / "Qwen3.8-27B-4bit")
@@ -360,6 +385,110 @@ def _qwen38_gguf(vocab: list[str]) -> dict:
 
 
 class TestGguf:
+
+    @pytest.mark.parametrize("layout", ["single", "split", "variant"])
+    def test_flash_next_gguf_discovery_draft_and_engine(
+        self, tmp_path, monkeypatch, launchers, write_gguf, global_settings, layout
+    ):
+        vocab = sorted(pre_tokenizers.ByteLevel.alphabet()) + [
+            "<|im_start|>",
+            "<|im_end|>",
+        ]
+        repo = tmp_path / "models" / "ISTA-DASLab" / "Flash-Next-GGUF"
+        metadata = {
+            key: value
+            for key, value in _qwen38_gguf(vocab).items()
+            if key.startswith("tokenizer.")
+        }
+        metadata.update(
+            {
+                "general.architecture": "qwen4exp",
+                "qwen4exp.block_count": 49,
+                "qwen4exp.nextn_predict_layers": 1,
+                "qwen4exp.context_length": 262144,
+                "qwen4exp.embedding_length": 2560,
+                "qwen4exp.attention.head_count": 24,
+                "qwen4exp.attention.head_count_kv": 2,
+                "qwen4exp.attention.key_length": 256,
+                "qwen4exp.full_attention_interval": 4,
+                "qwen4exp.expert_count": 512,
+                "qwen4exp.expert_used_count": 10,
+            }
+        )
+        name = "Flash-Next-Q2_0"
+        source_folder = repo / "Q2_0" if layout == "variant" else repo
+        first = f"{name}.gguf" if layout == "single" else f"{name}-00001-of-00002.gguf"
+        write_gguf(source_folder / first, metadata)
+        if layout != "single":
+            write_gguf(source_folder / f"{name}-00002-of-00002.gguf", {})
+        models = discover_models(tmp_path / "models", tmp_path / "gguf")
+        model = models[name]
+        text = {**FLASH_NEXT_TEXT, "vocab_size": len(vocab)}
+        folder = Path(model.model_path)
+        config = json.loads((folder / "config.json").read_text())
+        assert config["model_type"] == "qwen4_exp"
+        assert config["text_config"] == {**text, "full_attention_interval": 4}
+        assert model.model_format == "gguf"
+        family = splash_mod.SPLASH_FAMILIES["Qwen3.8-Flash-Next"]
+        monkeypatch.setitem(family, "vocab_size", len(vocab))
+
+        launchers("splash", version="1.3.2")
+        target, reason = resolve_splash_target(folder, None, [])
+        assert target is None
+        assert "Splash 1.4.0 or later" in reason
+        assert splash_mod.splash_draft_to_download(folder, None, []) is None
+
+        launchers("splash", version="1.4.0")
+        wrong_draft = _write_draft(tmp_path / "27B-draft")
+        assert (
+            splash_mod.splash_draft_to_download(folder, None, [str(wrong_draft)])
+            == "incoai/Qwen3.8-Flash-Next-DFlash2"
+        )
+        _, reason = resolve_splash_target(folder, None, [str(wrong_draft)])
+        assert "incoai/Qwen3.8-Flash-Next-DFlash2" in reason
+        draft = _write_draft(
+            tmp_path / "models" / "incoai" / "Qwen3.8-Flash-Next-DFlash2", text
+        )
+        target, reason = resolve_splash_target(
+            folder, None, [str(wrong_draft), str(draft)]
+        )
+        assert reason == ""
+        assert target.family == "Qwen3.8-Flash-Next"
+        assert target.draft_path == draft
+
+        tokenizer = AutoTokenizer.from_pretrained(folder)
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        assert tokenizer.decode(tokenizer.encode(prompt)) == prompt
+        staged = stage_model(folder, "omlx/Flash-Next", tmp_path / "hub")
+        for part in config["omlx_gguf"]["parts"]:
+            assert (staged / part).resolve() == (
+                source_folder / Path(part).name
+            ).resolve()
+
+        pool = EnginePool()
+        pool.discover_models([str(tmp_path / "models")])
+        assert pool._entries[draft.name].is_helper
+        engine = pool._external_engine_for(
+            pool._entries[name], ModelSettings(), model.engine_type
+        )
+        assert isinstance(engine, SplashEngine)
+        assert engine._target.draft_path == draft
+        command = engine._serve_command(9000)
+        model_arg = command[command.index("--model") + 1]
+        assert model_arg == engine._repo_id + (":split" if layout != "single" else "")
+        if layout != "single":
+            assert command[command.index("--served-model-name") + 1] == engine._repo_id
+        assert "--offline" in command
+        assert "--language-only" in command
+        assert command[command.index("--draft-model") + 1] == str(draft.resolve())
+        assert engine._options.max_memory_bytes == splash_memory_estimate(
+            folder, draft, 262144, "int8"
+        )
+
     def test_qwen_gguf_serves_on_splash_with_a_derived_tokenizer(
         self, tmp_path, monkeypatch, launchers, write_gguf
     ):

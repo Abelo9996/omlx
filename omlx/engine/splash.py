@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Splash engine: serve a model through a Splash server process.
 
-Splash (https://github.com/incoai/splash) runs Qwen3.8-27B and
-Qwen3.6-35B-A3B on its own Metal engine with DFlash2 speculative decoding.
+Splash (https://github.com/incoai/splash) runs Qwen3.8-27B,
+Qwen3.6-35B-A3B and Qwen3.8-Flash-Next on its own Metal engine with DFlash2
+speculative decoding.
 It is a separate program, so this engine does not load weights in-process.
 ``start()`` stages the oMLX model folder as an entry of a private Hugging Face
 cache, launches ``splash serve --offline`` for it on a loopback port and
@@ -41,6 +42,7 @@ from transformers import AutoTokenizer
 
 from ..api.utils import _consolidate_system_messages
 from ..exceptions import InvalidRequestError
+from ..gguf import SPLIT_VARIANT
 from ..utils.hardware import get_chip_name, parse_chip_info
 from ..utils.proc_memory import get_phys_footprint, list_process_group_pids
 from .base import BaseEngine, GenerationOutput
@@ -75,6 +77,8 @@ MIXED_QUANTIZATION_VERSION = (1, 3, 1)
 THINKING_BUDGET_VERSION = (1, 3, 2)
 # Splash loads Model Optimizer and compressed-tensors NVFP4/FP8 from 1.3.2 on.
 NVIDIA_QUANTIZATION_VERSION = (1, 3, 2)
+FLASH_NEXT_VERSION = (1, 4, 0)
+SPLIT_GGUF_VERSION = (1, 4, 0)
 _MODELOPT_ALGOS = frozenset({"NVFP4", "W4A16_NVFP4", "FP8"})
 _COMPRESSED_TENSORS_FORMATS = frozenset({"nvfp4-pack-quantized", "float-quantized"})
 SPLASH_MAX_CONTEXT = 262144
@@ -114,6 +118,18 @@ SPLASH_FAMILIES: dict[str, dict[str, Any]] = {
         "num_experts": 256,
         "num_experts_per_tok": 8,
     },
+    "Qwen3.8-Flash-Next": {
+        "model_type": "qwen4_exp_text",
+        "max_position_embeddings": 262144,
+        "hidden_size": 2560,
+        "num_hidden_layers": 48,
+        "vocab_size": 248320,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+    },
 }
 _REQUIRED_MODEL_FILES = ("config.json", "tokenizer.json", "tokenizer_config.json")
 _SHARD_INDEX = "model.safetensors.index.json"
@@ -125,6 +141,7 @@ _SPLASH_IMAGE_NORM = [0.5, 0.5, 0.5]
 SPLASH_DRAFT_REPOS = {
     "Qwen3.8-27B": "incoai/Qwen3.8-27B-DFlash2",
     "Qwen3.6-35B-A3B": "incoai/Qwen3.6-35B-A3B-DFlash2",
+    "Qwen3.8-Flash-Next": "incoai/Qwen3.8-Flash-Next-DFlash2",
 }
 
 # Splash quantizes the BF16 DFlash2 draft to 4 bits when it loads it.
@@ -426,9 +443,17 @@ def _check_model(
     if family is None:
         return f"Splash serves {' and '.join(SPLASH_FAMILIES)} only"
     source = _gguf_source(config)
+    if family == "Qwen3.8-Flash-Next":
+        if binary.version_tuple < FLASH_NEXT_VERSION:
+            return "Qwen3.8-Flash-Next needs Splash 1.4.0 or later"
+        if source is None:
+            return "Qwen3.8-Flash-Next needs a GGUF; Splash cannot load its MLX checkpoints"
     if source is not None:
         # Splash checks a GGUF's tensor types itself when it loads the file.
-        if len(source.get("parts") or []) > 1:
+        if (
+            len(source.get("parts") or []) > 1
+            and binary.version_tuple < SPLIT_GGUF_VERSION
+        ):
             return "Splash serves single-file GGUFs only"
     else:
         problem = _quantization_problem(config, binary)
@@ -1100,11 +1125,15 @@ class SplashEngine(BaseEngine):
 
     def _serve_command(self, port: int) -> list[str]:
         options = self._options
+        model = self._repo_id
+        source = _gguf_source(_read_config(self._path) or {}) or {}
+        if len(source.get("parts") or []) > 1:
+            model += f":{SPLIT_VARIANT}"
         command = [
             str(self._target.binary.path),
             "serve",
             "--model",
-            self._repo_id,
+            model,
             "--offline",
             "--draft-model",
             str(self._target.draft_path.resolve()),
@@ -1120,6 +1149,8 @@ class SplashEngine(BaseEngine):
             "--kv-format",
             options.kv_format,
         ]
+        if model != self._repo_id:
+            command += ["--served-model-name", self._repo_id]
         if not self._vision:
             # Text-only checkpoint: skip Splash's vision preparation.
             command.append("--language-only")

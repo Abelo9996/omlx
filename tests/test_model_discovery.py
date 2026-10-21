@@ -2481,6 +2481,43 @@ PROJECTOR_GGUF = {
 
 
 class TestGgufDiscovery:
+
+    @pytest.mark.parametrize(
+        "parts, complete",
+        [
+            ([(1, 2), (2, 2)], True),
+            ([(1, 2)], False),
+            ([(1, 2), (3, 2)], False),
+            ([(1, 2), (2, 3)], False),
+        ],
+    )
+    def test_split_variant_requires_every_part(
+        self, tmp_path, write_gguf, parts, complete
+    ):
+        from omlx import gguf
+
+        repo = tmp_path / "models" / "ISTA-DASLab" / "Flash-Next-GGUF"
+        for index, count in parts:
+            write_gguf(
+                repo / "Q2_0" / f"Flash-Next-Q2_0-{index:05d}-of-{count:05d}.gguf",
+                {"general.architecture": "qwen4exp"},
+            )
+        write_gguf(repo / "MTP" / "draft.gguf", {})
+        write_gguf(repo / "other" / "Flash-Next-Q2_0-00001-of-00001.gguf", {})
+        write_gguf(repo / "mmproj-BF16.gguf", PROJECTOR_GGUF)
+
+        models = discover_models(tmp_path / "models", tmp_path / "gguf")
+
+        assert set(models) == ({"Flash-Next-Q2_0"} if complete else set())
+        if complete:
+            model = models["Flash-Next-Q2_0"]
+            info = gguf.source_info(model.model_path)
+            assert info["directory"] == str(repo)
+            assert info["source_parts"] == [
+                f"Q2_0/Flash-Next-Q2_0-{part:05d}-of-00002.gguf" for part in (1, 2)
+            ]
+            assert info["projectors"] == ["mmproj-BF16.gguf"]
+
     def test_gguf_folder_lists_one_model_per_gguf(self, tmp_path, write_gguf):
         models_dir = tmp_path / "models"
         repo = models_dir / "unsloth" / "Q-GGUF"
