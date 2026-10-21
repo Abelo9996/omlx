@@ -945,6 +945,13 @@
                                 </div>
                             </template>
                         </div>
+                        <div x-show="planWarnings().length" x-cloak
+                             class="mt-3 space-y-1 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                             role="status" data-cluster-v2-plan-warnings>
+                            <template x-for="warning in planWarnings()" :key="warning">
+                                <p x-text="warning"></p>
+                            </template>
+                        </div>
                         <div class="mt-4 flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3">
                             <!-- Auto-staging: live per-node copy progress while
                                  phase 1 of activation stages the model onto the
