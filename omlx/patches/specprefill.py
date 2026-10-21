@@ -996,6 +996,8 @@ def sparse_prefill(
         cache: list of KVCache from make_prompt_cache()
         step_size: chunk size for processing
         position_offset: added to positions for RoPE (e.g. system prompt cache)
+        kickoff_index: token index that BatchGenerator processes later; the
+            sliding-window tail merge leaves it out
 
     Returns:
         logits from the last selected token
@@ -1021,10 +1023,6 @@ def sparse_prefill(
         tail_start = max(0, M - max_rotating_size)
         tail_indices = set(range(tail_start, M))
         if kickoff_index is not None:
-            # The generation-kickoff token's KV is written separately by
-            # BatchGenerator insert; re-adding it through the tail merge
-            # double-processed the final token (duplicate KV entry, double
-            # attention weight) on sliding-window models.
             tail_indices.discard(kickoff_index)
         existing = set(selected_indices.tolist())
         merged = sorted(existing | tail_indices)

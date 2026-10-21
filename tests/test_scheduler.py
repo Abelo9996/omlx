@@ -1640,12 +1640,7 @@ class TestSchedulerAbortRequest:
     def test_specprefill_deferred_while_plain_request_decoding(
         self, mock_model, mock_tokenizer
     ):
-        """A specprefill admission must not land beside live decode rows.
-
-        Its target sparse prefill installs _OffsetAdjustedRoPE on the
-        shared model, and the adjustment applies to every row of the batch;
-        the old guard only checked this step's freshly scheduled list.
-        """
+        """The model-wide offset RoPE must not reach live decode rows."""
         scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
         plain = Request(
             request_id="plain",
