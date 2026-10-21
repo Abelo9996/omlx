@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Rank zero's Lightning MTP decisions, replayed by every other rank.
 
-Only rank zero holds the MTP head, so only its drafts and samples count. A
-verify cycle still runs the target forward on every rank, so the other ranks
-need rank zero's choices at two points: the tokens the verify forward reads,
-and how many of them were accepted. A token sampled outside a cycle (MTP
-activation, a handoff back to the standard step) travels the same way. All of
-it goes over the rank-control channel, which keeps it in the same strict order
-as request sharing.
-
-Drafting and acceptance draw from rank zero's RNG only. Each message therefore
-carries a seed from rank zero that every rank applies once rank zero has built
-its last random draw, so a standard step that follows samples the same token
-on every rank again.
+Only rank zero holds the head and samples. The other ranks receive its verify
+tokens, accepted counts and sampled tokens over the rank-control channel, in
+the same order as request sharing. Each message carries a seed every rank
+applies, because drafting draws from rank zero's RNG alone.
 """
 
 from __future__ import annotations

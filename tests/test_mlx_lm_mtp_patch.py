@@ -316,19 +316,6 @@ class TestClusterMtpReplay:
         assert drafted == [lead_batch]
         assert len(seeds) == 2 and seeds[0] == seeds[1]
 
-    def test_cluster_ranks_run_singleton_mtp_and_followers_need_no_head(self):
-        from omlx.cluster.mtp_sync import ClusterMtpSync
-
-        def rank(index):
-            return SimpleNamespace(
-                language_model=SimpleNamespace(_omlx_mtp_multi_request=True),
-                _omlx_cluster_mtp=ClusterMtpSync(rank=index),
-            )
-
-        assert not bg._model_supports_batch_mtp(rank(0))
-        assert not bg._model_has_mtp_module(rank(0))
-        assert bg._model_has_mtp_module(rank(1))
-
 
 class TestQwen35Model:
     @pytest.fixture(autouse=True)

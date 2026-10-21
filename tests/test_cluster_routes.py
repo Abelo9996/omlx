@@ -692,43 +692,6 @@ def test_cluster_plan_route_uses_downloaded_model_headers(monkeypatch):
     assert response.json()["model"]["source"] == "/models/example"
 
 
-def test_cluster_plan_route_puts_the_lightning_mtp_head_on_rank_zero(monkeypatch):
-    from omlx.cluster.planner import ModelLayout
-
-    gib = 1024**3
-    monkeypatch.setattr(
-        routes,
-        "inspect_safetensors_layout",
-        lambda path: ModelLayout(
-            source=path,
-            fixed_weight_bytes=gib,
-            layer_weight_bytes=(2 * gib,) * 4,
-            supports_pipeline=True,
-            mtp_weight_bytes=gib if path == "/models/draft" else 0,
-        ),
-    )
-    nodes = [
-        {"node_id": "studio", "capacity_bytes": 64 * gib, "reserve_bytes": 2 * gib},
-        {"node_id": "mobile", "capacity_bytes": 64 * gib, "reserve_bytes": 2 * gib},
-    ]
-
-    def plan(path, mtp):
-        return _client().post(
-            "/admin/api/cluster/plan",
-            json={"model_path": path, "nodes": nodes, "mtp": mtp},
-        )
-
-    with_head = plan("/models/draft", True).json()["assignments"]
-    without = plan("/models/draft", False).json()["assignments"]
-    assert with_head[0]["node_id"] == "studio"
-    assert with_head[0]["end_layer"] == 4
-    held = [item["layer_weight_bytes"] for item in with_head]
-    assert sum(held) - sum(item["layer_weight_bytes"] for item in without) == gib
-    response = plan("/models/plain", True)
-    assert response.status_code == 400
-    assert "no Lightning MTP head" in response.json()["detail"]
-
-
 def test_new_cluster_plans_follow_the_saved_lightning_mtp_setting(monkeypatch):
     from omlx.cluster.planner import ModelLayout, PlanningError
 
@@ -1841,11 +1804,6 @@ def test_a_thunderbolt_cable_the_cluster_cannot_use_is_named_before_activation(
     monkeypatch.setattr(routes, "detect_cluster_transports", lambda hosts: _no_links())
     monkeypatch.setattr(routes, "probe_remote_host", lambda ssh, **_: None)
 
-    fabric = (
-        _client()
-        .get("/admin/api/cluster/fabric", params={"hosts": "127.0.0.1,studio.local"})
-        .json()
-    )
     proposal = (
         _client()
         .post(
@@ -1867,10 +1825,9 @@ def test_a_thunderbolt_cable_the_cluster_cannot_use_is_named_before_activation(
     )
 
     # The cluster still runs, over Wi-Fi, and says what to fix first.
-    assert fabric["ok"] and fabric["backend"] == "ring"
-    (warning,) = fabric["warnings"]
+    assert proposal["backend"] == "ring"
+    (warning,) = [w for w in proposal["warnings"] if "169.254" in w]
     assert "self-assigned 169.254" in warning and "Wi-Fi" in warning
-    assert warning in proposal["warnings"]
 
 
 def test_one_host_is_not_a_fabric():

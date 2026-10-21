@@ -160,13 +160,9 @@ def _keep_rank_gpu_warm(
 ):
     """Keep this rank's GPU out of its idle power state while it serves.
 
-    Apple silicon parks an idle GPU after about a second, and the first
-    command buffer afterwards stalls for seconds on a large resident model.
-    A pipeline stage idles while its peers compute, so active generation does
-    not keep it busy: each stall leaves the next stage idle long enough to
-    park, and decode settles at seconds per token. A trivial kernel on a
-    private stream keeps every stage awake, during requests and for the
-    engine pool's idle window after the last one.
+    An idle GPU parks after about a second and then stalls the next command
+    buffer for seconds. A pipeline stage idles while its peers compute, so the
+    stalls chain across stages and decode drops to seconds per token.
     """
 
     stop = threading.Event()
@@ -374,11 +370,8 @@ def _thinking_budget_token_to_piece(
 def _sample_with_stated_parameters(mlx_server: Any):
     """Build request samplers that state their temperature and filters.
 
-    Lightning MTP accepts drafts against the distribution a request samples
-    from, and reads it off the sampler. MLX-LM's samplers carry no such
-    attributes and read as greedy, so a sampled request would decode greedily
-    whenever MTP verifies. oMLX's sampler draws the same way and carries them,
-    as on a single Mac.
+    Lightning MTP reads them off the sampler to accept drafts. MLX-LM's samplers
+    carry none and read as greedy; oMLX's draw the same way and carry them.
     """
     from omlx.utils.sampling import make_sampler
 

@@ -893,8 +893,6 @@ def _create_cluster_plan(request: ClusterPlanRequest):
         request.path_map,
         tuple(node.node_id.strip() for node in request.nodes),
     )
-    # Lightning MTP: a pipeline split carries the head with the last layer; a
-    # TP group charges it to rank zero alone.
     pipeline_model = with_mtp_head(model) if request.mtp else model
     head_bytes = model.mtp_weight_bytes if request.mtp else 0
     defaults = execution_profile(request.execution_profile)

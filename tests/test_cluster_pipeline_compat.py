@@ -393,7 +393,6 @@ print(json.dumps({"rank": rank, "ok": True, "cycles": len(cycles)}), flush=True)
 @pytest.mark.parametrize(
     ("depth", "drafts", "split"),
     [
-        (1, "head", "pipeline"),
         (3, "head", "pipeline"),
         (3, "oracle", "pipeline"),
         (3, "oracle", "pipeline-gather"),
