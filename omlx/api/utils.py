@@ -433,19 +433,6 @@ def _apply_mid_system_probe_template(
     return str(rendered)
 
 
-def _declared_mid_system_support(tokenizer: Any | None) -> bool | None:
-    """Return the tokenizer's declared mid-system capability, or None.
-
-    An external engine that renders later system messages itself (Splash)
-    declares True even when the local template would reject them (#4697).
-    """
-    declared = getattr(tokenizer, "_omlx_supports_mid_system_messages", None)
-    if declared is None:
-        template = getattr(tokenizer, "_chat_template", None)
-        declared = getattr(template, "supports_mid_system_messages", None)
-    return declared if isinstance(declared, bool) else None
-
-
 def chat_template_preserves_mid_system(
     tokenizer: Any | None,
     *,
@@ -468,7 +455,11 @@ def chat_template_preserves_mid_system(
     if preceding_role not in {"user", "tool"}:
         return False
 
-    if _declared_mid_system_support(tokenizer) is False:
+    explicit_capability = getattr(tokenizer, "_omlx_supports_mid_system_messages", None)
+    if explicit_capability is None:
+        template = getattr(tokenizer, "_chat_template", None)
+        explicit_capability = getattr(template, "supports_mid_system_messages", None)
+    if explicit_capability is False:
         return False
 
     has_tools = bool(tools)
@@ -843,9 +834,8 @@ def prepare_system_messages_for_template(
                 relocated = None
             if relocated is not None:
                 messages = [dict(msg) for msg in relocated]
-        if _declared_mid_system_support(tokenizer) is True:
-            # The engine renders later system messages in place itself, so
-            # neither the local template probe nor the placement rules apply.
+        # The engine renders later system messages in place wherever they are.
+        if getattr(tokenizer, "_omlx_supports_mid_system_messages", None) is True:
             return _merge_consecutive_system_messages(messages)
 
     placements = _mid_system_placement_kinds(messages)

@@ -39,7 +39,7 @@ from typing import Any
 import httpx
 from transformers import AutoTokenizer
 
-from ..api.utils import _consolidate_system_messages, has_nonleading_system_message
+from ..api.utils import _consolidate_system_messages
 from ..exceptions import InvalidRequestError
 from ..utils.hardware import get_chip_name, parse_chip_info
 from ..utils.proc_memory import get_phys_footprint, list_process_group_pids
@@ -946,7 +946,6 @@ class SplashEngine(BaseEngine):
         self._tokenizer: Any = None
         self._model_type: str | None = None
         self._status: dict[str, Any] | None = None
-        self._unknown_later_system: set[str] = set()
         self._status_task: asyncio.Task | None = None
         self._status_refresh: asyncio.Task | None = None
         self._vision = splash_has_vision(_read_config(self._path) or {})
@@ -1115,46 +1114,15 @@ class SplashEngine(BaseEngine):
         except Exception:
             logger.debug("Splash: failed to fetch /status", exc_info=True)
             return
-        if isinstance(data, dict):
-            self._status = data
-            self._apply_later_system_capability(data)
-
-    def _apply_later_system_capability(self, status: dict[str, Any]) -> None:
-        """Tell request preparation whether Splash renders later system messages.
-
-        Splash renders a later system message in place when its chat template
-        allows it (natively or after its own patch), so oMLX must not fold it
-        into the leading system block (#4697). An unsupported template makes
-        Splash reject the request, so oMLX keeps folding.
-        """
-        if self._tokenizer is None:
+        if not isinstance(data, dict):
             return
-        chat_template = status.get("chat_template")
-        later_system = (
-            chat_template.get("later_system")
-            if isinstance(chat_template, dict)
-            else None
-        )
-        supported = None
-        if isinstance(later_system, str):
-            supported = _LATER_SYSTEM_SUPPORT.get(later_system)
-        # repr() because a malformed status can carry an unhashable value.
-        unknown = repr(later_system)
-        if (
-            later_system is not None
-            and supported is None
-            and unknown not in self._unknown_later_system
-        ):
-            self._unknown_later_system.add(unknown)
-            logger.warning(
-                "Splash: unknown chat_template.later_system %r for %s; "
-                "later system messages are folded into the first one",
-                later_system,
-                self.model_name,
+        self._status = data
+        later = (data.get("chat_template") or {}).get("later_system")
+        if self._tokenizer is not None:
+            # Named templates report a dict, which leaves the local probe in charge.
+            self._tokenizer._omlx_supports_mid_system_messages = (
+                _LATER_SYSTEM_SUPPORT.get(later) if isinstance(later, str) else None
             )
-        # None leaves the decision to the local template probe, the behaviour
-        # before this field existed.
-        self._tokenizer._omlx_supports_mid_system_messages = supported
 
     async def _poll_status(self) -> None:
         while True:
@@ -1383,10 +1351,12 @@ class SplashEngine(BaseEngine):
     async def chat(self, messages: list[dict[str, Any]], **kwargs) -> GenerationOutput:
         return await self._collect(self.stream_chat(messages, **kwargs))
 
-    def _template_token_count(
-        self, messages, tools, chat_template_kwargs
-    ) -> int | None:
-        """Token count of the rendered prompt, or None if the template fails."""
+    def count_chat_tokens(
+        self, messages, tools=None, chat_template_kwargs=None, is_partial=None
+    ) -> int:
+        # The local template can reject a later system message that Splash
+        # renders in place; the folded form has the same text.
+        messages = _consolidate_system_messages(messages)
         template = dict(chat_template_kwargs or {})
         attempts = (
             template,
@@ -1405,26 +1375,6 @@ class SplashEngine(BaseEngine):
                 return len(ids["input_ids"] if hasattr(ids, "keys") else ids)
             except Exception:  # an effort value this template rejects
                 logger.debug("Splash: chat template token count failed", exc_info=True)
-        return None
-
-    def count_chat_tokens(
-        self, messages, tools=None, chat_template_kwargs=None, is_partial=None
-    ) -> int:
-        count = self._template_token_count(messages, tools, chat_template_kwargs)
-        if count is None and has_nonleading_system_message(messages):
-            # Splash renders a later system message in place even when this
-            # local copy of the template rejects it (#4697). Folding it into
-            # the leading block counts the same text plus its wrapper tokens.
-            count = self._template_token_count(
-                _consolidate_system_messages(messages), tools, chat_template_kwargs
-            )
-        if count is not None:
-            return count
-        logger.warning(
-            "Splash: chat template token count failed for %s; "
-            "counting message text only",
-            self.model_name,
-        )
         # Count the text only: an image's base64 payload is not prompt text.
         return sum(
             len(self._tokenizer.encode(_text_of(m.get("content")))) for m in messages
