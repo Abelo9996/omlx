@@ -811,11 +811,11 @@ def manual_rope(x, positions, dims, base=10000.0, scale=1.0):
         positions: (L,) position indices
         dims: number of dimensions to rotate
         base: RoPE base frequency
-        scale: position scale divisor
+        scale: position multiplier, as in mx.fast.rope
     """
     half = dims // 2
     inv_freq = 1.0 / (base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims))
-    scaled_pos = positions.astype(mx.float32) / scale
+    scaled_pos = positions.astype(mx.float32) * scale
     angles = scaled_pos[:, None] * inv_freq[None, :]
     cos_a = mx.cos(angles)[None, None, :, :]
     sin_a = mx.sin(angles)[None, None, :, :]

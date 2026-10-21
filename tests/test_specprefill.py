@@ -141,6 +141,15 @@ class TestManualRoPE:
         result = manual_rope(x, positions, dims=head_dim)
         assert result.shape == x.shape
 
+    def test_scale_multiplies_positions_like_fast_rope(self):
+        from omlx.patches.specprefill import manual_rope
+
+        # Linear RoPE scaling, e.g. Gemma 3 global layers.
+        x = mx.random.normal((1, 4, 8, 64))
+        ref = mx.fast.rope(x, 64, traditional=False, base=1e6, scale=0.125, offset=1000)
+        out = manual_rope(x, mx.arange(1000, 1008), dims=64, base=1e6, scale=0.125)
+        assert mx.allclose(out, ref, atol=1e-4)
+
     def test_non_contiguous_positions(self):
         from omlx.patches.specprefill import manual_rope
 
